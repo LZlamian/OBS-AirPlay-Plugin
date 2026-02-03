@@ -1,0 +1,7 @@
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/obs-airplay.dir
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/edit_cache.dir
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/rebuild_cache.dir
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/list_install_components.dir
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/install.dir
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/install/local.dir
+/Users/ito/Downloads/obs-airplay-plugin/build/CMakeFiles/install/strip.dir
