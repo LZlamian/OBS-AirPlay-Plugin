@@ -79,6 +79,10 @@ Generated files:
 - `dist/obs-airplay-v<version>-macos-<arch>.zip`
 - `dist/obs-airplay-v<version>-macos-<arch>.pkg`
 
+The `.pkg` installer copies the plugin into the active user's:
+
+- `~/Library/Application Support/obs-studio/plugins/obs-airplay.plugin`
+
 ### Any-Mac Distribution (Apple Silicon + Intel)
 
 Build one artifact per architecture, then distribute both:
