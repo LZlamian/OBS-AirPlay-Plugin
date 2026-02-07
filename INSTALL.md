@@ -65,6 +65,39 @@ cp -r obs-airplay.plugin "$HOME/Library/Application Support/obs-studio/plugins/"
 
 Close OBS completely and restart it.
 
+## Build Release Artifacts (zip + pkg)
+
+To create distributable macOS artifacts:
+
+```bash
+chmod +x scripts/package-macos.sh
+./scripts/package-macos.sh
+```
+
+Generated files:
+
+- `dist/obs-airplay-v<version>-macos-<arch>.zip`
+- `dist/obs-airplay-v<version>-macos-<arch>.pkg`
+
+### Any-Mac Distribution (Apple Silicon + Intel)
+
+Build one artifact per architecture, then distribute both:
+
+```bash
+# On Apple Silicon host
+ARCH_OVERRIDE=arm64 bash scripts/package-macos.sh
+
+# On Intel host (or x86_64 environment with x86_64 OBS/deps)
+ARCH_OVERRIDE=x86_64 bash scripts/package-macos.sh
+```
+
+This creates:
+
+- `dist/obs-airplay-v<version>-macos-arm64.pkg`
+- `dist/obs-airplay-v<version>-macos-x86_64.pkg`
+
+Note: `scripts/package-macos.sh` now validates dependency architecture early and fails with a clear message if the requested arch is unavailable locally.
+
 ## Verify Installation
 
 ### 1. Check Plugin Loaded

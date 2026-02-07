@@ -22,9 +22,15 @@ bool RTPHandler::parsePacket(const uint8_t* data, size_t len, RTPPacket& packet)
     // Parse fixed header
     packet.header.flags = data[0];
     packet.header.m_pt = data[1];
-    packet.header.seq = ntohs(*(uint16_t*)(data + 2));
-    packet.header.timestamp = ntohl(*(uint32_t*)(data + 4));
-    packet.header.ssrc = ntohl(*(uint32_t*)(data + 8));
+    uint16_t seq_net = 0;
+    uint32_t ts_net = 0;
+    uint32_t ssrc_net = 0;
+    memcpy(&seq_net, data + 2, sizeof(seq_net));
+    memcpy(&ts_net, data + 4, sizeof(ts_net));
+    memcpy(&ssrc_net, data + 8, sizeof(ssrc_net));
+    packet.header.seq = ntohs(seq_net);
+    packet.header.timestamp = ntohl(ts_net);
+    packet.header.ssrc = ntohl(ssrc_net);
     
     // Check RTP version (should be 2)
     uint8_t version = (packet.header.flags >> 6) & 0x03;
@@ -45,7 +51,9 @@ bool RTPHandler::parsePacket(const uint8_t* data, size_t len, RTPPacket& packet)
         if (len < header_len + 4) {
             return false;
         }
-        uint16_t ext_len = ntohs(*(uint16_t*)(data + header_len + 2));
+        uint16_t ext_len_net = 0;
+        memcpy(&ext_len_net, data + header_len + 2, sizeof(ext_len_net));
+        uint16_t ext_len = ntohs(ext_len_net);
         header_len += 4 + (ext_len * 4);
     }
     

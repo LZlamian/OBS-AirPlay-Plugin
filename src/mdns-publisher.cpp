@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <random>
 #include <cstring>
+#include <cctype>
 
 #ifdef __APPLE__
 #include <dns_sd.h>
@@ -22,6 +23,21 @@ MDNSPublisher::MDNSPublisher()
 MDNSPublisher::~MDNSPublisher()
 {
     stop();
+}
+
+static std::string make_raop_service_id(const std::string& mac_address)
+{
+    std::string normalized;
+    normalized.reserve(12);
+
+    for (char ch : mac_address) {
+        if (ch == ':') {
+            continue;
+        }
+        normalized.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+
+    return normalized;
 }
 
 std::string MDNSPublisher::generateDeviceID()
@@ -73,6 +89,14 @@ std::vector<std::string> MDNSPublisher::createAirPlayTxtRecord()
     txt_records.push_back("psi=00000000-0000-0000-0000-000000000000");
     txt_records.push_back("gid=00000000-0000-0000-0000-000000000000");
     
+    // Add additional critical AirPlay fields
+    std::string pk_val = m_pk.empty() ? device_id : m_pk;
+    txt_records.push_back("pk=" + pk_val);     // Public key identifier
+    txt_records.push_back("sf=0x4");           // Source features
+    txt_records.push_back("rhd=1.0");          // Remote HD version
+    txt_records.push_back("pi=" + device_id); // Pairing identifier
+    txt_records.push_back("c#features=" + features); // Client features
+    
     return txt_records;
 }
 
@@ -98,6 +122,10 @@ std::vector<std::string> MDNSPublisher::createRAOPTxtRecord()
     txt_records.push_back("am=OBSAirPlay1,1"); // Model
     txt_records.push_back("sf=0x4");         // Supported features
     
+    if (!m_pk.empty()) {
+        txt_records.push_back("pk=" + m_pk);
+    }
+    
     return txt_records;
 }
 
@@ -119,7 +147,7 @@ void DNSSD_API MDNSPublisher::register_callback(
 }
 #endif
 
-bool MDNSPublisher::start(const std::string& server_name, uint16_t airplay_port, uint16_t raop_port, const std::string& mac_address)
+bool MDNSPublisher::start(const std::string& server_name, uint16_t airplay_port, uint16_t raop_port, const std::string& mac_address, const std::string& pk)
 {
     if (m_active) {
         blog(LOG_WARNING, "mDNS publisher already active");
@@ -128,6 +156,7 @@ bool MDNSPublisher::start(const std::string& server_name, uint16_t airplay_port,
     
     m_server_name = server_name;
     m_mac_address = mac_address;
+    m_pk = pk;
     
 #ifdef __APPLE__
     DNSServiceErrorType error;
@@ -185,7 +214,7 @@ bool MDNSPublisher::start(const std::string& server_name, uint16_t airplay_port,
     
     // Create RAOP service name (MAC@Name format)
     std::string device_id = generateDeviceID();
-    std::string raop_name = device_id + "@" + m_server_name;
+    std::string raop_name = make_raop_service_id(device_id) + "@" + m_server_name;
     
     // Register _raop._tcp service
     error = DNSServiceRegister(

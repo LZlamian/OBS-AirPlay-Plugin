@@ -2,12 +2,14 @@
 
 #include "mdns-publisher.hpp"
 #include "uxplay-integration.hpp"
+#include "h264-decoder.hpp"
 #include <memory>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <map>
+#include <cstddef>
 
 // Forward declaration
 struct obs_source;
@@ -30,6 +32,12 @@ public:
                uint16_t airplay_port = 7000, 
                uint16_t raop_port = 5000);
     
+    // Start only mDNS advertising (for UxPlay integration)
+    bool startMDNS(const std::string& server_name = "OBS AirPlay", 
+                   uint16_t airplay_port = 8000,
+                   uint16_t raop_port = 8000,
+                   const std::string& pk = "");
+    
     // Stop the server
     void stop();
     
@@ -44,6 +52,10 @@ public:
     std::string getServerName() const { return m_server_name; }
     uint16_t getAirPlayPort() const { return m_airplay_port; }
     uint16_t getRAOPPort() const { return m_raop_port; }
+    std::string getMACAddress() const { return m_mac_address; }
+
+    // Feed encoded video from UxPlay and output decoded frames to registered OBS sources.
+    void ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
     
 private:
     std::atomic<bool> m_running;
@@ -69,9 +81,6 @@ private:
     // Registered sources
     std::mutex m_sources_mutex;
     std::vector<obs_source_t*> m_registered_sources;
-    
-    // UxPlay integration
-    std::unique_ptr<UxPlayIntegration> m_uxplay;
     
     // Server methods
     bool createServerSocket(int& socket_fd, uint16_t port);
@@ -106,4 +115,8 @@ private:
     // Generate MAC address
     std::string generateMACAddress();
     std::string m_mac_address;
+
+    std::unique_ptr<H264Decoder> m_h264_decoder;
+    std::unique_ptr<H264Decoder> m_h265_decoder;
+    uint64_t m_video_frame_counter = 0;
 };

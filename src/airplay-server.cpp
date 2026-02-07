@@ -1,5 +1,6 @@
 #include "airplay-server.hpp"
 #include <obs-module.h>
+#include <util/platform.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -10,6 +11,7 @@
 #include <sstream>
 #include <random>
 #include <iomanip>
+#include <vector>
 
 AirPlayServer::AirPlayServer()
     : m_running(false)
@@ -19,18 +21,11 @@ AirPlayServer::AirPlayServer()
     , m_raop_socket(-1)
 {
     m_mac_address = generateMACAddress();
+    m_h264_decoder = std::make_unique<H264Decoder>();
+    m_h265_decoder = std::make_unique<H264Decoder>(AV_CODEC_ID_HEVC);
     
-    // Initialize UxPlay integration
-    m_uxplay = std::make_unique<UxPlayIntegration>();
-    
-    // Set up callbacks for UxPlay
-    m_uxplay->setVideoCallback([this](uint8_t** data, int* linesize, int width, int height, uint64_t pts) {
-        handleVideoFrame(data, linesize, width, height, pts);
-    });
-    
-    m_uxplay->setAudioCallback([this](uint8_t* data, int samples, int channels, int sample_rate, uint64_t pts) {
-        handleAudioData(data, samples, channels, sample_rate, pts);
-    });
+    // Note: UxPlay integration is now handled in plugin-main.cpp
+    // This server only handles basic AirPlay connections and mDNS
 }
 
 AirPlayServer::~AirPlayServer()
@@ -154,22 +149,40 @@ bool AirPlayServer::start(const std::string& server_name, uint16_t airplay_port,
     m_airplay_listener_thread = std::thread(&AirPlayServer::airplayListenerLoop, this);
     m_raop_listener_thread = std::thread(&AirPlayServer::raopListenerLoop, this);
     
-    // Start UxPlay integration
-    blog(LOG_INFO, "Step 5: Starting UxPlay integration...");
-    if (!m_uxplay->start(m_raop_port)) {
-        blog(LOG_ERROR, "Failed to start UxPlay integration");
-        // Continue anyway - our custom handlers might still work
-    }
-    
     blog(LOG_INFO, "========================================");
     blog(LOG_INFO, "✓ AirPlay server '%s' STARTED SUCCESSFULLY", m_server_name.c_str());
     blog(LOG_INFO, "✓ AirPlay listening on: 0.0.0.0:%d", m_airplay_port);
     blog(LOG_INFO, "✓ RAOP listening on: 0.0.0.0:%d", m_raop_port);
     blog(LOG_INFO, "✓ mDNS advertising active");
-    blog(LOG_INFO, "✓ UxPlay integration active");
     blog(LOG_INFO, "✓ Ready to accept iPad connections!");
     blog(LOG_INFO, "========================================");
     
+    return true;
+}
+
+bool AirPlayServer::startMDNS(const std::string& server_name, uint16_t airplay_port, uint16_t raop_port, const std::string& pk)
+{
+    blog(LOG_INFO, "Starting mDNS advertising for UxPlay...");
+    blog(LOG_INFO, "  Name: %s", server_name.c_str());
+    blog(LOG_INFO, "  AirPlay Port: %d", airplay_port);
+    blog(LOG_INFO, "  RAOP Port: %d", raop_port);
+    blog(LOG_INFO, "  MAC Address: %s", m_mac_address.c_str());
+    blog(LOG_INFO, "  Public Key: %s", pk.empty() ? "DEFAULT" : pk.c_str());
+    
+    m_server_name = server_name;
+    m_airplay_port = airplay_port;
+    m_raop_port = raop_port;
+    m_running = true;  // Mark as running for mDNS purposes
+    
+    // Start mDNS advertising only
+    m_mdns_publisher = std::make_unique<MDNSPublisher>();
+    if (!m_mdns_publisher->start(m_server_name, m_airplay_port, m_raop_port, m_mac_address, pk)) {
+        blog(LOG_ERROR, "Failed to start mDNS advertising");
+        m_running = false;
+        return false;
+    }
+    
+    blog(LOG_INFO, "mDNS advertising started successfully for UxPlay");
     return true;
 }
 
@@ -180,11 +193,6 @@ void AirPlayServer::stop()
     }
     
     m_running = false;
-    
-    // Stop UxPlay integration
-    if (m_uxplay) {
-        m_uxplay->stop();
-    }
     
     // Stop mDNS advertising
     if (m_mdns_publisher) {
@@ -203,17 +211,25 @@ void AirPlayServer::stop()
         m_raop_socket = -1;
     }
     
-    // Close all connections
+    // Close all connections. Move threads out of the map before joining to
+    // avoid deadlocking with closeConnection(), which also takes this mutex.
+    std::vector<std::thread> connection_threads;
     {
         std::lock_guard<std::mutex> lock(m_connections_mutex);
+        connection_threads.reserve(m_connections.size());
         for (auto& [fd, conn] : m_connections) {
             conn->active = false;
             close(fd);
             if (conn->handler_thread.joinable()) {
-                conn->handler_thread.join();
+                connection_threads.emplace_back(std::move(conn->handler_thread));
             }
         }
         m_connections.clear();
+    }
+    for (auto& t : connection_threads) {
+        if (t.joinable()) {
+            t.join();
+        }
     }
     
     // Wait for listener threads
@@ -343,7 +359,7 @@ void AirPlayServer::handleAirPlayConnection(int client_socket, const std::string
         
         blog(LOG_INFO, "Received %zd bytes from %s", bytes_read, client_addr.c_str());
         std::string request(buffer, bytes_read);
-        blog(LOG_INFO, "Full AirPlay request from %s (%zd bytes):\n%s", client_addr.c_str(), bytes_read, request.c_str());
+        blog(LOG_DEBUG, "AirPlay request from %s (%zd bytes)", client_addr.c_str(), bytes_read);
         
         std::string response = handleHTTPRequest(request);
         
@@ -449,8 +465,7 @@ void AirPlayServer::handleRAOPConnection(int client_socket, const std::string& c
                 blog(LOG_INFO, "Sent server info response");
             }
             else if (method == "POST" && uri == "/pair-setup") {
-                // Log the full request for debugging
-                blog(LOG_INFO, "RAOP RTSP: Full pair-setup request:\n%s", request.c_str());
+                blog(LOG_DEBUG, "RAOP RTSP: pair-setup request (%zu bytes)", request.size());
                 response = handlePairSetup(cseq);
                 blog(LOG_INFO, "Sent pair-setup response");
             }
@@ -957,5 +972,64 @@ void AirPlayServer::handleAudioData(uint8_t* data, int samples, int channels, in
     // In a real implementation, we'd convert the audio to OBS format
     for (obs_source_t* source : m_registered_sources) {
         obs_source_output_audio(source, nullptr); // Placeholder
+    }
+}
+
+void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)
+{
+    UNUSED_PARAMETER(pts);
+
+    if (!data || size == 0) {
+        return;
+    }
+
+    H264Decoder* decoder = is_h265 ? m_h265_decoder.get() : m_h264_decoder.get();
+    if (!decoder) {
+        static bool logged_decoder_missing = false;
+        if (!logged_decoder_missing) {
+            blog(LOG_WARNING, "No %s decoder instance available",
+                 is_h265 ? "H265/HEVC" : "H264");
+            logged_decoder_missing = true;
+        }
+        return;
+    }
+
+    DecodedVideoFrame decoded;
+    if (!decoder->decodeToI420(data, size, decoded)) {
+        return;
+    }
+
+    obs_source_frame frame = {};
+    frame.data[0] = decoded.plane[0].data();
+    frame.data[1] = decoded.plane[1].data();
+    frame.data[2] = decoded.plane[2].data();
+    frame.linesize[0] = decoded.linesize[0];
+    frame.linesize[1] = decoded.linesize[1];
+    frame.linesize[2] = decoded.linesize[2];
+    frame.width = static_cast<uint32_t>(decoded.width);
+    frame.height = static_cast<uint32_t>(decoded.height);
+    frame.format = VIDEO_FORMAT_I420;
+    frame.full_range = false;
+    frame.trc = VIDEO_TRC_DEFAULT;
+    video_format_get_parameters_for_format(VIDEO_CS_709,
+                                           VIDEO_RANGE_PARTIAL,
+                                           frame.format,
+                                           frame.color_matrix,
+                                           frame.color_range_min,
+                                           frame.color_range_max);
+    frame.timestamp = os_gettime_ns();
+
+    std::lock_guard<std::mutex> lock(m_sources_mutex);
+    for (obs_source_t* source : m_registered_sources) {
+        obs_source_output_video(source, &frame);
+    }
+
+    ++m_video_frame_counter;
+    if ((m_video_frame_counter % 120) == 0) {
+        blog(LOG_INFO, "Output video frame #%llu (%s, %ux%u)",
+             static_cast<unsigned long long>(m_video_frame_counter),
+             is_h265 ? "HEVC" : "H264",
+             frame.width,
+             frame.height);
     }
 }

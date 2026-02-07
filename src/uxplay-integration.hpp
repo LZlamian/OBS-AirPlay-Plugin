@@ -7,13 +7,24 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <cstddef>
+
+// UxPlay core includes
+extern "C" {
+#include "../uxplay/lib/stream.h"
+#include "../uxplay/lib/dnssd.h"
+}
 
 // Forward declarations
 struct obs_source;
 typedef struct obs_source obs_source_t;
 
+// Forward declare UxPlay types
+typedef struct raop_s raop_t;
+typedef struct raop_ntp_s raop_ntp_t;
+
 // Video frame callback
-typedef std::function<void(uint8_t** data, int* linesize, int width, int height, uint64_t pts)> VideoFrameCallback;
+typedef std::function<void(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)> VideoFrameCallback;
 
 // Audio data callback  
 typedef std::function<void(uint8_t* data, int samples, int channels, int sample_rate, uint64_t pts)> AudioDataCallback;
@@ -24,17 +35,26 @@ public:
     ~UxPlayIntegration();
     
     // Start the UxPlay server
-    bool start(int port = 7100);
+    bool start(const std::string& device_id, int port = 7000);
     
     // Stop the server
     void stop();
     
+    // Check if running
+    bool isRunning() const { return m_running; }
+    
+    // Get the actual port UxPlay is running on
+    uint16_t getActualPort() const { return m_actual_port; }
+
+    // Get the Public Key string from UxPlay
+    std::string getPK() const;
+    
+    // Disable UxPlay's internal mDNS to prevent crashes
+    void disableInternalMDNS();
+    
     // Set callbacks for video and audio
     void setVideoCallback(VideoFrameCallback callback);
     void setAudioCallback(AudioDataCallback callback);
-    
-    // Check if running
-    bool isRunning() const { return m_running; }
     
 private:
     bool m_running;
@@ -47,9 +67,18 @@ private:
     std::condition_variable m_cv;
     std::atomic<bool> m_should_stop;
     
+    // UxPlay RAOP instance
+    raop_t* m_raop;
+
+    // UxPlay DNS-SD state used by RAOP handlers (for /info and TXT payloads)
+    dnssd_t* m_dnssd;
+    
+    // Actual port UxPlay is running on
+    uint16_t m_actual_port;
+    
     // Internal video/audio processing
-    void processVideoData(uint8_t* data, size_t len);
-    void processAudioData(uint8_t* data, size_t len);
+    void processVideoData(video_decode_struct* data);
+    void processAudioData(audio_decode_struct* data);
     
     // Worker thread function
     void workerThread();

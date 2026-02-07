@@ -1,4 +1,7 @@
 #pragma once
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -6,16 +9,24 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+struct DecodedVideoFrame {
+    int width = 0;
+    int height = 0;
+    int linesize[3] = {0, 0, 0};
+    std::vector<uint8_t> plane[3];
+};
+
 class H264Decoder {
 public:
-    H264Decoder();
+    explicit H264Decoder(AVCodecID codec_id = AV_CODEC_ID_H264);
     ~H264Decoder();
     
-    bool decode(const uint8_t* data, size_t size);
+    bool decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame);
     
 private:
     AVCodecContext* m_codec_context;
     AVFrame* m_frame;
+    AVFrame* m_frame_i420;
     AVPacket* m_packet;
     struct SwsContext* m_sws_context;
 };

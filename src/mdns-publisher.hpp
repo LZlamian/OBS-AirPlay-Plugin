@@ -14,7 +14,7 @@ public:
     ~MDNSPublisher();
     
     // Start advertising AirPlay services
-    bool start(const std::string& server_name, uint16_t airplay_port, uint16_t raop_port, const std::string& mac_address);
+    bool start(const std::string& server_name, uint16_t airplay_port, uint16_t raop_port, const std::string& mac_address, const std::string& pk = "");
     
     // Stop advertising
     void stop();
@@ -29,6 +29,7 @@ private:
     bool m_active;
     std::string m_server_name;
     std::string m_mac_address;
+    std::string m_pk;
     
 #ifdef __APPLE__
     DNSServiceRef m_airplay_service;

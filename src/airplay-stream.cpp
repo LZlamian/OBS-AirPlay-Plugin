@@ -94,6 +94,13 @@ bool AirPlayStream::start()
     }
     
     blog(LOG_INFO, "Starting AirPlay stream...");
+
+    if (!m_video_decryptor) {
+        m_video_decryptor = std::make_unique<AESDecryptor>();
+    }
+    if (!m_audio_decryptor) {
+        m_audio_decryptor = std::make_unique<AESDecryptor>();
+    }
     
     // Initialize video decryption if stream is encrypted
     // Note: aes_key should be set from RAOP handshake before calling start()
@@ -113,16 +120,6 @@ bool AirPlayStream::start()
     // Create RTP receivers
     m_video_receiver = std::make_unique<RTPReceiver>();
     m_audio_receiver = std::make_unique<RTPReceiver>();
-    
-    if (!m_video_receiver->start(m_config.video_data_port)) {
-        blog(LOG_ERROR, "Failed to start video RTP receiver");
-        return false;
-    }
-    
-    if (!m_audio_receiver->start(m_config.audio_data_port)) {
-        blog(LOG_ERROR, "Failed to start audio RTP receiver");
-        return false;
-    }
     
     // Create decoders
     m_video_decoder = std::make_unique<H264Decoder>();
@@ -150,14 +147,6 @@ void AirPlayStream::stop()
     
     m_streaming = false;
     
-    // Stop receivers (this will unblock the threads)
-    if (m_video_receiver) {
-        m_video_receiver->stop();
-    }
-    if (m_audio_receiver) {
-        m_audio_receiver->stop();
-    }
-    
     // Wait for threads to finish
     if (m_video_thread.joinable()) {
         m_video_thread.join();
@@ -171,8 +160,6 @@ void AirPlayStream::stop()
     m_audio_receiver.reset();
     m_video_decoder.reset();
     m_audio_decoder.reset();
-    m_video_decryptor.reset();
-    m_audio_decryptor.reset();
     
     // Clear buffers
     m_sps_pps_buffer.clear();
@@ -358,7 +345,8 @@ void AirPlayStream::processVideoPacket(const std::vector<uint8_t>& rtp_data)
         
         // Send to H.264 decoder
         if (m_video_decoder) {
-            m_video_decoder->decode(h264_data.data(), h264_data.size());
+            DecodedVideoFrame decoded;
+            m_video_decoder->decodeToI420(h264_data.data(), h264_data.size(), decoded);
         }
     } else {
         blog(LOG_WARNING, "Unknown video packet marker: 0x%04X", marker);

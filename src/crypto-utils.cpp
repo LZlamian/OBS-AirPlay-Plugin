@@ -28,12 +28,23 @@ AESDecryptor::~AESDecryptor()
 
 bool AESDecryptor::init(const uint8_t* audio_key, uint16_t audio_key_len, uint64_t stream_connection_id)
 {
+    if (!audio_key) {
+        blog(LOG_ERROR, "Audio key is null");
+        return false;
+    }
+
     if (audio_key_len > sizeof(m_audio_key)) {
         blog(LOG_ERROR, "Audio key length %d exceeds maximum %zu", audio_key_len, sizeof(m_audio_key));
         return false;
     }
+
+    if (m_cipher_ctx) {
+        EVP_CIPHER_CTX_free(m_cipher_ctx);
+        m_cipher_ctx = nullptr;
+    }
     
     // Store audio key
+    memset(m_audio_key, 0, sizeof(m_audio_key));
     memcpy(m_audio_key, audio_key, audio_key_len);
     
     // Derive video key and IV from stream connection ID and audio key

@@ -139,7 +139,9 @@ std::vector<uint8_t> RTPReceiver::processPacket(const uint8_t* data, size_t len)
     bool has_extension = (header.vpxcc & 0x10) != 0;
     if (has_extension && len >= header_size + 4) {
         // Extension header: 16-bit profile + 16-bit length
-        uint16_t ext_len = ntohs(*(uint16_t*)(data + header_size + 2));
+        uint16_t ext_len_net = 0;
+        memcpy(&ext_len_net, data + header_size + 2, sizeof(ext_len_net));
+        uint16_t ext_len = ntohs(ext_len_net);
         header_size += 4 + (ext_len * 4);
     }
     

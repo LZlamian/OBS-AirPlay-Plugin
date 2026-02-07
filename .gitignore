@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Build and packaging outputs
+build/
+dist/
+
+# CMake
+CMakeUserPresets.json
