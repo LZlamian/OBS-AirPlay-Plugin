@@ -24,6 +24,6 @@ Once installed follow the steps below:
 
 After this go to you iPhone/iPad device and select the following:
 
-1. ![IMG_0188](https://github.com/user-attachments/assets/f3ef7a11-03dc-43d2-b779-639c2dbd5d57)
+1. ![IMG_0188](https://github.com/user-attachments/assets/3c99131a-6787-43e3-9333-c03ae72e0545)
 
 2. <img width="302" height="329" alt="Screenshot 2026-02-08 at 10 50 38 PM" src="https://github.com/user-attachments/assets/a2b6f877-7fca-40fc-a850-3d4e1e195921" />
