@@ -111,7 +111,7 @@ In OBS:
 2. Search for "AirPlay" (Cmd+F)
 3. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 1.0.0)
+   OBS AirPlay Plugin loaded (version 1.1.0)
    AirPlay server started successfully
    mDNS advertising started for 'OBS AirPlay'
    ```

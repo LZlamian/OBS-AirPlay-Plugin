@@ -3,6 +3,7 @@
 #include "mdns-publisher.hpp"
 #include "uxplay-integration.hpp"
 #include "h264-decoder.hpp"
+#include "audio-decoder.hpp"
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -56,6 +57,7 @@ public:
 
     // Feed encoded video from UxPlay and output decoded frames to registered OBS sources.
     void ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
+    void ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts);
     
 private:
     std::atomic<bool> m_running;
@@ -118,5 +120,7 @@ private:
 
     std::unique_ptr<H264Decoder> m_h264_decoder;
     std::unique_ptr<H264Decoder> m_h265_decoder;
+    std::unique_ptr<AudioDecoder> m_audio_decoder;
     uint64_t m_video_frame_counter = 0;
+    uint64_t m_audio_frame_counter = 0;
 };

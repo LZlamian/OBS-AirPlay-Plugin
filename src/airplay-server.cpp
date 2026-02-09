@@ -23,6 +23,7 @@ AirPlayServer::AirPlayServer()
     m_mac_address = generateMACAddress();
     m_h264_decoder = std::make_unique<H264Decoder>();
     m_h265_decoder = std::make_unique<H264Decoder>(AV_CODEC_ID_HEVC);
+    m_audio_decoder = std::make_unique<AudioDecoder>();
     
     // Note: UxPlay integration is now handled in plugin-main.cpp
     // This server only handles basic AirPlay connections and mDNS
@@ -1031,5 +1032,48 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
              is_h265 ? "HEVC" : "H264",
              frame.width,
              frame.height);
+    }
+}
+
+void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)
+{
+    UNUSED_PARAMETER(pts);
+
+    if (!data || size == 0 || !m_audio_decoder) {
+        return;
+    }
+
+    std::vector<float> left;
+    std::vector<float> right;
+    int sample_rate = 0;
+    if (!m_audio_decoder->decode(data, size, codec_type, left, right, sample_rate)) {
+        return;
+    }
+
+    if (left.empty() || right.empty() || left.size() != right.size()) {
+        return;
+    }
+
+    obs_source_audio audio = {};
+    audio.data[0] = reinterpret_cast<uint8_t*>(left.data());
+    audio.data[1] = reinterpret_cast<uint8_t*>(right.data());
+    audio.frames = static_cast<uint32_t>(left.size());
+    audio.speakers = SPEAKERS_STEREO;
+    audio.samples_per_sec = static_cast<uint32_t>(sample_rate);
+    audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
+    audio.timestamp = os_gettime_ns();
+
+    std::lock_guard<std::mutex> lock(m_sources_mutex);
+    for (obs_source_t* source : m_registered_sources) {
+        obs_source_output_audio(source, &audio);
+    }
+
+    ++m_audio_frame_counter;
+    if ((m_audio_frame_counter % 240) == 0) {
+        blog(LOG_INFO, "Output audio frame #%llu (codec=%u, frames=%u, rate=%u)",
+             static_cast<unsigned long long>(m_audio_frame_counter),
+             static_cast<unsigned int>(codec_type),
+             audio.frames,
+             audio.samples_per_sec);
     }
 }

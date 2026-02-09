@@ -15,7 +15,7 @@ INSTALL_PATH="${INSTALL_BASE}/${PLUGIN_NAME}"
 
 PACKAGE_ID="com.obsairplay.plugin"
 VERSION="$(sed -nE 's/^project\(obs-airplay VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' "${ROOT_DIR}/CMakeLists.txt" | head -n1)"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.1.0}"
 ARCH="${ARCH_OVERRIDE:-$(uname -m)}"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 

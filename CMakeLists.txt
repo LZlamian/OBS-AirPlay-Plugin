@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16...3.26)
 
-project(obs-airplay VERSION 1.0.0)
+project(obs-airplay VERSION 1.1.0)
 
 set(PLUGIN_AUTHOR "Your Name")
 set(MACOS_BUNDLEID "com.yourname.obs-airplay")
@@ -250,6 +250,9 @@ if(NOT FDK_AAC_FOUND)
     message(WARNING "FDK-AAC not found. AAC decoding may be limited. Install with: brew install fdk-aac")
 endif()
 
+# Add UxPlay as subdirectory
+add_subdirectory(uxplay/lib)
+
 # Plugin source files
 set(obs-airplay_SOURCES
     src/plugin-main.cpp
@@ -302,6 +305,7 @@ target_link_libraries(obs-airplay PRIVATE
     ${FDK_AAC_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
+    airplay  # UxPlay library
 )
 
 # Add library directories
@@ -382,4 +386,3 @@ endif()
 install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
         DESTINATION "$ENV{HOME}/Library/Application Support/obs-studio/plugins"
         USE_SOURCE_PERMISSIONS)
-

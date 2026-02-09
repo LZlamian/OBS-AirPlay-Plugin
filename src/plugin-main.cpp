@@ -20,7 +20,7 @@ static std::shared_ptr<UxPlayIntegration> g_uxplay_integration;
 
 bool obs_module_load(void)
 {
-    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.0.0)");
+    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.1.0)");
     
     try {
         // Register the AirPlay source
@@ -62,6 +62,15 @@ bool obs_module_load(void)
                 }
                 if (g_airplay_server) {
                     g_airplay_server->ingestVideoBitstream(data, size, pts, is_h265);
+                }
+            });
+
+            g_uxplay_integration->setAudioCallback([](const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts) {
+                if (!data || size == 0) {
+                    return;
+                }
+                if (g_airplay_server) {
+                    g_airplay_server->ingestAudioBitstream(data, size, codec_type, pts);
                 }
             });
             

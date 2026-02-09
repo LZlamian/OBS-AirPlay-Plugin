@@ -454,9 +454,10 @@ void UxPlayIntegration::processAudioData(audio_decode_struct* data)
     blog(LOG_DEBUG, "Processing audio data: %d bytes, ct: %d",
          data->data_len, data->ct);
 
-    // For now, we'll just call the callback with the raw audio data
-    // In a real implementation, we'd decode the audio data first
-    callback(data->data, data->data_len / 4, 2, 44100, data->ntp_time_local);
+    callback(data->data,
+             static_cast<size_t>(data->data_len),
+             data->ct,
+             data->ntp_time_local);
 }
 
 void UxPlayIntegration::workerThread()

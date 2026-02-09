@@ -26,8 +26,8 @@ typedef struct raop_ntp_s raop_ntp_t;
 // Video frame callback
 typedef std::function<void(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)> VideoFrameCallback;
 
-// Audio data callback  
-typedef std::function<void(uint8_t* data, int samples, int channels, int sample_rate, uint64_t pts)> AudioDataCallback;
+// Raw compressed AirPlay audio payload callback
+typedef std::function<void(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)> AudioDataCallback;
 
 class UxPlayIntegration {
 public:

@@ -102,7 +102,7 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS
 3. Search for "AirPlay"
 4. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 1.0.0)
+   OBS AirPlay Plugin loaded (version 1.1.0)
    AirPlay server started successfully
    mDNS advertising started for 'OBS AirPlay'
    Server socket listening on port 7000

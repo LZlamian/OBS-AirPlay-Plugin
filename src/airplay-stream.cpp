@@ -456,6 +456,11 @@ bool AirPlayStream::decryptAudioData(uint8_t* data, size_t length)
 
 void AirPlayStream::processAudioPacket(const std::vector<uint8_t>& data)
 {
+    std::vector<float> left;
+    std::vector<float> right;
+    int sample_rate = 0;
+    const uint8_t codec_type = (m_config.audio_codec == "ALAC") ? 2 : 8;
+
     // Audio packets may also be encrypted
     if (m_config.encrypted && data.size() > 0) {
         std::vector<uint8_t> decrypted_data = data;
@@ -466,12 +471,22 @@ void AirPlayStream::processAudioPacket(const std::vector<uint8_t>& data)
         
         // Feed audio data to decoder
         if (m_audio_decoder && !decrypted_data.empty()) {
-            m_audio_decoder->decode(decrypted_data.data(), decrypted_data.size());
+            m_audio_decoder->decode(decrypted_data.data(),
+                                    decrypted_data.size(),
+                                    codec_type,
+                                    left,
+                                    right,
+                                    sample_rate);
         }
     } else {
         // Unencrypted audio
         if (m_audio_decoder && !data.empty()) {
-            m_audio_decoder->decode(data.data(), data.size());
+            m_audio_decoder->decode(data.data(),
+                                    data.size(),
+                                    codec_type,
+                                    left,
+                                    right,
+                                    sample_rate);
         }
     }
 }

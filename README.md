@@ -2,6 +2,8 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
+Current release: **v1.1.0**
+
 ## Features
 
 - ✅ Native Bonjour/mDNS advertising (shows up in iOS Screen Mirroring)
