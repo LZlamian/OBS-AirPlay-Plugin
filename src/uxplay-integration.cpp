@@ -165,16 +165,20 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port)
             if (!playback_video) {
                 return;
             }
+            // AirPlay 2 mirroring sources poll this to decide whether to
+            // increase their pre-roll buffer. Reporting "not ready" /
+            // "buffer empty" / "not likely to keep up" makes iOS pad with
+            // extra latency. We are a real-time mirror, so report healthy.
             playback_video->stallcount = 0;
             playback_video->duration = 0.0;
             playback_video->position = 0.0;
             playback_video->seek_start = 0.0;
             playback_video->seek_duration = 0.0;
-            playback_video->rate = 0.0f;
-            playback_video->ready_to_play = false;
-            playback_video->playback_buffer_empty = true;
-            playback_video->playback_buffer_full = false;
-            playback_video->playback_likely_to_keep_up = false;
+            playback_video->rate = 1.0f;
+            playback_video->ready_to_play = true;
+            playback_video->playback_buffer_empty = false;
+            playback_video->playback_buffer_full = true;
+            playback_video->playback_likely_to_keep_up = true;
             playback_video->num_loaded_time_ranges = 0;
             playback_video->num_seekable_time_ranges = 0;
             playback_video->loadedTimeRanges = nullptr;
@@ -427,8 +431,6 @@ void UxPlayIntegration::processVideoData(video_decode_struct* data)
         return;
     }
 
-    blog(LOG_DEBUG, "Processing video data: %d bytes, H265: %s",
-         data->data_len, data->is_h265 ? "yes" : "no");
     callback(data->data,
              static_cast<size_t>(data->data_len),
              data->ntp_time_local,

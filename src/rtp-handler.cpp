@@ -80,10 +80,7 @@ bool RTPHandler::parsePacket(const uint8_t* data, size_t len, RTPPacket& packet)
     // Calculate PTS from RTP timestamp (90kHz clock for video)
     packet.pts = packet.header.timestamp;
     
-    // Track sequence for loss detection
-    if (m_last_seq != 0 && packet.header.seq != (uint16_t)(m_last_seq + 1)) {
-        blog(LOG_DEBUG, "RTP: Sequence gap %d -> %d", m_last_seq, packet.header.seq);
-    }
+    // Track sequence for loss detection (silent on the hot path)
     m_last_seq = packet.header.seq;
     m_last_timestamp = packet.header.timestamp;
     

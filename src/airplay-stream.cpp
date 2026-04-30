@@ -200,17 +200,11 @@ void AirPlayStream::videoReceiverThread()
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     
     uint8_t buffer[65536]; // Large buffer for video packets
-    int packet_count = 0;
-    
+
     while (m_streaming) {
         ssize_t len = recvfrom(sockfd, buffer, sizeof(buffer), 0, nullptr, nullptr);
-        
+
         if (len > 0) {
-            packet_count++;
-            if (packet_count % 100 == 0) {
-                blog(LOG_DEBUG, "Received %d video packets", packet_count);
-            }
-            
             std::vector<uint8_t> payload = m_video_receiver->processPacket(buffer, len);
             if (!payload.empty()) {
                 processVideoPacket(payload);
@@ -219,9 +213,9 @@ void AirPlayStream::videoReceiverThread()
             blog(LOG_ERROR, "Video receive error: %s", strerror(errno));
         }
     }
-    
+
     close(sockfd);
-    blog(LOG_INFO, "Video receiver thread stopped (received %d packets)", packet_count);
+    blog(LOG_INFO, "Video receiver thread stopped");
 }
 
 void AirPlayStream::audioReceiverThread()
@@ -275,41 +269,34 @@ void AirPlayStream::processVideoPacket(const std::vector<uint8_t>& rtp_data)
 {
     // RTP header is typically 12 bytes, but check we have enough data
     if (rtp_data.size() < 14) {
-        blog(LOG_DEBUG, "Video packet too small: %zu bytes", rtp_data.size());
         return;
     }
-    
+
     const uint8_t* payload = rtp_data.data() + 12;
     size_t payload_size = rtp_data.size() - 12;
-    
+
     // Check packet type markers (first 2 bytes after RTP header)
     uint16_t marker = (payload[0] << 8) | payload[1];
-    
+
     if (marker == 0x0100) {
         // Unencrypted SPS/PPS packet
         blog(LOG_INFO, "Received SPS/PPS packet (%zu bytes)", payload_size);
         handleUnencryptedSPSPPS((uint8_t*)payload, payload_size);
         return;
     }
-    
+
     if (marker == 0x0000 || marker == 0x0010) {
         // Encrypted video data
         // 0x0000 = Non-IDR frame (P-frame)
         // 0x0010 = IDR keyframe (I-frame)
-        bool is_keyframe = (marker == 0x0010);
-        
-        if (is_keyframe) {
-            blog(LOG_DEBUG, "Received IDR keyframe");
-        }
-        
         // Skip 4-byte header (marker + 2 reserved bytes)
         if (payload_size < 4) {
             return;
         }
-        
+
         uint8_t* video_data = (uint8_t*)payload + 4;
         size_t video_size = payload_size - 4;
-        
+
         // Decrypt in-place
         if (m_config.encrypted && m_video_decryptor) {
             if (!decryptVideoData(video_data, video_size)) {
@@ -317,39 +304,40 @@ void AirPlayStream::processVideoPacket(const std::vector<uint8_t>& rtp_data)
                 return;
             }
         }
-        
+
         // Allocate output buffer (may need space for prepended SPS/PPS)
         size_t output_size = video_size;
         if (m_pending_sps_pps) {
             output_size += m_sps_pps_buffer.size();
         }
-        
+
         std::vector<uint8_t> h264_data(output_size);
-        
+
         // Prepend SPS/PPS if pending
         size_t offset = 0;
         if (m_pending_sps_pps) {
-            memcpy(h264_data.data(), m_sps_pps_buffer.data(), 
+            memcpy(h264_data.data(), m_sps_pps_buffer.data(),
                    m_sps_pps_buffer.size());
             offset = m_sps_pps_buffer.size();
             m_pending_sps_pps = false;
             m_sps_pps_buffer.clear();
-            blog(LOG_DEBUG, "Prepended SPS/PPS to frame");
         }
-        
+
         // Copy decrypted video data
         memcpy(h264_data.data() + offset, video_data, video_size);
-        
+
         // Process NAL units (replace sizes with start codes)
         processNALUnits(h264_data.data() + offset, video_size);
-        
+
         // Send to H.264 decoder
         if (m_video_decoder) {
-            DecodedVideoFrame decoded;
-            m_video_decoder->decodeToI420(h264_data.data(), h264_data.size(), decoded);
+            m_video_decoder->decode(h264_data.data(), h264_data.size(), {});
         }
     } else {
-        blog(LOG_WARNING, "Unknown video packet marker: 0x%04X", marker);
+        static uint64_t logged_unknown = 0;
+        if ((logged_unknown++ % 240) == 0) {
+            blog(LOG_WARNING, "Unknown video packet marker: 0x%04X", marker);
+        }
     }
 }
 
@@ -389,46 +377,22 @@ void AirPlayStream::handleUnencryptedSPSPPS(uint8_t* data, size_t length)
 void AirPlayStream::processNALUnits(uint8_t* data, size_t length)
 {
     size_t offset = 0;
-    int nal_count = 0;
-    
+
     while (offset + 4 < length) {
         // Read 4-byte big-endian NAL size
         uint32_t nal_size = read_be32(data + offset);
-        
+
         if (offset + 4 + nal_size > length) {
-            blog(LOG_ERROR, "Invalid NAL size %u at offset %zu (total length %zu)", 
+            blog(LOG_ERROR, "Invalid NAL size %u at offset %zu (total length %zu)",
                  nal_size, offset, length);
             break;
         }
-        
+
         // Replace size with H.264 start code (0x00 0x00 0x00 0x01)
         NALProcessor::replaceNALSizeWithStartCode(data, offset);
-        
-        // Get NAL type
-        uint8_t nal_header = data[offset + 4];
-        uint8_t nal_type = NALProcessor::getNALType(nal_header);
-        
-        // Log interesting NAL types
-        if (NALProcessor::isSPS(nal_type)) {
-            blog(LOG_DEBUG, "  NAL %d: SPS (type 7), size=%u", nal_count, nal_size);
-        } else if (NALProcessor::isPPS(nal_type)) {
-            blog(LOG_DEBUG, "  NAL %d: PPS (type 8), size=%u", nal_count, nal_size);
-        } else if (NALProcessor::isIDR(nal_type)) {
-            blog(LOG_DEBUG, "  NAL %d: IDR keyframe (type 5), size=%u", nal_count, nal_size);
-        } else if (NALProcessor::isSEI(nal_type)) {
-            blog(LOG_DEBUG, "  NAL %d: SEI (type 6), size=%u", nal_count, nal_size);
-        } else {
-            blog(LOG_DEBUG, "  NAL %d: type %u, size=%u", nal_count, nal_type, nal_size);
-        }
-        
-        nal_count++;
-        
+
         // Move to next NAL
         offset += 4 + nal_size;
-    }
-    
-    if (nal_count > 0) {
-        blog(LOG_DEBUG, "Processed %d NAL units", nal_count);
     }
 }
 

@@ -39,7 +39,15 @@ void* airplay_source_create(obs_data_t* settings, obs_source_t* source)
     UNUSED_PARAMETER(settings);
     
     auto airplay_source = new AirPlaySource(source);
-    
+
+    // OBS's async source path defaults to a ~200 ms internal jitter buffer
+    // which is the wrong choice for a real-time AirPlay mirror: we already
+    // forward the source-provided NTP-local PTS on every frame. Disable the
+    // extra buffering and let audio/video decouple so a video stall does not
+    // also stall audio (and vice versa).
+    obs_source_set_async_unbuffered(source, true);
+    obs_source_set_async_decoupled(source, true);
+
     blog(LOG_INFO, "AirPlay source created");
     return airplay_source;
 }

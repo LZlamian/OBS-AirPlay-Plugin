@@ -978,8 +978,6 @@ void AirPlayServer::handleAudioData(uint8_t* data, int samples, int channels, in
 
 void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)
 {
-    UNUSED_PARAMETER(pts);
-
     if (!data || size == 0) {
         return;
     }
@@ -995,50 +993,55 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
         return;
     }
 
-    DecodedVideoFrame decoded;
-    if (!decoder->decodeToI420(data, size, decoded)) {
-        return;
-    }
+    // UxPlay's `ntp_time_local` is a monotonic local timestamp expressed in
+    // nanoseconds (see uxplay/lib/raop_ntp.c::raop_ntp_get_local_time and
+    // SECOND_IN_NSECS). OBS expects `obs_source_frame::timestamp` in
+    // nanoseconds as well, so forward it directly. Fall back to wall-clock
+    // only if the source did not provide one.
+    const uint64_t out_ts = pts ? pts : os_gettime_ns();
+    const bool is_h265_codec = is_h265;
 
-    obs_source_frame frame = {};
-    frame.data[0] = decoded.plane[0].data();
-    frame.data[1] = decoded.plane[1].data();
-    frame.data[2] = decoded.plane[2].data();
-    frame.linesize[0] = decoded.linesize[0];
-    frame.linesize[1] = decoded.linesize[1];
-    frame.linesize[2] = decoded.linesize[2];
-    frame.width = static_cast<uint32_t>(decoded.width);
-    frame.height = static_cast<uint32_t>(decoded.height);
-    frame.format = VIDEO_FORMAT_I420;
-    frame.full_range = false;
-    frame.trc = VIDEO_TRC_DEFAULT;
-    video_format_get_parameters_for_format(VIDEO_CS_709,
-                                           VIDEO_RANGE_PARTIAL,
-                                           frame.format,
-                                           frame.color_matrix,
-                                           frame.color_range_min,
-                                           frame.color_range_max);
-    frame.timestamp = os_gettime_ns();
+    decoder->decode(data, size, [this, out_ts, is_h265_codec](const DecodedVideoFrame& v) {
+        obs_source_frame frame = {};
+        frame.data[0] = const_cast<uint8_t*>(v.data[0]);
+        frame.data[1] = const_cast<uint8_t*>(v.data[1]);
+        frame.data[2] = const_cast<uint8_t*>(v.data[2]);
+        frame.linesize[0] = v.linesize[0];
+        frame.linesize[1] = v.linesize[1];
+        frame.linesize[2] = v.linesize[2];
+        frame.width = static_cast<uint32_t>(v.width);
+        frame.height = static_cast<uint32_t>(v.height);
+        // v.format: 1 = NV12 (decoder native, no conversion), 2 = I420.
+        frame.format = (v.format == 1) ? VIDEO_FORMAT_NV12 : VIDEO_FORMAT_I420;
+        frame.full_range = false;
+        frame.trc = VIDEO_TRC_DEFAULT;
+        video_format_get_parameters_for_format(VIDEO_CS_709,
+                                               VIDEO_RANGE_PARTIAL,
+                                               frame.format,
+                                               frame.color_matrix,
+                                               frame.color_range_min,
+                                               frame.color_range_max);
+        frame.timestamp = out_ts;
 
-    std::lock_guard<std::mutex> lock(m_sources_mutex);
-    for (obs_source_t* source : m_registered_sources) {
-        obs_source_output_video(source, &frame);
-    }
+        std::lock_guard<std::mutex> lock(m_sources_mutex);
+        for (obs_source_t* source : m_registered_sources) {
+            obs_source_output_video(source, &frame);
+        }
 
-    ++m_video_frame_counter;
-    if ((m_video_frame_counter % 120) == 0) {
-        blog(LOG_INFO, "Output video frame #%llu (%s, %ux%u)",
-             static_cast<unsigned long long>(m_video_frame_counter),
-             is_h265 ? "HEVC" : "H264",
-             frame.width,
-             frame.height);
-    }
+        ++m_video_frame_counter;
+        if ((m_video_frame_counter % 120) == 0) {
+            blog(LOG_INFO, "Output video frame #%llu (%s, %ux%u, %s)",
+                 static_cast<unsigned long long>(m_video_frame_counter),
+                 is_h265_codec ? "HEVC" : "H264",
+                 frame.width,
+                 frame.height,
+                 frame.format == VIDEO_FORMAT_NV12 ? "NV12" : "I420");
+        }
+    });
 }
 
 void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)
 {
-    UNUSED_PARAMETER(pts);
-
     if (!data || size == 0 || !m_audio_decoder) {
         return;
     }
@@ -1061,7 +1064,10 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     audio.speakers = SPEAKERS_STEREO;
     audio.samples_per_sec = static_cast<uint32_t>(sample_rate);
     audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
-    audio.timestamp = os_gettime_ns();
+    // Forward the source-provided NTP-local timestamp (nanoseconds) so OBS
+    // can keep audio aligned with video without falling back to its default
+    // ~200 ms async cache buffer.
+    audio.timestamp = pts ? pts : os_gettime_ns();
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     for (obs_source_t* source : m_registered_sources) {

@@ -103,15 +103,9 @@ bool RTPReceiver::parseHeader(const uint8_t* data, size_t len, RTPHeader& header
 
 void RTPReceiver::handleReordering(uint16_t seq)
 {
-    // Check for packet loss or reordering
-    if (m_last_seq != 0) {
-        int16_t diff = seq - m_last_seq;
-        if (diff > 1) {
-            blog(LOG_DEBUG, "RTP: Packet loss detected, missing %d packets", diff - 1);
-        } else if (diff < 0) {
-            blog(LOG_DEBUG, "RTP: Out-of-order packet (seq %d after %d)", seq, m_last_seq);
-        }
-    }
+    // Loss/reorder accounting kept silent on the hot path; per-packet logging
+    // here used to dominate CPU at 1080p60 even when DEBUG was filtered out.
+    (void)seq;
 }
 
 std::vector<uint8_t> RTPReceiver::processPacket(const uint8_t* data, size_t len)

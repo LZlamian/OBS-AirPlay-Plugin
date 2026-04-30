@@ -28,6 +28,10 @@ AudioDecoder::AudioDecoder()
     , m_swr_context(nullptr)
     , m_codec_type(0)
     , m_output_sample_rate(kDefaultSampleRate)
+    , m_swr_in_rate(0)
+    , m_swr_in_format(AV_SAMPLE_FMT_NONE)
+    , m_swr_in_channels(0)
+    , m_swr_buf_capacity(0)
 {
     if (!m_frame || !m_packet) {
         blog(LOG_ERROR, "Failed to allocate FFmpeg audio frame/packet");
@@ -133,17 +137,54 @@ bool AudioDecoder::configureDecoder(uint8_t ct)
     return true;
 }
 
+bool AudioDecoder::inputMatchesOutput(const AVFrame* frame) const
+{
+    if (!frame) {
+        return false;
+    }
+    if (frame->format != AV_SAMPLE_FMT_FLTP) {
+        return false;
+    }
+    if (frame->sample_rate != m_output_sample_rate) {
+        return false;
+    }
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    if (frame->ch_layout.nb_channels != 2) {
+        return false;
+    }
+#else
+    if (frame->channels != 2) {
+        return false;
+    }
+#endif
+    return true;
+}
+
 bool AudioDecoder::configureResampler(const AVFrame* frame)
 {
     if (!frame || !m_codec_context) {
         return false;
     }
 
+    const int new_rate = frame->sample_rate > 0 ? frame->sample_rate : kDefaultSampleRate;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    const int new_channels = frame->ch_layout.nb_channels;
+#else
+    const int new_channels = frame->channels;
+#endif
+
+    // Reuse existing swr context if the source description has not changed.
+    if (m_swr_context && m_swr_in_rate == frame->sample_rate &&
+        m_swr_in_format == frame->format && m_swr_in_channels == new_channels) {
+        m_output_sample_rate = new_rate;
+        return true;
+    }
+
     if (m_swr_context) {
         swr_free(&m_swr_context);
     }
 
-    m_output_sample_rate = frame->sample_rate > 0 ? frame->sample_rate : kDefaultSampleRate;
+    m_output_sample_rate = new_rate;
 
 #if LIBAVUTIL_VERSION_MAJOR >= 57
     AVChannelLayout out_layout;
@@ -181,6 +222,10 @@ bool AudioDecoder::configureResampler(const AVFrame* frame)
         }
         return false;
     }
+
+    m_swr_in_rate = frame->sample_rate;
+    m_swr_in_format = frame->format;
+    m_swr_in_channels = new_channels;
 
     return true;
 }
@@ -228,6 +273,24 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             break;
         }
 
+        // Fast path: AAC-LC and AAC-ELD from AirPlay are usually already
+        // 44.1 kHz / FLTP / stereo, which is the OBS output format. In that
+        // case skip the resampler entirely and copy planar floats directly.
+        if (inputMatchesOutput(m_frame)) {
+            const int n = m_frame->nb_samples;
+            if (n > 0 && m_frame->extended_data && m_frame->extended_data[0] &&
+                m_frame->extended_data[1]) {
+                const float* l = reinterpret_cast<const float*>(m_frame->extended_data[0]);
+                const float* r = reinterpret_cast<const float*>(m_frame->extended_data[1]);
+                left.assign(l, l + n);
+                right.assign(r, r + n);
+                sample_rate = m_frame->sample_rate;
+                produced = true;
+            }
+            av_frame_unref(m_frame);
+            continue;
+        }
+
         if (!configureResampler(m_frame)) {
             av_frame_unref(m_frame);
             break;
@@ -244,12 +307,17 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             continue;
         }
 
-        uint8_t* out_data[2] = {nullptr, nullptr};
-        int out_linesize = 0;
-        if (av_samples_alloc(out_data, &out_linesize, 2, out_samples, AV_SAMPLE_FMT_FLTP, 0) < 0) {
-            av_frame_unref(m_frame);
-            break;
+        // Reuse a persistent planar output buffer instead of av_samples_alloc
+        // / av_freep on every packet. Grow only when the per-packet sample
+        // count exceeds the cached capacity.
+        if (out_samples > m_swr_buf_capacity) {
+            const int needed = static_cast<int>(out_samples) * sizeof(float);
+            m_swr_buf_left.resize(static_cast<size_t>(needed));
+            m_swr_buf_right.resize(static_cast<size_t>(needed));
+            m_swr_buf_capacity = out_samples;
         }
+
+        uint8_t* out_data[2] = {m_swr_buf_left.data(), m_swr_buf_right.data()};
 
         const int converted = swr_convert(
             m_swr_context,
@@ -258,17 +326,13 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             const_cast<const uint8_t**>(m_frame->extended_data),
             m_frame->nb_samples);
 
-        if (converted > 0 && out_data[0] && out_data[1]) {
+        if (converted > 0) {
             const float* l = reinterpret_cast<const float*>(out_data[0]);
             const float* r = reinterpret_cast<const float*>(out_data[1]);
-            left.insert(left.end(), l, l + converted);
-            right.insert(right.end(), r, r + converted);
+            left.assign(l, l + converted);
+            right.assign(r, r + converted);
             sample_rate = m_output_sample_rate;
             produced = true;
-        }
-
-        if (out_data[0]) {
-            av_freep(&out_data[0]);
         }
 
         av_frame_unref(m_frame);

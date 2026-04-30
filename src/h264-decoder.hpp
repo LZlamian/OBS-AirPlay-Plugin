@@ -1,7 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <functional>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -9,24 +9,40 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+// View of a decoded video frame. Pointers reference internal decoder buffers
+// and are only valid for the duration of the FrameCallback invocation.
 struct DecodedVideoFrame {
     int width = 0;
     int height = 0;
     int linesize[3] = {0, 0, 0};
-    std::vector<uint8_t> plane[3];
+    const uint8_t* data[3] = {nullptr, nullptr, nullptr};
+    // Planar YUV layout of the data:
+    //   1 = NV12 (data[0]=Y, data[1]=interleaved UV)
+    //   2 = I420 (data[0]=Y, data[1]=U, data[2]=V)
+    int format = 0;
 };
 
 class H264Decoder {
 public:
+    using FrameCallback = std::function<void(const DecodedVideoFrame&)>;
+
     explicit H264Decoder(AVCodecID codec_id = AV_CODEC_ID_H264);
     ~H264Decoder();
-    
-    bool decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame);
-    
+
+    // Submit a compressed access unit. Drains and invokes `cb` once per
+    // decoded frame produced. Returns the number of frames emitted, or
+    // a negative value on a fatal decoder error.
+    int decode(const uint8_t* data, size_t size, const FrameCallback& cb);
+
 private:
+    bool ensureSwsContext(int src_w, int src_h, AVPixelFormat src_fmt);
+
     AVCodecContext* m_codec_context;
     AVFrame* m_frame;
-    AVFrame* m_frame_i420;
+    AVFrame* m_frame_sw;        // staging frame for sws output (I420)
     AVPacket* m_packet;
     struct SwsContext* m_sws_context;
+    int m_sws_src_w;
+    int m_sws_src_h;
+    AVPixelFormat m_sws_src_fmt;
 };
