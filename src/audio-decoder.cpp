@@ -237,7 +237,6 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
     left.clear();
     right.clear();
     sample_rate = kDefaultSampleRate;
-
     if (!data || size == 0 || !m_packet || !m_frame) {
         return false;
     }
@@ -282,8 +281,8 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
                 m_frame->extended_data[1]) {
                 const float* l = reinterpret_cast<const float*>(m_frame->extended_data[0]);
                 const float* r = reinterpret_cast<const float*>(m_frame->extended_data[1]);
-                left.assign(l, l + n);
-                right.assign(r, r + n);
+                left.insert(left.end(), l, l + n);
+                right.insert(right.end(), r, r + n);
                 sample_rate = m_frame->sample_rate;
                 produced = true;
             }
@@ -329,8 +328,8 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
         if (converted > 0) {
             const float* l = reinterpret_cast<const float*>(out_data[0]);
             const float* r = reinterpret_cast<const float*>(out_data[1]);
-            left.assign(l, l + converted);
-            right.assign(r, r + converted);
+            left.insert(left.end(), l, l + converted);
+            right.insert(right.end(), r, r + converted);
             sample_rate = m_output_sample_rate;
             produced = true;
         }

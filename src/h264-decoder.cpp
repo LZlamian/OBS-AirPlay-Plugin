@@ -1,11 +1,6 @@
 #include "h264-decoder.hpp"
 #include <obs-module.h>
 
-extern "C" {
-#include <libavutil/dict.h>
-#include <libavutil/opt.h>
-}
-
 namespace {
 
 // Map an FFmpeg pixel format that OBS can consume natively (no conversion).
@@ -61,12 +56,7 @@ H264Decoder::H264Decoder(AVCodecID codec_id)
     m_codec_context->thread_type = FF_THREAD_SLICE;
     m_codec_context->thread_count = 0; // auto
 
-    AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "tune", "zerolatency", 0);
-
-    int open_ret = avcodec_open2(m_codec_context, codec, &opts);
-    av_dict_free(&opts);
-    if (open_ret < 0) {
+    if (avcodec_open2(m_codec_context, codec, nullptr) < 0) {
         blog(LOG_ERROR, "Failed to open codec");
         avcodec_free_context(&m_codec_context);
         return;

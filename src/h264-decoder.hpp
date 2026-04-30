@@ -11,13 +11,15 @@ extern "C" {
 
 // View of a decoded video frame. Pointers reference internal decoder buffers
 // and are only valid for the duration of the FrameCallback invocation.
+//   format == 1 (NV12):  data[0]=Y plane, data[1]=interleaved UV, data[2] unused
+//   format == 2 (I420):  data[0]=Y plane, data[1]=U plane, data[2]=V plane
 struct DecodedVideoFrame {
     int width = 0;
     int height = 0;
     int linesize[3] = {0, 0, 0};
     const uint8_t* data[3] = {nullptr, nullptr, nullptr};
     // Planar YUV layout of the data:
-    //   1 = NV12 (data[0]=Y, data[1]=interleaved UV)
+    //   1 = NV12 (data[0]=Y, data[1]=interleaved UV, data[2]=nullptr)
     //   2 = I420 (data[0]=Y, data[1]=U, data[2]=V)
     int format = 0;
 };

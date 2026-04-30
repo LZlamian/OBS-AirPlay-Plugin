@@ -1003,6 +1003,11 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
 
     decoder->decode(data, size, [this, out_ts, is_h265_codec](const DecodedVideoFrame& v) {
         obs_source_frame frame = {};
+        // OBS does not mutate the planar data passed via obs_source_output_video
+        // (it copies into its async cache before returning); the const_cast is
+        // safe and only needed because obs_source_frame::data is non-const.
+        // The DecodedVideoFrame view points into the decoder's internal AVFrame
+        // buffers, which remain valid for the duration of this callback.
         frame.data[0] = const_cast<uint8_t*>(v.data[0]);
         frame.data[1] = const_cast<uint8_t*>(v.data[1]);
         frame.data[2] = const_cast<uint8_t*>(v.data[2]);
