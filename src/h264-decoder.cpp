@@ -19,12 +19,27 @@ H264Decoder::H264Decoder(AVCodecID codec_id)
         blog(LOG_ERROR, "Failed to allocate codec context");
         return;
     }
-    
-    if (avcodec_open2(m_codec_context, codec, nullptr) < 0) {
+
+    // Low-latency tuning for live AirPlay mirroring:
+    //  - LOW_DELAY  : decoder will not buffer frames waiting for B-frame reorder
+    //  - FAST       : allow non-spec-compliant speedups
+    //  - SLICE thread type with auto thread_count keeps per-frame latency
+    //    minimal (FRAME threading would add 1+ frame of pipeline delay).
+    m_codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    m_codec_context->flags2 |= AV_CODEC_FLAG2_FAST;
+    m_codec_context->thread_type = FF_THREAD_SLICE;
+    m_codec_context->thread_count = 0; // auto
+
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "tune", "zerolatency", 0);
+
+    if (avcodec_open2(m_codec_context, codec, &opts) < 0) {
         blog(LOG_ERROR, "Failed to open codec");
+        av_dict_free(&opts);
         avcodec_free_context(&m_codec_context);
         return;
     }
+    av_dict_free(&opts);
     
     m_frame = av_frame_alloc();
     m_frame_i420 = av_frame_alloc();
@@ -128,11 +143,9 @@ bool H264Decoder::decodeToI420(const uint8_t* data, size_t size, DecodedVideoFra
         out_frame.linesize[0] = src->linesize[0];
         out_frame.linesize[1] = src->linesize[1];
         out_frame.linesize[2] = src->linesize[2];
-
-        const int chroma_h = (src->height + 1) / 2;
-        out_frame.plane[0].assign(src->data[0], src->data[0] + src->linesize[0] * src->height);
-        out_frame.plane[1].assign(src->data[1], src->data[1] + src->linesize[1] * chroma_h);
-        out_frame.plane[2].assign(src->data[2], src->data[2] + src->linesize[2] * chroma_h);
+        out_frame.data[0] = src->data[0];
+        out_frame.data[1] = src->data[1];
+        out_frame.data[2] = src->data[2];
         return true;
     }
 }

@@ -37,7 +37,7 @@ if [ -d "$PLUGIN_PATH" ]; then
     echo -e "  ${GREEN}✓${NC} Plugin installed at: $PLUGIN_PATH"
     
     # Check if dylib exists
-    if [ -f "$PLUGIN_PATH/Contents/MacOS/obs-airplay" ]; then
+    if [ -f "$PLUGIN_PATH/Contents/MacOS/obs-airplay" ] || [ -f "$PLUGIN_PATH/Contents/MacOS/obs-airplay.so" ]; then
         echo -e "  ${GREEN}✓${NC} Binary found"
     else
         echo -e "  ${RED}✗${NC} Binary not found"

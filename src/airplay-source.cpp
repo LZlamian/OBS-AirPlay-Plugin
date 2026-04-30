@@ -12,6 +12,12 @@ AirPlaySource::AirPlaySource(obs_source_t* src)
     , audio_format(AUDIO_FORMAT_FLOAT_PLANAR)
     , speakers(SPEAKERS_STEREO)
 {
+    // Disable OBS's internal async-source buffering for low-latency live mirroring.
+    // Default behaviour buffers several frames before display (adds 100-200ms);
+    // unbuffered + decoupled ensures frames render as soon as we hand them off.
+    obs_source_set_async_unbuffered(source, true);
+    obs_source_set_async_decoupled(source, true);
+
     // Register with the global server
     auto server = get_airplay_server();
     if (server) {

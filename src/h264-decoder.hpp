@@ -13,7 +13,9 @@ struct DecodedVideoFrame {
     int width = 0;
     int height = 0;
     int linesize[3] = {0, 0, 0};
-    std::vector<uint8_t> plane[3];
+    // Pointers reference data owned by the decoder's internal AVFrame.
+    // Valid only until the next decodeToI420() call on the same decoder.
+    uint8_t* data[3] = {nullptr, nullptr, nullptr};
 };
 
 class H264Decoder {

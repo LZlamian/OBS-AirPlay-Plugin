@@ -1001,9 +1001,9 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     }
 
     obs_source_frame frame = {};
-    frame.data[0] = decoded.plane[0].data();
-    frame.data[1] = decoded.plane[1].data();
-    frame.data[2] = decoded.plane[2].data();
+    frame.data[0] = decoded.data[0];
+    frame.data[1] = decoded.data[1];
+    frame.data[2] = decoded.data[2];
     frame.linesize[0] = decoded.linesize[0];
     frame.linesize[1] = decoded.linesize[1];
     frame.linesize[2] = decoded.linesize[2];
