@@ -262,11 +262,6 @@ set(obs-airplay_SOURCES
     src/mdns-publisher.cpp
     src/h264-decoder.cpp
     src/audio-decoder.cpp
-    src/raop-server.cpp
-    src/rtp-receiver.cpp
-    src/rtp-handler.cpp
-    src/airplay-stream.cpp
-    src/crypto-utils.cpp
 )
 
 set(obs-airplay_HEADERS
@@ -276,11 +271,6 @@ set(obs-airplay_HEADERS
     src/mdns-publisher.hpp
     src/h264-decoder.hpp
     src/audio-decoder.hpp
-    src/raop-server.hpp
-    src/rtp-receiver.hpp
-    src/rtp-handler.hpp
-    src/airplay-stream.hpp
-    src/crypto-utils.hpp
 )
 
 # Create the plugin library
