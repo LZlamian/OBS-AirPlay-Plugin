@@ -13,6 +13,8 @@
 #include <iomanip>
 #include <vector>
 
+std::atomic<bool> g_latency_telemetry_enabled{false};
+
 AirPlayServer::AirPlayServer()
     : m_running(false)
     , m_airplay_port(7000)
@@ -996,9 +998,12 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     }
 
     DecodedVideoFrame decoded;
+    const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
+    const uint64_t t_decode_start = tele ? os_gettime_ns() : 0;
     if (!decoder->decodeToI420(data, size, decoded)) {
         return;
     }
+    const uint64_t t_decode_end = tele ? os_gettime_ns() : 0;
 
     obs_source_frame frame = {};
     frame.data[0] = decoded.data[0];
@@ -1021,11 +1026,55 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     frame.timestamp = os_gettime_ns();
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
+    const uint64_t t_output_start = tele ? os_gettime_ns() : 0;
     for (obs_source_t* source : m_registered_sources) {
         obs_source_output_video(source, &frame);
     }
+    const uint64_t t_output_end = tele ? os_gettime_ns() : 0;
 
     ++m_video_frame_counter;
+
+    if (tele) {
+        const uint64_t decode_ns = t_decode_end - t_decode_start;
+        const uint64_t output_ns = t_output_end - t_output_start;
+        m_v_decode_ns_sum += decode_ns;
+        if (decode_ns > m_v_decode_ns_max) m_v_decode_ns_max = decode_ns;
+        m_v_output_ns_sum += output_ns;
+        if (output_ns > m_v_output_ns_max) m_v_output_ns_max = output_ns;
+        if (m_v_last_output_ns != 0) {
+            const uint64_t interval = t_output_end - m_v_last_output_ns;
+            m_v_interval_ns_sum += interval;
+            if (interval > m_v_interval_ns_max) m_v_interval_ns_max = interval;
+        }
+        m_v_last_output_ns = t_output_end;
+        ++m_v_window_count;
+        if (m_v_window_count >= 120) {
+            const double n = static_cast<double>(m_v_window_count);
+            const double intervals_n = n > 1.0 ? n - 1.0 : 1.0;
+            blog(LOG_INFO,
+                 "[latency] video N=%u  decode avg=%.2fms max=%.2fms  "
+                 "output avg=%.2fms max=%.2fms  interval avg=%.2fms max=%.2fms (~%.1ffps)",
+                 m_v_window_count,
+                 (m_v_decode_ns_sum / n) / 1e6,
+                 m_v_decode_ns_max / 1e6,
+                 (m_v_output_ns_sum / n) / 1e6,
+                 m_v_output_ns_max / 1e6,
+                 (m_v_interval_ns_sum / intervals_n) / 1e6,
+                 m_v_interval_ns_max / 1e6,
+                 1e9 * intervals_n / static_cast<double>(m_v_interval_ns_sum ? m_v_interval_ns_sum : 1));
+            m_v_decode_ns_sum = m_v_decode_ns_max = 0;
+            m_v_output_ns_sum = m_v_output_ns_max = 0;
+            m_v_interval_ns_sum = m_v_interval_ns_max = 0;
+            m_v_window_count = 0;
+        }
+    } else if (m_v_window_count != 0) {
+        m_v_decode_ns_sum = m_v_decode_ns_max = 0;
+        m_v_output_ns_sum = m_v_output_ns_max = 0;
+        m_v_interval_ns_sum = m_v_interval_ns_max = 0;
+        m_v_window_count = 0;
+        m_v_last_output_ns = 0;
+    }
+
     if ((m_video_frame_counter % 120) == 0) {
         blog(LOG_INFO, "Output video frame #%llu (%s, %ux%u)",
              static_cast<unsigned long long>(m_video_frame_counter),
@@ -1046,9 +1095,12 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     std::vector<float> left;
     std::vector<float> right;
     int sample_rate = 0;
+    const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
+    const uint64_t t_decode_start = tele ? os_gettime_ns() : 0;
     if (!m_audio_decoder->decode(data, size, codec_type, left, right, sample_rate)) {
         return;
     }
+    const uint64_t t_decode_end = tele ? os_gettime_ns() : 0;
 
     if (left.empty() || right.empty() || left.size() != right.size()) {
         return;
@@ -1064,11 +1116,42 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     audio.timestamp = os_gettime_ns();
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
+    const uint64_t t_output_start = tele ? os_gettime_ns() : 0;
     for (obs_source_t* source : m_registered_sources) {
         obs_source_output_audio(source, &audio);
     }
+    const uint64_t t_output_end = tele ? os_gettime_ns() : 0;
 
     ++m_audio_frame_counter;
+
+    if (tele) {
+        const uint64_t decode_ns = t_decode_end - t_decode_start;
+        const uint64_t output_ns = t_output_end - t_output_start;
+        m_a_decode_ns_sum += decode_ns;
+        if (decode_ns > m_a_decode_ns_max) m_a_decode_ns_max = decode_ns;
+        m_a_output_ns_sum += output_ns;
+        if (output_ns > m_a_output_ns_max) m_a_output_ns_max = output_ns;
+        ++m_a_window_count;
+        if (m_a_window_count >= 240) {
+            const double n = static_cast<double>(m_a_window_count);
+            blog(LOG_INFO,
+                 "[latency] audio N=%u  decode avg=%.2fms max=%.2fms  "
+                 "output avg=%.2fms max=%.2fms",
+                 m_a_window_count,
+                 (m_a_decode_ns_sum / n) / 1e6,
+                 m_a_decode_ns_max / 1e6,
+                 (m_a_output_ns_sum / n) / 1e6,
+                 m_a_output_ns_max / 1e6);
+            m_a_decode_ns_sum = m_a_decode_ns_max = 0;
+            m_a_output_ns_sum = m_a_output_ns_max = 0;
+            m_a_window_count = 0;
+        }
+    } else if (m_a_window_count != 0) {
+        m_a_decode_ns_sum = m_a_decode_ns_max = 0;
+        m_a_output_ns_sum = m_a_output_ns_max = 0;
+        m_a_window_count = 0;
+    }
+
     if ((m_audio_frame_counter % 240) == 0) {
         blog(LOG_INFO, "Output audio frame #%llu (codec=%u, frames=%u, rate=%u)",
              static_cast<unsigned long long>(m_audio_frame_counter),

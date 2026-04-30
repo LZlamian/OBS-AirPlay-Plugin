@@ -59,7 +59,7 @@ void airplay_source_destroy(void* data)
 
 void airplay_source_get_defaults(obs_data_t* settings)
 {
-    UNUSED_PARAMETER(settings);
+    obs_data_set_default_bool(settings, "log_latency_telemetry", false);
 }
 
 obs_properties_t* airplay_source_get_properties(void* data)
@@ -85,14 +85,19 @@ obs_properties_t* airplay_source_get_properties(void* data)
         obs_properties_add_text(props, "server_info", 
             "Status: Server not running", OBS_TEXT_INFO);
     }
-    
+
+    obs_properties_add_bool(props, "log_latency_telemetry",
+        "Log latency telemetry (decode/output ms, every 120 video / 240 audio frames)");
+
     return props;
 }
 
 void airplay_source_update(void* data, obs_data_t* settings)
 {
     UNUSED_PARAMETER(data);
-    UNUSED_PARAMETER(settings);
+    g_latency_telemetry_enabled.store(
+        obs_data_get_bool(settings, "log_latency_telemetry"),
+        std::memory_order_relaxed);
 }
 
 void airplay_source_show(void* data)

@@ -123,4 +123,19 @@ private:
     std::unique_ptr<AudioDecoder> m_audio_decoder;
     uint64_t m_video_frame_counter = 0;
     uint64_t m_audio_frame_counter = 0;
+
+    // Latency telemetry (rolling window stats)
+    uint64_t m_v_decode_ns_sum = 0, m_v_decode_ns_max = 0;
+    uint64_t m_v_output_ns_sum = 0, m_v_output_ns_max = 0;
+    uint64_t m_v_last_output_ns = 0;
+    uint64_t m_v_interval_ns_sum = 0, m_v_interval_ns_max = 0;
+    uint32_t m_v_window_count = 0;
+
+    uint64_t m_a_decode_ns_sum = 0, m_a_decode_ns_max = 0;
+    uint64_t m_a_output_ns_sum = 0, m_a_output_ns_max = 0;
+    uint32_t m_a_window_count = 0;
 };
+
+// Global toggle for per-frame latency telemetry. Off by default; flipped on
+// from the source properties pane.
+extern std::atomic<bool> g_latency_telemetry_enabled;

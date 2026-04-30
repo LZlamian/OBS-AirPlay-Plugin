@@ -20,7 +20,7 @@ static std::shared_ptr<UxPlayIntegration> g_uxplay_integration;
 
 bool obs_module_load(void)
 {
-    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.2.0)");
+    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.2.1)");
     
     try {
         // Register the AirPlay source
