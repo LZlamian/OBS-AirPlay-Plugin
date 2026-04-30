@@ -3,6 +3,10 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <pthread.h>
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
 
 // UxPlay headers (extern "C" to avoid C++ name mangling issues)
 extern "C" {
@@ -12,6 +16,32 @@ extern "C" {
 #include "../uxplay/lib/stream.h"
 #include "../uxplay/lib/dnssd.h"
 }
+
+namespace {
+// Boost the calling thread to USER_INTERACTIVE QoS exactly once per thread.
+// UxPlay invokes our video/audio callbacks on its receiver thread; raising
+// its scheduling class reduces jitter spikes when other apps compete for
+// CPU. macOS's QoS API does not require special entitlements and gracefully
+// no-ops if the requested class can't be granted.
+void boost_caller_thread_qos_once(const char* tag)
+{
+#if defined(__APPLE__)
+    static thread_local bool boosted = false;
+    if (boosted) {
+        return;
+    }
+    boosted = true;
+    int rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    if (rc == 0) {
+        blog(LOG_INFO, "Boosted %s receiver thread to QOS_CLASS_USER_INTERACTIVE", tag);
+    } else {
+        blog(LOG_WARNING, "Failed to boost %s receiver thread QoS (rc=%d)", tag, rc);
+    }
+#else
+    (void)tag;
+#endif
+}
+} // namespace
 
 UxPlayIntegration::UxPlayIntegration()
     : m_running(false)
@@ -417,6 +447,8 @@ void UxPlayIntegration::processVideoData(video_decode_struct* data)
         return;
     }
 
+    boost_caller_thread_qos_once("video");
+
     VideoFrameCallback callback;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -440,6 +472,8 @@ void UxPlayIntegration::processAudioData(audio_decode_struct* data)
     if (!data || !data->data) {
         return;
     }
+
+    boost_caller_thread_qos_once("audio");
 
     AudioDataCallback callback;
     {
