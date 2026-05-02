@@ -89,6 +89,9 @@ obs_properties_t* airplay_source_get_properties(void* data)
     obs_properties_add_bool(props, "log_latency_telemetry",
         "Log latency telemetry (decode/output ms, every 120 video / 240 audio frames)");
 
+    obs_properties_add_text(props, "plugin_version",
+        "OBS AirPlay Plugin v" PLUGIN_VERSION, OBS_TEXT_INFO);
+
     return props;
 }
 

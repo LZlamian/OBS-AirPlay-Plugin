@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16...3.26)
 
-project(obs-airplay VERSION 1.2.2)
+project(obs-airplay VERSION 1.2.3)
 
 set(PLUGIN_AUTHOR "Your Name")
 set(MACOS_BUNDLEID "com.yourname.obs-airplay")
@@ -285,6 +285,10 @@ target_include_directories(obs-airplay PRIVATE
     ${FFMPEG_INCLUDE_DIRS}
     ${LIBPLIST_INCLUDE_DIRS}
     ${FDK_AAC_INCLUDE_DIRS}
+)
+
+target_compile_definitions(obs-airplay PRIVATE
+    PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
 )
 
 # Link libraries
