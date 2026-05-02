@@ -2,7 +2,7 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v1.2.2**
+Current release: **v1.2.3**
 
 ## Features
 
@@ -29,7 +29,25 @@ Current release: **v1.2.2**
 
 ## Installation
 
-### 1. Install Dependencies
+### Before You Begin
+確保在安装前满足以下前提条件 / Ensure the following before installing:
+
+1. <img width="272" height="344" alt="1" src="https://github.com/user-attachments/assets/7b756c57-56e6-4f57-a043-5d5e2350fe5c" />
+
+2. <img width="703" height="613" alt="2" src="https://github.com/user-attachments/assets/2a247c6c-ef54-4d92-9532-8c338d124d69" />
+
+3. <img width="716" height="619" alt="3" src="https://github.com/user-attachments/assets/423eebf2-14db-4a28-9940-7b43c04ca840" />
+
+### macOS Security Warning
+When double clicking to install you may get a notice indicating it's not safe to install. **DO NOT move it to trash.** Click **Done**.  
+双击安装时，您可能会看到提示指出该安装程序不安全。**请勿移至废纸篓**，点击「完成」。
+
+Next go to **Apple Menu () → System Settings → Privacy & Security**, scroll to the bottom and click **Open Anyway**. Proceed to install.  
+接下来前往 **Apple 菜单 () → 系统设置 → 隐私与安全性**，滚动到底部点击**「仍要打开」**，然后继续安装。
+
+### Quick Install (Recommended)
+
+Download the latest `.pkg` installer from the [Releases page](https://github.com/LZlamian/OBS-AirPlay-Plugin/releases) and double-click to install.
 
 ```bash
 # Install Xcode Command Line Tools
@@ -98,8 +116,22 @@ Close and reopen OBS Studio to load the plugin.
 ## Usage
 
 ### Setting Up in OBS
+安装完成后，请按照以下步骤操作 / Once installed follow the steps below:
 
-1. **Add the AirPlay Source**
+1. <img width="789" height="343" alt="Step 1" src="https://github.com/user-attachments/assets/29bc5a51-b681-4a4d-867b-8c7e86c99e16" />
+2. <img width="969" height="649" alt="Step 2" src="https://github.com/user-attachments/assets/23dbe5f3-e9cf-4a2d-94df-1879f4ffdc12" />
+3. <img width="959" height="717" alt="Step 3" src="https://github.com/user-attachments/assets/6e97e402-d92f-4477-a656-2e91ee01eff6" />
+4. <img width="958" height="838" alt="Step 4" src="https://github.com/user-attachments/assets/9ed028ed-5354-4f8e-a112-a94bb3829d88" />
+5. <img width="959" height="828" alt="Step 5" src="https://github.com/user-attachments/assets/bd24e97b-d491-47f2-9117-2553a3484c54" />
+
+### Connect from iOS
+完成上述操作后，在您的 iPhone/iPad 上执行以下步骤 / After this, on your iPhone/iPad:
+
+1. ![Control Centre Screen Mirroring](https://github.com/user-attachments/assets/68b9ade9-0159-4835-9be7-2445a9dc31d9)
+2. <img width="302" height="329" alt="Select OBS AirPlay" src="https://github.com/user-attachments/assets/125c8617-8ce8-4b01-b067-2b802304aaa2" />
+
+现在，您应该可以看到您的设备已通过 AirPlay 镜像到 OBS 的「来源」中了！:)  
+You should now see your device mirrored through AirPlay as an OBS source 🎉
    - In OBS, click the `+` button in the Sources panel
    - Select "AirPlay" from the list
    - Give it a name (e.g., "iPhone Screen")
