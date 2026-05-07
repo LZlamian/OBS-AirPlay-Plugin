@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16...3.26)
 
-project(obs-airplay VERSION 1.2.3)
+project(obs-airplay VERSION 1.3.0)
 
 set(PLUGIN_AUTHOR "Your Name")
 set(MACOS_BUNDLEID "com.yourname.obs-airplay")

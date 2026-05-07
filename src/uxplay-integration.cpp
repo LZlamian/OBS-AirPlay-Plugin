@@ -58,7 +58,8 @@ UxPlayIntegration::~UxPlayIntegration()
     stop();
 }
 
-bool UxPlayIntegration::start(const std::string& device_id_str, int port)
+bool UxPlayIntegration::start(const std::string& device_id_str, int port,
+                              const std::string& server_name)
 {
     blog(LOG_INFO, "=== Starting UxPlay Integration ===");
     blog(LOG_INFO, "Requested port: %d", port);
@@ -284,9 +285,9 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port)
         }
 
         int dnssd_error = 0;
-        const char* service_name = "OBS AirPlay";
-        m_dnssd = dnssd_init(service_name,
-                             static_cast<int>(std::strlen(service_name)),
+        const std::string svc_name = server_name.empty() ? "OBS AirPlay" : server_name;
+        m_dnssd = dnssd_init(svc_name.c_str(),
+                             static_cast<int>(svc_name.size()),
                              hw_addr.data(),
                              static_cast<int>(hw_addr.size()),
                              &dnssd_error,

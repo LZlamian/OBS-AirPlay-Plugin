@@ -2,7 +2,7 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v1.2.3**
+Current release: **v1.3.0**
 
 ## Features
 
@@ -13,6 +13,7 @@ Current release: **v1.2.3**
 - ✅ AAC audio decoding
 - ✅ No password required
 - ✅ Works on the same network/VLAN
+- ✅ **Configurable server name** — rename the receiver directly from OBS source properties (great when running the plugin on multiple computers)
 
 ## Requirements
 
@@ -224,11 +225,10 @@ You should now see your device mirrored through AirPlay as an OBS source 🎉
 
 ### Changing Server Name
 
-Edit `src/plugin-main.cpp`:
+In OBS, right-click the AirPlay source → **Properties** and edit the **Server Name** field.  
+The default is `OBS AirPlay`. Change it to any name you like (e.g. `Studio Mac`, `MacBook Pro`) — the new name takes effect immediately and is saved with the scene.
 
-```cpp
-g_airplay_server->start("Your Custom Name", 7000, 5000);
-```
+> **Tip:** If you run the plugin on multiple computers at the same time, give each a unique server name so iOS devices can tell them apart in the Screen Mirroring list.
 
 ### Changing Ports
 

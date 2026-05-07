@@ -17,10 +17,40 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-airplay", "en-US")
 
 static std::shared_ptr<AirPlayServer> g_airplay_server;
 static std::shared_ptr<UxPlayIntegration> g_uxplay_integration;
+static std::string g_server_name = "OBS AirPlay";
+// Cached UxPlay port and PK so update_server_name() can restart mDNS without
+// restarting the RAOP stack.
+static uint16_t g_uxplay_actual_port = 0;
+static std::string g_uxplay_pk;
+
+// Called from airplay_source_update() when the user changes the server name.
+// Restarts only mDNS advertising; the UxPlay RAOP stack keeps running so
+// in-flight sessions are not dropped.
+void update_server_name(const std::string& new_name)
+{
+    if (new_name == g_server_name && g_airplay_server && g_airplay_server->isRunning())
+        return;
+
+    g_server_name = new_name.empty() ? "OBS AirPlay" : new_name;
+    blog(LOG_INFO, "Updating AirPlay server name to: %s", g_server_name.c_str());
+
+    if (!g_airplay_server)
+        return;
+
+    g_airplay_server->stop();
+    if (g_uxplay_actual_port > 0) {
+        if (g_airplay_server->startMDNS(g_server_name, g_uxplay_actual_port,
+                                        g_uxplay_actual_port, g_uxplay_pk)) {
+            blog(LOG_INFO, "mDNS restarted with new server name: %s", g_server_name.c_str());
+        } else {
+            blog(LOG_WARNING, "Failed to restart mDNS after server name change");
+        }
+    }
+}
 
 bool obs_module_load(void)
 {
-    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.2.2)");
+    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.3.0)");
     
     try {
         // Register the AirPlay source
@@ -50,7 +80,7 @@ bool obs_module_load(void)
         // Start UxPlay integration for proper AirPlay protocol handling
         blog(LOG_INFO, "Starting UxPlay integration with MAC: %s", mac_address.c_str());
         g_uxplay_integration = std::make_shared<UxPlayIntegration>();
-        if (!g_uxplay_integration->start(mac_address, 7000)) {
+        if (!g_uxplay_integration->start(mac_address, 7000, g_server_name)) {
             blog(LOG_WARNING, "Failed to start UxPlay integration - continuing with basic server only");
             // Don't return false - continue with basic server
         } else {
@@ -77,11 +107,13 @@ bool obs_module_load(void)
             // Start mDNS advertising for UxPlay on the actual port it's using
             uint16_t actual_port = g_uxplay_integration->getActualPort();
             std::string pk = g_uxplay_integration->getPK();
+            g_uxplay_actual_port = actual_port;
+            g_uxplay_pk = pk;
             
             blog(LOG_INFO, "Starting mDNS advertising for UxPlay on actual port %d with PK: %s", actual_port, pk.c_str());
             
             // Only start mDNS, don't start the basic server sockets
-            if (g_airplay_server->startMDNS("OBS AirPlay", actual_port, actual_port, pk)) {
+            if (g_airplay_server->startMDNS(g_server_name, actual_port, actual_port, pk)) {
                 blog(LOG_INFO, "mDNS advertising started for UxPlay on port %d", actual_port);
             } else {
                 blog(LOG_WARNING, "Failed to start mDNS advertising for UxPlay");

@@ -35,7 +35,8 @@ public:
     ~UxPlayIntegration();
     
     // Start the UxPlay server
-    bool start(const std::string& device_id, int port = 7000);
+    bool start(const std::string& device_id, int port = 7000,
+               const std::string& server_name = "OBS AirPlay");
     
     // Stop the server
     void stop();

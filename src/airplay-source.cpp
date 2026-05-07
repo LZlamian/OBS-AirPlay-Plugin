@@ -59,6 +59,7 @@ void airplay_source_destroy(void* data)
 
 void airplay_source_get_defaults(obs_data_t* settings)
 {
+    obs_data_set_default_string(settings, "server_name", "OBS AirPlay");
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
 }
 
@@ -67,7 +68,11 @@ obs_properties_t* airplay_source_get_properties(void* data)
     UNUSED_PARAMETER(data);
     
     obs_properties_t* props = obs_properties_create();
-    
+
+    obs_properties_add_text(props, "server_name",
+        obs_module_text("AirPlay.ServerName"),
+        OBS_TEXT_DEFAULT);
+
     obs_properties_add_text(props, "info", 
         "Add this source to start receiving AirPlay streams.\n"
         "Your device should appear in the screen mirroring list on iOS devices.",
@@ -98,6 +103,15 @@ obs_properties_t* airplay_source_get_properties(void* data)
 void airplay_source_update(void* data, obs_data_t* settings)
 {
     UNUSED_PARAMETER(data);
+
+    const char* new_name = obs_data_get_string(settings, "server_name");
+    if (new_name && *new_name) {
+        auto server = get_airplay_server();
+        if (!server || server->getServerName() != std::string(new_name)) {
+            update_server_name(new_name);
+        }
+    }
+
     g_latency_telemetry_enabled.store(
         obs_data_get_bool(settings, "log_latency_telemetry"),
         std::memory_order_relaxed);

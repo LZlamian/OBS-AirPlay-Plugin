@@ -16,6 +16,9 @@ void airplay_source_hide(void* data);
 // Get the global AirPlay server
 std::shared_ptr<class AirPlayServer> get_airplay_server();
 
+// Update the advertised AirPlay server name and restart mDNS
+void update_server_name(const std::string& new_name);
+
 struct AirPlaySource {
     obs_source_t* source;
     bool active;
