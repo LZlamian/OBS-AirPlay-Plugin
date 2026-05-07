@@ -49,6 +49,7 @@ UxPlayIntegration::UxPlayIntegration()
     , m_should_stop(false)
     , m_raop(nullptr)
     , m_dnssd(nullptr)
+    , m_hw_addr{}
     , m_actual_port(0)
 {
 }
@@ -286,6 +287,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
 
         int dnssd_error = 0;
         const std::string svc_name = server_name.empty() ? "OBS AirPlay" : server_name;
+        m_hw_addr = hw_addr;  // store for later name updates
         m_dnssd = dnssd_init(svc_name.c_str(),
                              static_cast<int>(svc_name.size()),
                              hw_addr.data(),
@@ -393,6 +395,40 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
 void UxPlayIntegration::disableInternalMDNS()
 {
     // No-op: kept for compatibility with existing call sites.
+}
+
+void UxPlayIntegration::updateServerName(const std::string& name)
+{
+    if (!m_raop) {
+        return;
+    }
+
+    const std::string svc_name = name.empty() ? "OBS AirPlay" : name;
+    blog(LOG_INFO, "Updating UxPlay dnssd service name to: %s", svc_name.c_str());
+
+    int dnssd_error = 0;
+    dnssd_t* new_dnssd = dnssd_init(svc_name.c_str(),
+                                    static_cast<int>(svc_name.size()),
+                                    m_hw_addr.data(),
+                                    static_cast<int>(m_hw_addr.size()),
+                                    &dnssd_error,
+                                    0);
+    if (!new_dnssd || dnssd_error != DNSSD_ERROR_NOERROR) {
+        blog(LOG_WARNING, "Failed to reinitialize dnssd for name update (error=%d)", dnssd_error);
+        return;
+    }
+
+    // Swap in the new context; RAOP stack keeps running
+    raop_set_dnssd(m_raop, new_dnssd);
+
+    dnssd_t* old_dnssd = m_dnssd;
+    m_dnssd = new_dnssd;
+
+    if (old_dnssd) {
+        dnssd_destroy(old_dnssd);
+    }
+
+    blog(LOG_INFO, "UxPlay dnssd service name updated successfully");
 }
 
 std::string UxPlayIntegration::getPK() const

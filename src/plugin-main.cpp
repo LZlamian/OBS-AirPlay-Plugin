@@ -24,8 +24,8 @@ static uint16_t g_uxplay_actual_port = 0;
 static std::string g_uxplay_pk;
 
 // Called from airplay_source_update() when the user changes the server name.
-// Restarts only mDNS advertising; the UxPlay RAOP stack keeps running so
-// in-flight sessions are not dropped.
+// Updates the UxPlay dnssd context (live, no session drop) and restarts mDNS
+// advertising so both the discovery name and the protocol-level /info name match.
 void update_server_name(const std::string& new_name)
 {
     if (new_name == g_server_name && g_airplay_server && g_airplay_server->isRunning())
@@ -33,6 +33,11 @@ void update_server_name(const std::string& new_name)
 
     g_server_name = new_name.empty() ? "OBS AirPlay" : new_name;
     blog(LOG_INFO, "Updating AirPlay server name to: %s", g_server_name.c_str());
+
+    // Update UxPlay's internal dnssd context so /info responses use the new name
+    if (g_uxplay_integration) {
+        g_uxplay_integration->updateServerName(g_server_name);
+    }
 
     if (!g_airplay_server)
         return;
@@ -50,7 +55,7 @@ void update_server_name(const std::string& new_name)
 
 bool obs_module_load(void)
 {
-    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.3.0)");
+    blog(LOG_INFO, "OBS AirPlay Plugin loaded (version 1.3.1)");
     
     try {
         // Register the AirPlay source

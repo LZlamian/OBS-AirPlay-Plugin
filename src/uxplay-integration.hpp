@@ -52,6 +52,9 @@ public:
     
     // Disable UxPlay's internal mDNS to prevent crashes
     void disableInternalMDNS();
+
+    // Update the advertised server name in the UxPlay dnssd context (live, no restart)
+    void updateServerName(const std::string& name);
     
     // Set callbacks for video and audio
     void setVideoCallback(VideoFrameCallback callback);
@@ -73,6 +76,9 @@ private:
 
     // UxPlay DNS-SD state used by RAOP handlers (for /info and TXT payloads)
     dnssd_t* m_dnssd;
+
+    // Hardware address stored so dnssd can be reinitialized on name change
+    std::array<char, 6> m_hw_addr;
     
     // Actual port UxPlay is running on
     uint16_t m_actual_port;
