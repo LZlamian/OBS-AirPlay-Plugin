@@ -28,7 +28,8 @@ static std::string g_uxplay_pk;
 // advertising so both the discovery name and the protocol-level /info name match.
 void update_server_name(const std::string& new_name)
 {
-    if (new_name == g_server_name && g_airplay_server && g_airplay_server->isRunning())
+    if (new_name == g_server_name && g_airplay_server &&
+        g_airplay_server->isRunning() && g_airplay_server->getServerName() == new_name)
         return;
 
     g_server_name = new_name.empty() ? "OBS AirPlay" : new_name;

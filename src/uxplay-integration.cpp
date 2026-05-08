@@ -418,13 +418,27 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         return;
     }
 
-    // Swap in the new context; RAOP stack keeps running
+    // raop_set_dnssd must be called before dnssd_register_raop/airplay because
+    // it sets dnssd->pk (the public key string) via dnssd_set_pk(). Without it,
+    // dnssd->pk is NULL and dnssd_register_raop crashes in strlen(dnssd->pk).
     raop_set_dnssd(m_raop, new_dnssd);
+
+    int raop_reg_err = dnssd_register_raop(new_dnssd, m_actual_port);
+    if (raop_reg_err != DNSSD_ERROR_NOERROR) {
+        blog(LOG_WARNING, "dnssd_register_raop returned %d for updated context", raop_reg_err);
+    }
+    int airplay_reg_err = dnssd_register_airplay(new_dnssd, m_actual_port);
+    if (airplay_reg_err != DNSSD_ERROR_NOERROR) {
+        blog(LOG_WARNING, "dnssd_register_airplay returned %d for updated context", airplay_reg_err);
+    }
 
     dnssd_t* old_dnssd = m_dnssd;
     m_dnssd = new_dnssd;
 
     if (old_dnssd) {
+        // Unregister before destroy (mirrors what stop() does).
+        dnssd_unregister_raop(old_dnssd);
+        dnssd_unregister_airplay(old_dnssd);
         dnssd_destroy(old_dnssd);
     }
 

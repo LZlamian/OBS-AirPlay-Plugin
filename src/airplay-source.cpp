@@ -42,10 +42,17 @@ const char* airplay_source_get_name(void* type_data)
 
 void* airplay_source_create(obs_data_t* settings, obs_source_t* source)
 {
-    UNUSED_PARAMETER(settings);
-    
     auto airplay_source = new AirPlaySource(source);
-    
+
+    // OBS may defer the 'update' callback to the graphics thread via
+    // obs_source_video_tick. Apply the saved name here, synchronously on the
+    // main thread, so the server advertises the correct name from the moment
+    // the source is loaded — not just after the first frame tick.
+    const char* saved_name = obs_data_get_string(settings, "server_name");
+    if (saved_name && *saved_name) {
+        update_server_name(saved_name);
+    }
+
     blog(LOG_INFO, "AirPlay source created");
     return airplay_source;
 }
@@ -63,15 +70,37 @@ void airplay_source_get_defaults(obs_data_t* settings)
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
 }
 
+static bool reset_server_name_clicked(obs_properties_t* props, obs_property_t* property,
+                                      void* data)
+{
+    UNUSED_PARAMETER(props);
+    UNUSED_PARAMETER(property);
+
+    auto* airplay_src = static_cast<AirPlaySource*>(data);
+    if (!airplay_src || !airplay_src->source)
+        return false;
+
+    obs_data_t* settings = obs_source_get_settings(airplay_src->source);
+    obs_data_set_string(settings, "server_name", "OBS AirPlay");
+    obs_source_update(airplay_src->source, settings);
+    obs_data_release(settings);
+
+    return true; // Refresh the properties UI so the text field shows the reset value
+}
+
 obs_properties_t* airplay_source_get_properties(void* data)
 {
-    UNUSED_PARAMETER(data);
-    
+    auto* airplay_src = static_cast<AirPlaySource*>(data);
+
     obs_properties_t* props = obs_properties_create();
 
     obs_properties_add_text(props, "server_name",
         obs_module_text("AirPlay.ServerName"),
         OBS_TEXT_DEFAULT);
+
+    obs_properties_add_button(props, "reset_server_name",
+        obs_module_text("AirPlay.ResetServerName"),
+        reset_server_name_clicked);
 
     obs_properties_add_text(props, "info", 
         "Add this source to start receiving AirPlay streams.\n"
@@ -106,10 +135,9 @@ void airplay_source_update(void* data, obs_data_t* settings)
 
     const char* new_name = obs_data_get_string(settings, "server_name");
     if (new_name && *new_name) {
-        auto server = get_airplay_server();
-        if (!server || server->getServerName() != std::string(new_name)) {
-            update_server_name(new_name);
-        }
+        // Always forward to update_server_name; it contains the authoritative
+        // no-op guard (checks g_server_name, isRunning(), AND getServerName()).
+        update_server_name(new_name);
     }
 
     g_latency_telemetry_enabled.store(
