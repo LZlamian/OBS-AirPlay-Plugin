@@ -32,6 +32,10 @@ AudioDecoder::AudioDecoder()
     if (!m_frame || !m_packet) {
         blog(LOG_ERROR, "Failed to allocate FFmpeg audio frame/packet");
     }
+    // Pre-warm AAC-ELD decoder — iOS always uses this for screen mirroring.
+    // Calling avcodec_open2 eagerly here removes it from the first-packet
+    // critical path, saving ~100-200ms on initial connection.
+    configureDecoder(8);
 }
 
 AudioDecoder::~AudioDecoder()
@@ -51,6 +55,14 @@ AudioDecoder::~AudioDecoder()
     if (m_packet) {
         av_packet_free(&m_packet);
     }
+}
+
+void AudioDecoder::flush()
+{
+    if (m_codec_context)
+        avcodec_flush_buffers(m_codec_context);
+    if (m_frame)
+        av_frame_unref(m_frame);
 }
 
 bool AudioDecoder::configureDecoder(uint8_t ct)
@@ -202,8 +214,14 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
     }
 
     av_packet_unref(m_packet);
-    m_packet->data = const_cast<uint8_t*>(data);
-    m_packet->size = static_cast<int>(size);
+    if (av_new_packet(m_packet, static_cast<int>(size)) < 0) {
+        static uint64_t alloc_errors = 0;
+        if ((alloc_errors++ % 60) == 0) {
+            blog(LOG_ERROR, "Failed to allocate audio packet buffer");
+        }
+        return false;
+    }
+    memcpy(m_packet->data, data, size);
 
     int ret = avcodec_send_packet(m_codec_context, m_packet);
     if (ret < 0) {

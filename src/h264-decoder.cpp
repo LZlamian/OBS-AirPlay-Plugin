@@ -1,5 +1,6 @@
 #include "h264-decoder.hpp"
 #include <obs-module.h>
+#include <cstring>
 
 H264Decoder::H264Decoder(AVCodecID codec_id)
     : m_codec_context(nullptr)
@@ -71,6 +72,14 @@ H264Decoder::~H264Decoder()
     }
 }
 
+void H264Decoder::flush()
+{
+    if (m_codec_context)
+        avcodec_flush_buffers(m_codec_context);
+    if (m_frame)
+        av_frame_unref(m_frame);
+}
+
 bool H264Decoder::decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame)
 {
     if (!m_codec_context || !m_frame || !m_frame_i420 || !m_packet) {
@@ -78,8 +87,11 @@ bool H264Decoder::decodeToI420(const uint8_t* data, size_t size, DecodedVideoFra
     }
     
     av_packet_unref(m_packet);
-    m_packet->data = const_cast<uint8_t*>(data);
-    m_packet->size = static_cast<int>(size);
+    if (av_new_packet(m_packet, static_cast<int>(size)) < 0) {
+        blog(LOG_ERROR, "Failed to allocate video packet buffer");
+        return false;
+    }
+    memcpy(m_packet->data, data, size);
     
     int ret = avcodec_send_packet(m_codec_context, m_packet);
     if (ret < 0) {

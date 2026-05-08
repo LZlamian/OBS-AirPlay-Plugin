@@ -44,12 +44,10 @@ void boost_caller_thread_qos_once(const char* tag)
 } // namespace
 
 UxPlayIntegration::UxPlayIntegration()
-    : m_running(false)
-    , m_worker_thread(nullptr)
-    , m_should_stop(false)
-    , m_raop(nullptr)
+    : m_raop(nullptr)
     , m_dnssd(nullptr)
     , m_hw_addr{}
+    , m_server_name("OBS AirPlay")
     , m_actual_port(0)
 {
 }
@@ -121,6 +119,12 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // Set up RAOP callbacks
         raop_callbacks_t callbacks = {};
         callbacks.cls = this;
+
+        // Timing: fires when iOS first TCP-connects (before handshake).
+        callbacks.conn_init = [](void* cls) {
+            blog(LOG_INFO, "[TIMING] iOS connected — AirPlay handshake starting");
+            UNUSED_PARAMETER(cls);
+        };
         
         // Set video and audio processing callbacks
         callbacks.video_process = [](void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
@@ -140,11 +144,16 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // Required by UxPlay runtime; provide safe defaults for callbacks
         // that UxPlay may call without null checks.
         callbacks.conn_feedback = [](void* cls) {
+            blog(LOG_INFO, "[TIMING] conn_feedback (iOS reverse channel established)");
             UNUSED_PARAMETER(cls);
         };
         callbacks.conn_reset = [](void* cls, int reason) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(reason);
+            if (cls) {
+                auto* self = static_cast<UxPlayIntegration*>(cls);
+                blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
+                self->m_first_video_logged.store(false); // reset for next connection timing
+                self->processConnReset();
+            }
         };
         callbacks.video_flush = [](void* cls) {
             UNUSED_PARAMETER(cls);
@@ -225,12 +234,16 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             UNUSED_PARAMETER(cls);
         };
         callbacks.video_reset = [](void* cls, reset_type_t reset_type) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(reset_type);
+            if (cls) {
+                auto* self = static_cast<UxPlayIntegration*>(cls);
+                blog(LOG_INFO, "[UxPlay] Video reset (type=%d) — flushing decoders", static_cast<int>(reset_type));
+                self->processConnReset();
+            }
         };
         callbacks.video_set_codec = [](void* cls, video_codec_t codec) -> int {
+            blog(LOG_INFO, "[TIMING] SETUP complete — codec negotiated (%s), iOS will start encoding soon",
+                 codec == VIDEO_CODEC_H265 ? "H265/HEVC" : "H264");
             UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(codec);
             return 0;
         };
         
@@ -286,8 +299,12 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }
 
         int dnssd_error = 0;
-        const std::string svc_name = server_name.empty() ? "OBS AirPlay" : server_name;
-        m_hw_addr = hw_addr;  // store for later name updates
+        // Use any name queued by updateServerName() before start() ran, otherwise
+        // fall back to the parameter (loaded from saved prefs by obs_module_load).
+        const std::string svc_name = !m_server_name.empty() ? m_server_name
+                                     : (server_name.empty() ? "OBS AirPlay" : server_name);
+        m_server_name = svc_name;     // canonical record
+        m_hw_addr = hw_addr;          // store for later name updates
         m_dnssd = dnssd_init(svc_name.c_str(),
                              static_cast<int>(svc_name.size()),
                              hw_addr.data(),
@@ -399,12 +416,35 @@ void UxPlayIntegration::disableInternalMDNS()
 
 void UxPlayIntegration::updateServerName(const std::string& name)
 {
-    if (!m_raop) {
-        return;
+    // Hold m_mutex only for the running/raop check; release before calling
+    // into UxPlay/DNS-SD to avoid deadlock with audio/video callback threads.
+    raop_t* raop_ref = nullptr;
+    dnssd_t* old_dnssd = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_raop) {
+            // UxPlay not yet started — update the pending name so start() picks it up.
+            m_server_name = name.empty() ? "OBS AirPlay" : name;
+            return;
+        }
+        raop_ref = m_raop;
+        old_dnssd = m_dnssd;
+        m_dnssd   = nullptr; // Claimed — we own it now.
     }
 
     const std::string svc_name = name.empty() ? "OBS AirPlay" : name;
     blog(LOG_INFO, "Updating UxPlay dnssd service name to: %s", svc_name.c_str());
+
+    // Unregister the old service FIRST so iOS sees it disappear, which forces
+    // a fresh mDNS discovery when the new name is announced.  If we register
+    // the new name before removing the old one, iOS caches the old entry and
+    // ignores the new advertisement until the next connection.
+    if (old_dnssd) {
+        dnssd_unregister_raop(old_dnssd);
+        dnssd_unregister_airplay(old_dnssd);
+        dnssd_destroy(old_dnssd);
+        old_dnssd = nullptr;
+    }
 
     int dnssd_error = 0;
     dnssd_t* new_dnssd = dnssd_init(svc_name.c_str(),
@@ -421,7 +461,7 @@ void UxPlayIntegration::updateServerName(const std::string& name)
     // raop_set_dnssd must be called before dnssd_register_raop/airplay because
     // it sets dnssd->pk (the public key string) via dnssd_set_pk(). Without it,
     // dnssd->pk is NULL and dnssd_register_raop crashes in strlen(dnssd->pk).
-    raop_set_dnssd(m_raop, new_dnssd);
+    raop_set_dnssd(raop_ref, new_dnssd);
 
     int raop_reg_err = dnssd_register_raop(new_dnssd, m_actual_port);
     if (raop_reg_err != DNSSD_ERROR_NOERROR) {
@@ -432,14 +472,10 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         blog(LOG_WARNING, "dnssd_register_airplay returned %d for updated context", airplay_reg_err);
     }
 
-    dnssd_t* old_dnssd = m_dnssd;
-    m_dnssd = new_dnssd;
-
-    if (old_dnssd) {
-        // Unregister before destroy (mirrors what stop() does).
-        dnssd_unregister_raop(old_dnssd);
-        dnssd_unregister_airplay(old_dnssd);
-        dnssd_destroy(old_dnssd);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_dnssd       = new_dnssd;
+        m_server_name = svc_name;
     }
 
     blog(LOG_INFO, "UxPlay dnssd service name updated successfully");
@@ -455,15 +491,19 @@ std::string UxPlayIntegration::getPK() const
 
 void UxPlayIntegration::stop()
 {
-    if (!m_running) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running) {
+            return;
+        }
+        m_running = false;
     }
     
     blog(LOG_INFO, "Stopping UxPlay integration");
     
-    m_running = false;
-    
-    // Stop RAOP HTTP server
+    // raop_destroy/dnssd_destroy are called outside m_mutex to avoid deadlock:
+    // UxPlay's audio/video threads may be blocked waiting for m_mutex (in
+    // processVideoData/processAudioData), and raop_destroy joins those threads.
     if (m_raop) {
         raop_stop_httpd(m_raop);
         raop_destroy(m_raop);
@@ -480,6 +520,24 @@ void UxPlayIntegration::stop()
     blog(LOG_INFO, "UxPlay integration stopped");
 }
 
+void UxPlayIntegration::setConnectionResetCallback(ConnectionResetCallback callback)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_reset_callback = callback;
+}
+
+void UxPlayIntegration::processConnReset()
+{
+    ConnectionResetCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        callback = m_reset_callback;
+    }
+    if (callback) {
+        callback();
+    }
+}
+
 void UxPlayIntegration::setVideoCallback(VideoFrameCallback callback)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -494,11 +552,17 @@ void UxPlayIntegration::setAudioCallback(AudioDataCallback callback)
 
 void UxPlayIntegration::processVideoData(video_decode_struct* data)
 {
-    if (!data || !data->data) {
+    if (!data || !data->data || data->data_len <= 0) {
         return;
     }
 
     boost_caller_thread_qos_once("video");
+
+    // Log the first video packet to measure iOS screen-capture startup latency.
+    if (!m_first_video_logged.exchange(true)) {
+        blog(LOG_INFO, "[TIMING] First video packet received from iOS (%d bytes, H265=%s)",
+             data->data_len, data->is_h265 ? "yes" : "no");
+    }
 
     VideoFrameCallback callback;
     {
@@ -520,7 +584,7 @@ void UxPlayIntegration::processVideoData(video_decode_struct* data)
 
 void UxPlayIntegration::processAudioData(audio_decode_struct* data)
 {
-    if (!data || !data->data) {
+    if (!data || !data->data || data->data_len <= 0) {
         return;
     }
 
@@ -545,16 +609,4 @@ void UxPlayIntegration::processAudioData(audio_decode_struct* data)
              data->ntp_time_local);
 }
 
-void UxPlayIntegration::workerThread()
-{
-    blog(LOG_INFO, "UxPlay worker thread started");
-    
-    while (!m_should_stop) {
-        // In a real implementation, this would handle UxPlay's main loop
-        // For now, we'll just sleep and check for stop condition
-        std::unique_lock<std::mutex> lock(m_mutex);
-        m_cv.wait_for(lock, std::chrono::milliseconds(100), [this] { return m_should_stop.load(); });
-    }
-    
-    blog(LOG_INFO, "UxPlay worker thread stopped");
-}
+

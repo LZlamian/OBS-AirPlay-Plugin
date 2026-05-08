@@ -17,6 +17,7 @@ public:
     bool decode(const uint8_t* data, size_t size, uint8_t ct,
                 std::vector<float>& left, std::vector<float>& right,
                 int& sample_rate);
+    void flush();
 
 private:
     bool configureDecoder(uint8_t ct);

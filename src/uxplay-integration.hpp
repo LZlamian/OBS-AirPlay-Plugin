@@ -5,7 +5,6 @@
 #include <functional>
 #include <thread>
 #include <mutex>
-#include <condition_variable>
 #include <atomic>
 #include <cstddef>
 
@@ -29,6 +28,9 @@ typedef std::function<void(const uint8_t* data, size_t size, uint64_t pts, bool 
 // Raw compressed AirPlay audio payload callback
 typedef std::function<void(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)> AudioDataCallback;
 
+// Connection reset callback (called when AirPlay client disconnects/reconnects)
+typedef std::function<void()> ConnectionResetCallback;
+
 class UxPlayIntegration {
 public:
     UxPlayIntegration();
@@ -42,7 +44,7 @@ public:
     void stop();
     
     // Check if running
-    bool isRunning() const { return m_running; }
+    bool isRunning() const { return m_running.load(); }
     
     // Get the actual port UxPlay is running on
     uint16_t getActualPort() const { return m_actual_port; }
@@ -56,20 +58,18 @@ public:
     // Update the advertised server name in the UxPlay dnssd context (live, no restart)
     void updateServerName(const std::string& name);
     
-    // Set callbacks for video and audio
+    // Set callbacks for video, audio, and connection reset
     void setVideoCallback(VideoFrameCallback callback);
     void setAudioCallback(AudioDataCallback callback);
+    void setConnectionResetCallback(ConnectionResetCallback callback);
     
 private:
-    bool m_running;
+    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_first_video_logged{false};
     VideoFrameCallback m_video_callback;
     AudioDataCallback m_audio_callback;
+    ConnectionResetCallback m_reset_callback;
     std::mutex m_mutex;
-    
-    // Thread for handling incoming data
-    std::thread* m_worker_thread;
-    std::condition_variable m_cv;
-    std::atomic<bool> m_should_stop;
     
     // UxPlay RAOP instance
     raop_t* m_raop;
@@ -77,16 +77,15 @@ private:
     // UxPlay DNS-SD state used by RAOP handlers (for /info and TXT payloads)
     dnssd_t* m_dnssd;
 
-    // Hardware address stored so dnssd can be reinitialized on name change
+    // Hardware address and server name stored so dnssd can be reinitialized on name change
     std::array<char, 6> m_hw_addr;
+    std::string m_server_name;
     
     // Actual port UxPlay is running on
     uint16_t m_actual_port;
     
-    // Internal video/audio processing
+    // Internal video/audio/reset processing
     void processVideoData(video_decode_struct* data);
     void processAudioData(audio_decode_struct* data);
-    
-    // Worker thread function
-    void workerThread();
+    void processConnReset();
 };

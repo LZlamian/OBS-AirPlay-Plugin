@@ -24,6 +24,7 @@ public:
     ~H264Decoder();
     
     bool decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame);
+    void flush();
     
 private:
     AVCodecContext* m_codec_context;

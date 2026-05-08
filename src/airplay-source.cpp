@@ -1,6 +1,9 @@
 #include "airplay-source.hpp"
 #include "airplay-server.hpp"
+#include "uxplay-integration.hpp"
 #include <obs-module.h>
+
+extern std::shared_ptr<UxPlayIntegration> get_uxplay_integration();
 
 AirPlaySource::AirPlaySource(obs_source_t* src)
     : source(src)
@@ -107,16 +110,13 @@ obs_properties_t* airplay_source_get_properties(void* data)
         "Your device should appear in the screen mirroring list on iOS devices.",
         OBS_TEXT_INFO);
     
-    auto server = get_airplay_server();
-    if (server && server->isRunning()) {
-        std::string server_info = "Server Name: " + server->getServerName() + "\n";
-        server_info += "AirPlay Port: " + std::to_string(server->getAirPlayPort()) + "\n";
-        server_info += "RAOP Port: " + std::to_string(server->getRAOPPort()) + "\n";
-        server_info += "Status: Running";
-        
+    auto uxplay = get_uxplay_integration();
+    if (uxplay && uxplay->isRunning()) {
+        std::string server_info = "Status: Running\n";
+        server_info += "Port: " + std::to_string(uxplay->getActualPort());
         obs_properties_add_text(props, "server_info", server_info.c_str(), OBS_TEXT_INFO);
     } else {
-        obs_properties_add_text(props, "server_info", 
+        obs_properties_add_text(props, "server_info",
             "Status: Server not running", OBS_TEXT_INFO);
     }
 
@@ -135,8 +135,8 @@ void airplay_source_update(void* data, obs_data_t* settings)
 
     const char* new_name = obs_data_get_string(settings, "server_name");
     if (new_name && *new_name) {
-        // Always forward to update_server_name; it contains the authoritative
-        // no-op guard (checks g_server_name, isRunning(), AND getServerName()).
+        // Forward to update_server_name which guards against no-op updates
+        // and delegates to UxPlay's dnssd context (the sole mDNS advertiser).
         update_server_name(new_name);
     }
 

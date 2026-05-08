@@ -1,6 +1,5 @@
 #pragma once
 
-#include "mdns-publisher.hpp"
 #include "uxplay-integration.hpp"
 #include "h264-decoder.hpp"
 #include "audio-decoder.hpp"
@@ -33,18 +32,15 @@ public:
                uint16_t airplay_port = 7000, 
                uint16_t raop_port = 5000);
     
-    // Start only mDNS advertising (for UxPlay integration)
-    bool startMDNS(const std::string& server_name = "OBS AirPlay", 
-                   uint16_t airplay_port = 8000,
-                   uint16_t raop_port = 8000,
-                   const std::string& pk = "");
-    
     // Stop the server
     void stop();
     
     // Check if server is running
     bool isRunning() const { return m_running; }
     
+    // Flush FFmpeg decoder contexts (call on client reconnect for clean state)
+    void resetDecoders();
+
     // Register a source to receive AirPlay data
     void registerSource(obs_source_t* source);
     void unregisterSource(obs_source_t* source);
@@ -54,6 +50,7 @@ public:
     uint16_t getAirPlayPort() const { return m_airplay_port; }
     uint16_t getRAOPPort() const { return m_raop_port; }
     std::string getMACAddress() const { return m_mac_address; }
+    void setMACAddress(const std::string& mac) { m_mac_address = mac; }
 
     // Feed encoded video from UxPlay and output decoded frames to registered OBS sources.
     void ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
@@ -69,9 +66,6 @@ private:
     int m_airplay_socket;
     int m_raop_socket;
     
-    // mDNS publisher
-    std::unique_ptr<MDNSPublisher> m_mdns_publisher;
-    
     // Listener threads
     std::thread m_airplay_listener_thread;
     std::thread m_raop_listener_thread;
@@ -80,9 +74,9 @@ private:
     std::mutex m_connections_mutex;
     std::map<int, std::unique_ptr<AirPlayConnection>> m_connections;
     
-    // Registered sources
+    // Registered sources (weak refs — do not prevent source destruction)
     std::mutex m_sources_mutex;
-    std::vector<obs_source_t*> m_registered_sources;
+    std::vector<obs_weak_source_t*> m_registered_sources;
     
     // Server methods
     bool createServerSocket(int& socket_fd, uint16_t port);
@@ -110,10 +104,6 @@ private:
     // Helper functions
     std::string getCurrentDate();
 
-    // UxPlay callback handlers
-    void handleVideoFrame(uint8_t** data, int* linesize, int width, int height, uint64_t pts);
-    void handleAudioData(uint8_t* data, int samples, int channels, int sample_rate, uint64_t pts);
-
     // Generate MAC address
     std::string generateMACAddress();
     std::string m_mac_address;
@@ -121,6 +111,7 @@ private:
     std::unique_ptr<H264Decoder> m_h264_decoder;
     std::unique_ptr<H264Decoder> m_h265_decoder;
     std::unique_ptr<AudioDecoder> m_audio_decoder;
+    std::mutex m_decoder_mutex;
     uint64_t m_video_frame_counter = 0;
     uint64_t m_audio_frame_counter = 0;
 

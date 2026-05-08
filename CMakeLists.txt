@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16...3.26)
 
-project(obs-airplay VERSION 1.4.0)
+project(obs-airplay VERSION 1.5.0)
 
 set(PLUGIN_AUTHOR "Your Name")
 set(MACOS_BUNDLEID "com.yourname.obs-airplay")
@@ -259,7 +259,6 @@ set(obs-airplay_SOURCES
     src/airplay-source.cpp
     src/airplay-server.cpp
     src/uxplay-integration.cpp
-    src/mdns-publisher.cpp
     src/h264-decoder.cpp
     src/audio-decoder.cpp
 )
@@ -268,7 +267,6 @@ set(obs-airplay_HEADERS
     src/airplay-source.hpp
     src/airplay-server.hpp
     src/uxplay-integration.hpp
-    src/mdns-publisher.hpp
     src/h264-decoder.hpp
     src/audio-decoder.hpp
 )

@@ -2,7 +2,7 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v1.4.0**
+Current release: **v1.5.0**
 
 ## Features
 
@@ -14,7 +14,10 @@ Current release: **v1.4.0**
 - ✅ No password required
 - ✅ Works on the same network/VLAN
 - ✅ **Configurable server name** — rename the receiver directly from OBS source properties (great when running the plugin on multiple computers)
+- ✅ **Debounced name updates** — mDNS only re-advertises after you stop typing, not on every keystroke
+- ✅ **Instant Screen Mirroring refresh** — name changes appear in iOS Screen Mirroring immediately, without needing to connect first
 - ✅ **Reset to Default button** — one click restores the server name to "OBS AirPlay"
+- ✅ **Persistent MAC address** — iOS uses fast pair-verify (~100 ms) on every reconnect instead of full pair-setup (~1.5 s)
 
 ## Requirements
 
@@ -227,7 +230,9 @@ You should now see your device mirrored through AirPlay as an OBS source 🎉
 ### Changing Server Name
 
 In OBS, right-click the AirPlay source → **Properties** and edit the **Server Name** field.  
-The default is `OBS AirPlay`. Change it to any name you like (e.g. `Studio Mac`, `MacBook Pro`) — the new name takes effect immediately and is saved with the scene.
+The default is `OBS AirPlay`. Change it to any name you like (e.g. `Studio Mac`, `MacBook Pro`).
+
+The name is applied ~800 ms after you stop typing — mDNS re-advertises once, and the new name appears in the iOS Screen Mirroring list right away (no connection needed).
 
 > **Tip:** If you run the plugin on multiple computers at the same time, give each a unique server name so iOS devices can tell them apart in the Screen Mirroring list.
 
@@ -244,7 +249,7 @@ g_airplay_server->start("OBS AirPlay", 7100, 5100);
 
 ### Enabling Password Protection
 
-Currently, password protection is disabled. To enable it, modify the TXT records in `src/mdns-publisher.cpp`.
+Currently, password protection is disabled. To enable it, modify the TXT records in `src/uxplay-integration.cpp`.
 
 ## Technical Details
 
@@ -284,19 +289,17 @@ obs-airplay-plugin/
 ├── CMakeLists.txt           # Build configuration
 ├── README.md                # This file
 └── src/
-    ├── plugin-main.cpp      # Plugin entry point
+    ├── plugin-main.cpp      # Plugin entry point, server name debounce
     ├── airplay-source.cpp   # OBS source implementation
     ├── airplay-source.hpp
-    ├── airplay-server.cpp   # AirPlay server
+    ├── airplay-server.cpp   # AirPlay/RAOP socket server + FFmpeg decode pipeline
     ├── airplay-server.hpp
-    ├── mdns-publisher.cpp   # Bonjour advertising
-    ├── mdns-publisher.hpp
+    ├── uxplay-integration.cpp  # UxPlay RAOP + mDNS (dnssd) integration
+    ├── uxplay-integration.hpp
     ├── h264-decoder.cpp     # Video decoder
     ├── h264-decoder.hpp
     ├── audio-decoder.cpp    # Audio decoder
-    ├── audio-decoder.hpp
-    ├── raop-server.cpp      # Audio server
-    └── raop-server.hpp
+    └── audio-decoder.hpp
 ```
 
 ### Building for Development
@@ -336,15 +339,11 @@ tail -f ~/Library/Application\ Support/obs-studio/logs/$(ls -t ~/Library/Applica
 
 ## Known Issues
 
-1. **iOS 17+ Compatibility**
-   - Some iOS 17 devices may require additional authentication
-   - Working on implementing HAP (HomeKit Accessory Protocol)
-
-2. **4K Streaming**
+1. **4K Streaming**
    - Currently limited to 1080p
    - 4K support planned for future release
 
-3. **DRM Content**
+2. **DRM Content**
    - Protected content (Netflix, etc.) cannot be mirrored
    - This is an Apple limitation
 
@@ -371,8 +370,8 @@ GPL-2.0 License - See LICENSE file for details
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/obs-airplay-plugin/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/obs-airplay-plugin/discussions)
+- **Issues**: [GitHub Issues](https://github.com/LZlamian/OBS-AirPlay-Plugin/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/LZlamian/OBS-AirPlay-Plugin/discussions)
 
 ## Acknowledgments
 
