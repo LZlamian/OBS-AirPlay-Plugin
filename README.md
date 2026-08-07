@@ -18,7 +18,7 @@ Current release: **v2.0.0**
 - ✅ **Instant Screen Mirroring refresh** — name changes appear in iOS Screen Mirroring immediately, without needing to connect first
 - ✅ **Reset to Default button** — one click restores the server name to "OBS AirPlay"
 - ✅ **Persistent receiver identity** — keeps Bonjour and AirPlay key identity stable across OBS restarts
-- ✅ **AirServer-class initial connection** — an AirServer-matched receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
+- ✅ **Sub-second initial connection** — an optimized receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
 - ✅ **Fast first frame** — optimized TCP negotiation and detailed connection telemetry bring a typical tap-to-OBS-frame time below one second
 
 ## Requirements
