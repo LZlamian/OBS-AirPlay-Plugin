@@ -1,13 +1,17 @@
 cmake_minimum_required(VERSION 3.16...3.26)
 
-project(obs-airplay VERSION 1.5.0)
+project(obs-airplay VERSION 2.0.0)
 
-set(PLUGIN_AUTHOR "Your Name")
-set(MACOS_BUNDLEID "com.yourname.obs-airplay")
+set(PLUGIN_AUTHOR "LZlamian")
+set(MACOS_BUNDLEID "com.lzlamian.obs-airplay")
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
+
+option(OBS_AIRPLAY_FAST_CONNECT
+    "Use AirServer-style initial GET /info with a direct pair-verify fallback"
+    ON)
 
 # Find OBS Studio installation
 if(APPLE)
@@ -256,6 +260,7 @@ add_subdirectory(uxplay/lib)
 # Plugin source files
 set(obs-airplay_SOURCES
     src/plugin-main.cpp
+    src/airplay-ble-helper.cpp
     src/airplay-source.cpp
     src/airplay-server.cpp
     src/uxplay-integration.cpp
@@ -264,6 +269,7 @@ set(obs-airplay_SOURCES
 )
 
 set(obs-airplay_HEADERS
+    src/airplay-ble-helper.hpp
     src/airplay-source.hpp
     src/airplay-server.hpp
     src/uxplay-integration.hpp
@@ -289,6 +295,12 @@ target_compile_definitions(obs-airplay PRIVATE
     PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
 )
 
+if(OBS_AIRPLAY_FAST_CONNECT)
+    target_compile_definitions(obs-airplay PRIVATE OBS_AIRPLAY_FAST_CONNECT=1)
+else()
+    target_compile_definitions(obs-airplay PRIVATE OBS_AIRPLAY_FAST_CONNECT=0)
+endif()
+
 # Link libraries
 target_link_libraries(obs-airplay PRIVATE
     ${LIBOBS_LIB}
@@ -309,6 +321,8 @@ target_link_directories(obs-airplay PRIVATE
 
 # macOS-specific settings
 if(APPLE)
+    enable_language(OBJCXX)
+
     # Get the macOS SDK path
     execute_process(
         COMMAND xcrun --show-sdk-path
@@ -327,6 +341,22 @@ if(APPLE)
     find_library(SYSTEM_LIBRARY System REQUIRED)
     find_library(CORE_FOUNDATION CoreFoundation REQUIRED)
     find_library(COCOA_LIBRARY Cocoa REQUIRED)
+    find_library(CORE_BLUETOOTH_LIBRARY CoreBluetooth REQUIRED)
+
+    add_executable(obs-airplay-ble-discovery MACOSX_BUNDLE
+        src/airplay-ble-discovery.mm
+    )
+    target_link_libraries(obs-airplay-ble-discovery PRIVATE
+        ${COCOA_LIBRARY}
+        ${CORE_BLUETOOTH_LIBRARY}
+    )
+    set_target_properties(obs-airplay-ble-discovery PROPERTIES
+        OUTPUT_NAME "OBS AirPlay Discovery"
+        MACOSX_BUNDLE_BUNDLE_NAME "OBS AirPlay Discovery"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.lzlamian.obs-airplay.discovery"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/src/airplay-ble-discovery-Info.plist"
+    )
+    add_dependencies(obs-airplay obs-airplay-ble-discovery)
     
     if(NOT SYSTEM_LIBRARY)
         message(FATAL_ERROR "System framework not found")
@@ -357,6 +387,9 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PLUGIN_BUNDLE_DIR}/Contents/MacOS"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PLUGIN_BUNDLE_DIR}/Contents/Resources"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:obs-airplay>" "${PLUGIN_BUNDLE_DIR}/Contents/MacOS/"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<TARGET_BUNDLE_DIR:obs-airplay-ble-discovery>"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/OBS AirPlay Discovery.app"
         
         # Copy Info.plist
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/Info.plist" "${PLUGIN_BUNDLE_DIR}/Contents/Info.plist"

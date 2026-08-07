@@ -3,8 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="${ROOT_DIR}/build"
-DIST_DIR="${ROOT_DIR}/dist"
+BUILD_DIR="${OBS_AIRPLAY_BUILD_DIR:-${ROOT_DIR}/build}"
+DIST_DIR="${OBS_AIRPLAY_DIST_DIR:-${ROOT_DIR}/dist}"
 STAGE_DIR="${BUILD_DIR}/pkg-root"
 PKG_SCRIPTS_DIR="${BUILD_DIR}/pkg-scripts"
 

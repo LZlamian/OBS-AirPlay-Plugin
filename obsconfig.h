@@ -1,9 +1,9 @@
 /* This is a minimal obsconfig.h for plugin compilation */
 #pragma once
 
-/* OBS Version Information */
-#define OBS_VERSION "30.0.0"
-#define OBS_VERSION_CANONICAL "30.0.0"
+/* OBS Version Information — matches the bundled obs-headers (libobs 32.0.4) */
+#define OBS_VERSION "32.0.4"
+#define OBS_VERSION_CANONICAL "32.0.4"
 
 /* Platform Detection */
 #ifdef __APPLE__

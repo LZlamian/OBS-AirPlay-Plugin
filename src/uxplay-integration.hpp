@@ -66,6 +66,8 @@ public:
 private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_first_video_logged{false};
+    std::atomic<bool> m_connection_timing_active{false};
+    std::atomic<uint64_t> m_connection_started_ns{0};
     VideoFrameCallback m_video_callback;
     AudioDataCallback m_audio_callback;
     ConnectionResetCallback m_reset_callback;

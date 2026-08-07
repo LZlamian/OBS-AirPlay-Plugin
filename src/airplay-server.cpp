@@ -1,4 +1,5 @@
 #include "airplay-server.hpp"
+#include "airplay-source.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <sys/socket.h>
@@ -157,6 +158,7 @@ void AirPlayServer::resetDecoders()
     if (m_h265_decoder) m_h265_decoder->flush();
     if (m_audio_decoder) m_audio_decoder->flush();
     m_video_frame_counter = 0; // re-enable first-frame timing log on reconnect
+    m_first_decoded_frame_ns = 0;
     blog(LOG_INFO, "AirPlay decoders flushed for reconnect");
 }
 
@@ -885,16 +887,18 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
         return;
     }
 
+    // DecodedVideoFrame references buffers owned by the decoder. Keep this lock
+    // until OBS has copied the frame so another packet or reconnect reset cannot
+    // invalidate those buffers underneath obs_source_output_video().
+    std::unique_lock<std::mutex> dec_lock(m_decoder_mutex);
     DecodedVideoFrame decoded;
     const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
-    const uint64_t t_decode_start = tele ? os_gettime_ns() : 0;
-    {
-        std::lock_guard<std::mutex> dec_lock(m_decoder_mutex);
-        if (!decoder->decodeToI420(data, size, decoded)) {
-            return;
-        }
+    const bool first_frame = m_video_frame_counter == 0;
+    const uint64_t t_decode_start = (tele || first_frame) ? os_gettime_ns() : 0;
+    if (!decoder->decodeToI420(data, size, decoded)) {
+        return;
     }
-    const uint64_t t_decode_end = tele ? os_gettime_ns() : 0;
+    const uint64_t t_decode_end = (tele || first_frame) ? os_gettime_ns() : 0;
 
     obs_source_frame frame = {};
     frame.data[0] = decoded.data[0];
@@ -920,9 +924,41 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     const uint64_t t_output_start = tele ? os_gettime_ns() : 0;
 
     // Log the very first frame output to OBS for connection timing diagnostics.
-    if (m_video_frame_counter == 0) {
-        blog(LOG_INFO, "[TIMING] First decoded frame output to OBS (%dx%d)",
-             decoded.width, decoded.height);
+    if (first_frame) {
+        m_first_decoded_frame_ns = t_decode_end;
+        blog(LOG_INFO, "[CONNECT] first decoded frame queued to OBS (%dx%d, decode %.2fms)",
+             decoded.width, decoded.height, (t_decode_end - t_decode_start) / 1e6);
+    }
+
+    const uint64_t frame_number = m_video_frame_counter + 1;
+    if (frame_number == 1 || frame_number == 30 || frame_number == 60 ||
+        frame_number == 120 || frame_number == 180 || frame_number == 240) {
+        uint64_t luma_sum = 0;
+        uint64_t luma_hash = UINT64_C(1469598103934665603);
+        uint32_t samples = 0;
+        uint8_t luma_min = 255;
+        uint8_t luma_max = 0;
+        for (int y = 0; y < decoded.height; y += 24) {
+            const uint8_t* row = decoded.data[0] + y * decoded.linesize[0];
+            for (int x = 0; x < decoded.width; x += 24) {
+                const uint8_t value = row[x];
+                luma_sum += value;
+                luma_min = std::min(luma_min, value);
+                luma_max = std::max(luma_max, value);
+                luma_hash ^= value;
+                luma_hash *= UINT64_C(1099511628211);
+                ++samples;
+            }
+        }
+        const uint64_t sampled_ns = os_gettime_ns();
+        const double elapsed_ms = m_first_decoded_frame_ns && sampled_ns >= m_first_decoded_frame_ns
+            ? (sampled_ns - m_first_decoded_frame_ns) / 1e6 : 0.0;
+        blog(LOG_INFO,
+             "[DISPLAY] decoded frame #%llu +%.1fms luma avg=%.1f range=%u-%u hash=%016llx",
+             static_cast<unsigned long long>(frame_number), elapsed_ms,
+             samples ? static_cast<double>(luma_sum) / samples : 0.0,
+             static_cast<unsigned>(luma_min), static_cast<unsigned>(luma_max),
+             static_cast<unsigned long long>(luma_hash));
     }
 
     for (obs_weak_source_t* weak : m_registered_sources) {
@@ -931,6 +967,9 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
             obs_source_output_video(source, &frame);
             obs_source_release(source);
         }
+    }
+    if (first_frame) {
+        airplay_source_notify_frame_queued(os_gettime_ns());
     }
     const uint64_t t_output_end = tele ? os_gettime_ns() : 0;
 

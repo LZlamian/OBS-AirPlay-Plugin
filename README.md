@@ -2,7 +2,7 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v1.5.0**
+Current release: **v2.0.0**
 
 ## Features
 
@@ -17,7 +17,9 @@ Current release: **v1.5.0**
 - ✅ **Debounced name updates** — mDNS only re-advertises after you stop typing, not on every keystroke
 - ✅ **Instant Screen Mirroring refresh** — name changes appear in iOS Screen Mirroring immediately, without needing to connect first
 - ✅ **Reset to Default button** — one click restores the server name to "OBS AirPlay"
-- ✅ **Persistent MAC address** — iOS uses fast pair-verify (~100 ms) on every reconnect instead of full pair-setup (~1.5 s)
+- ✅ **Persistent receiver identity** — keeps Bonjour and AirPlay key identity stable across OBS restarts
+- ✅ **AirServer-class initial connection** — an AirServer-matched receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
+- ✅ **Fast first frame** — optimized TCP negotiation and detailed connection telemetry bring a typical tap-to-OBS-frame time below one second
 
 ## Requirements
 
@@ -49,6 +51,8 @@ When double clicking to install you may get a notice indicating it's not safe to
 
 Next go to **Apple Menu () → System Settings → Privacy & Security**, scroll to the bottom and click **Open Anyway**. Proceed to install.  
 接下来前往 **Apple 菜单 () → 系统设置 → 隐私与安全性**，滚动到底部点击**「仍要打开」**，然后继续安装。
+
+On first launch, macOS may ask whether **OBS AirPlay Discovery** can use Bluetooth. Click **Allow**. Bluetooth is used only to advertise the nearby receiver for faster discovery; mirroring media still travels over your local network.
 
 ### Quick Install (Recommended)
 

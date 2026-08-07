@@ -113,6 +113,7 @@ private:
     std::unique_ptr<AudioDecoder> m_audio_decoder;
     std::mutex m_decoder_mutex;
     uint64_t m_video_frame_counter = 0;
+    uint64_t m_first_decoded_frame_ns = 0;
     uint64_t m_audio_frame_counter = 0;
 
     // Latency telemetry (rolling window stats)

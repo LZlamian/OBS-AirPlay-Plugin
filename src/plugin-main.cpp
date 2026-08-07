@@ -2,6 +2,7 @@
 #include "airplay-source.hpp"
 #include "airplay-server.hpp"
 #include "uxplay-integration.hpp"
+#include "airplay-ble-helper.hpp"
 #include <memory>
 #include <mutex>
 #include <condition_variable>
@@ -34,8 +35,8 @@ static uint64_t                g_debounce_gen  = 0;
 static bool                    g_debounce_quit = false;
 static std::thread             g_debounce_thread;
 
-// Persist MAC address so iOS uses fast pair-verify instead of full pair-setup.
-// Saves ~1.5-2s on every connection after the first.
+// Persist the receiver identity so Bonjour caches and the advertised public
+// key remain stable across OBS restarts.
 static std::string load_or_persist_mac(const std::string& generated_mac)
 {
     char* path = obs_module_config_path("mac_address.txt");
@@ -169,6 +170,7 @@ bool obs_module_load(void)
         airplay_source_info.get_defaults = airplay_source_get_defaults;
         airplay_source_info.get_properties = airplay_source_get_properties;
         airplay_source_info.update = airplay_source_update;
+        airplay_source_info.video_tick = airplay_source_video_tick;
         airplay_source_info.show = airplay_source_show;
         airplay_source_info.hide = airplay_source_hide;
         airplay_source_info.icon_type = OBS_ICON_TYPE_MEDIA;
@@ -179,14 +181,17 @@ bool obs_module_load(void)
         
         // Initialize AirPlay server first to get a consistent MAC address
         g_airplay_server = std::make_shared<AirPlayServer>();
-        // Persist MAC across launches so iOS uses fast pair-verify (~100ms)
-        // instead of full pair-setup (~1.5s) on every connection.
+        // Persist the receiver identity and advertised public key across launches.
         std::string mac_address = load_or_persist_mac(g_airplay_server->getMACAddress());
         g_airplay_server->setMACAddress(mac_address);
         blog(LOG_INFO, "Using consistent MAC address for AirPlay: %s", mac_address.c_str());
 
         // Start UxPlay integration for proper AirPlay protocol handling
         blog(LOG_INFO, "Starting UxPlay integration with MAC: %s", mac_address.c_str());
+        // AirServer starts an otherwise empty CoreBluetooth peripheral
+        // advertisement before any iPhone connection. Keep the equivalent
+        // discovery signal alive for the lifetime of this plugin.
+        start_airplay_ble_helper();
         g_uxplay_integration = std::make_shared<UxPlayIntegration>();
         if (!g_uxplay_integration->start(mac_address, 7000, g_server_name)) {
             blog(LOG_WARNING, "Failed to start UxPlay integration - continuing with basic server only");
@@ -249,6 +254,8 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     blog(LOG_INFO, "OBS AirPlay Plugin unloaded");
+
+    stop_airplay_ble_helper();
 
     // Shut down the debounce thread first so it doesn't race with cleanup below.
     {

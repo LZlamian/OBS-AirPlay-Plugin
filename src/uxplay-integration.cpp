@@ -1,5 +1,6 @@
 #include "uxplay-integration.hpp"
 #include <obs-module.h>
+#include <util/platform.h>
 #include <array>
 #include <cctype>
 #include <cstring>
@@ -122,8 +123,52 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
 
         // Timing: fires when iOS first TCP-connects (before handshake).
         callbacks.conn_init = [](void* cls) {
-            blog(LOG_INFO, "[TIMING] iOS connected — AirPlay handshake starting");
-            UNUSED_PARAMETER(cls);
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            const uint64_t now = os_gettime_ns();
+            bool expected = false;
+            if (self && self->m_connection_timing_active.compare_exchange_strong(expected, true)) {
+                self->m_first_video_logged.store(false, std::memory_order_relaxed);
+                self->m_connection_started_ns.store(now);
+                blog(LOG_INFO, "[CONNECT] +0.00ms TCP accepted — AirPlay negotiation starting");
+            }
+        };
+        callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (!self || !method || !url) {
+                return;
+            }
+            if (strcmp(url, "/feedback") == 0 || strcmp(url, "/playback-info") == 0) {
+                return;
+            }
+
+            const uint64_t now = os_gettime_ns();
+            const uint64_t origin = self->m_connection_started_ns.load();
+            const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
+            static thread_local uint64_t request_started_ns = 0;
+            if (started) {
+                request_started_ns = now;
+                blog(LOG_INFO, "[CONNECT] +%.2fms -> %s %s", elapsed_ms, method, url);
+            } else {
+                const double request_ms = request_started_ns && now >= request_started_ns
+                    ? (now - request_started_ns) / 1e6 : 0.0;
+                blog(LOG_INFO, "[CONNECT] +%.2fms <- %s %s (handler %.2fms)",
+                     elapsed_ms, method, url, request_ms);
+                request_started_ns = 0;
+                if (strcmp(method, "TEARDOWN") == 0) {
+                    self->m_connection_timing_active.store(false);
+                }
+            }
+        };
+
+        callbacks.mirror_connection_timing = [](void* cls, bool first_data) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            const uint64_t started_ns = self->m_connection_started_ns.load(std::memory_order_relaxed);
+            if (!started_ns) {
+                return;
+            }
+            const double elapsed_ms = (os_gettime_ns() - started_ns) / 1e6;
+            blog(LOG_INFO, "[CONNECT] +%.2fms mirroring TCP %s",
+                 elapsed_ms, first_data ? "first header received" : "accepted");
         };
         
         // Set video and audio processing callbacks
@@ -144,14 +189,14 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // Required by UxPlay runtime; provide safe defaults for callbacks
         // that UxPlay may call without null checks.
         callbacks.conn_feedback = [](void* cls) {
-            blog(LOG_INFO, "[TIMING] conn_feedback (iOS reverse channel established)");
+            blog(LOG_DEBUG, "[UxPlay] feedback heartbeat received");
             UNUSED_PARAMETER(cls);
         };
         callbacks.conn_reset = [](void* cls, int reason) {
             if (cls) {
                 auto* self = static_cast<UxPlayIntegration*>(cls);
                 blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
-                self->m_first_video_logged.store(false); // reset for next connection timing
+                self->m_connection_timing_active.store(false);
                 self->processConnReset();
             }
         };
@@ -241,9 +286,12 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             }
         };
         callbacks.video_set_codec = [](void* cls, video_codec_t codec) -> int {
-            blog(LOG_INFO, "[TIMING] SETUP complete — codec negotiated (%s), iOS will start encoding soon",
-                 codec == VIDEO_CODEC_H265 ? "H265/HEVC" : "H264");
-            UNUSED_PARAMETER(cls);
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            const uint64_t now = os_gettime_ns();
+            const uint64_t origin = self ? self->m_connection_started_ns.load() : 0;
+            const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
+            blog(LOG_INFO, "[CONNECT] +%.2fms codec configuration received (%s)",
+                 elapsed_ms, codec == VIDEO_CODEC_H265 ? "H265/HEVC" : "H264");
             return 0;
         };
         
@@ -318,6 +366,18 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             m_dnssd = nullptr;
             return false;
         }
+
+#if OBS_AIRPLAY_FAST_CONNECT
+        // Match AirServer's Bonjour and connection profiles captured from the
+        // same iPhone: AppleTV5,3 / 220.68 / 0x427FFFF7,0xE, then answer the
+        // initial qualified GET /info with the full runtime profile. Direct
+        // pair-verify remains a fallback for senders that still request it.
+        raop_set_fast_connect(m_raop, true);
+        dnssd_set_airserver_profile(m_dnssd, true);
+        blog(LOG_INFO, "Fast initial connection enabled (AirServer Bonjour + /info profile; direct-verify fallback)");
+#else
+        blog(LOG_INFO, "Fast initial connection disabled (UxPlay compatibility profile)");
+#endif
 
         // Set port
         blog(LOG_INFO, "Setting RAOP port to %d", port);
@@ -458,6 +518,10 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         return;
     }
 
+#if OBS_AIRPLAY_FAST_CONNECT
+    dnssd_set_airserver_profile(new_dnssd, true);
+#endif
+
     // raop_set_dnssd must be called before dnssd_register_raop/airplay because
     // it sets dnssd->pk (the public key string) via dnssd_set_pk(). Without it,
     // dnssd->pk is NULL and dnssd_register_raop crashes in strlen(dnssd->pk).
@@ -560,8 +624,11 @@ void UxPlayIntegration::processVideoData(video_decode_struct* data)
 
     // Log the first video packet to measure iOS screen-capture startup latency.
     if (!m_first_video_logged.exchange(true)) {
-        blog(LOG_INFO, "[TIMING] First video packet received from iOS (%d bytes, H265=%s)",
-             data->data_len, data->is_h265 ? "yes" : "no");
+        const uint64_t now = os_gettime_ns();
+        const uint64_t origin = m_connection_started_ns.load();
+        const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
+        blog(LOG_INFO, "[CONNECT] +%.2fms first encoded video packet (%d bytes, H265=%s)",
+             elapsed_ms, data->data_len, data->is_h265 ? "yes" : "no");
     }
 
     VideoFrameCallback callback;
@@ -608,5 +675,3 @@ void UxPlayIntegration::processAudioData(audio_decode_struct* data)
              data->ct,
              data->ntp_time_local);
 }
-
-

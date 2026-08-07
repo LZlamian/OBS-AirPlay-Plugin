@@ -2,8 +2,12 @@
 #include "airplay-server.hpp"
 #include "uxplay-integration.hpp"
 #include <obs-module.h>
+#include <util/platform.h>
+#include <atomic>
 
 extern std::shared_ptr<UxPlayIntegration> get_uxplay_integration();
+
+static std::atomic<uint64_t> g_first_frame_queued_ns{0};
 
 AirPlaySource::AirPlaySource(obs_source_t* src)
     : source(src)
@@ -157,4 +161,36 @@ void airplay_source_hide(void* data)
     auto airplay_source = static_cast<AirPlaySource*>(data);
     airplay_source->active = false;
     blog(LOG_INFO, "AirPlay source hidden");
+}
+
+void airplay_source_notify_frame_queued(uint64_t queued_ns)
+{
+    g_first_frame_queued_ns.store(queued_ns, std::memory_order_release);
+}
+
+void airplay_source_video_tick(void* data, float seconds)
+{
+    UNUSED_PARAMETER(seconds);
+    const uint64_t queued_ns = g_first_frame_queued_ns.load(std::memory_order_acquire);
+    if (!queued_ns) {
+        return;
+    }
+
+    auto* airplay_source = static_cast<AirPlaySource*>(data);
+    if (!airplay_source || !airplay_source->source) {
+        return;
+    }
+
+    obs_source_frame* frame = obs_source_get_frame(airplay_source->source);
+    if (!frame) {
+        return;
+    }
+
+    const uint64_t now = os_gettime_ns();
+    blog(LOG_INFO,
+         "[DISPLAY] first AirPlay frame selected by OBS graphics thread %.2fms after queue (%ux%u)",
+         now >= queued_ns ? (now - queued_ns) / 1e6 : 0.0,
+         frame->width, frame->height);
+    obs_source_release_frame(airplay_source->source, frame);
+    g_first_frame_queued_ns.store(0, std::memory_order_release);
 }

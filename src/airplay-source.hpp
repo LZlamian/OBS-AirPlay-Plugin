@@ -12,6 +12,8 @@ obs_properties_t* airplay_source_get_properties(void* data);
 void airplay_source_update(void* data, obs_data_t* settings);
 void airplay_source_show(void* data);
 void airplay_source_hide(void* data);
+void airplay_source_video_tick(void* data, float seconds);
+void airplay_source_notify_frame_queued(uint64_t queued_ns);
 
 // Get the global AirPlay server
 std::shared_ptr<class AirPlayServer> get_airplay_server();
