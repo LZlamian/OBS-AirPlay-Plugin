@@ -28,6 +28,12 @@ AudioDecoder::AudioDecoder()
     , m_swr_context(nullptr)
     , m_codec_type(0)
     , m_output_sample_rate(kDefaultSampleRate)
+    , m_input_sample_rate(0)
+    , m_input_sample_format(AV_SAMPLE_FMT_NONE)
+    , m_resampler_configured(false)
+#if LIBAVUTIL_VERSION_MAJOR < 57
+    , m_input_channel_layout(0)
+#endif
 {
     if (!m_frame || !m_packet) {
         blog(LOG_ERROR, "Failed to allocate FFmpeg audio frame/packet");
@@ -40,9 +46,7 @@ AudioDecoder::AudioDecoder()
 
 AudioDecoder::~AudioDecoder()
 {
-    if (m_swr_context) {
-        swr_free(&m_swr_context);
-    }
+    resetResampler();
 
     if (m_codec_context) {
         avcodec_free_context(&m_codec_context);
@@ -63,6 +67,7 @@ void AudioDecoder::flush()
         avcodec_flush_buffers(m_codec_context);
     if (m_frame)
         av_frame_unref(m_frame);
+    resetResampler();
 }
 
 bool AudioDecoder::configureDecoder(uint8_t ct)
@@ -101,9 +106,7 @@ bool AudioDecoder::configureDecoder(uint8_t ct)
         return false;
     }
 
-    if (m_swr_context) {
-        swr_free(&m_swr_context);
-    }
+    resetResampler();
 
     if (m_codec_context) {
         avcodec_free_context(&m_codec_context);
@@ -151,50 +154,97 @@ bool AudioDecoder::configureResampler(const AVFrame* frame)
         return false;
     }
 
-    if (m_swr_context) {
-        swr_free(&m_swr_context);
-    }
-
-    m_output_sample_rate = frame->sample_rate > 0 ? frame->sample_rate : kDefaultSampleRate;
+    const int inputSampleRate = frame->sample_rate > 0
+        ? frame->sample_rate : kDefaultSampleRate;
+    const AVSampleFormat inputSampleFormat =
+        static_cast<AVSampleFormat>(frame->format);
+    m_output_sample_rate = inputSampleRate;
 
 #if LIBAVUTIL_VERSION_MAJOR >= 57
+    const AVChannelLayout* inputLayout = frame->ch_layout.nb_channels > 0
+        ? &frame->ch_layout : &m_codec_context->ch_layout;
+    if (inputLayout->nb_channels <= 0)
+        return false;
+
+    if (m_resampler_configured &&
+        m_input_sample_rate == inputSampleRate &&
+        m_input_sample_format == inputSampleFormat &&
+        av_channel_layout_compare(&m_input_channel_layout, inputLayout) == 0) {
+        return true;
+    }
+
+    resetResampler();
+    if (av_channel_layout_copy(&m_input_channel_layout, inputLayout) < 0)
+        return false;
+
     AVChannelLayout out_layout;
     av_channel_layout_default(&out_layout, 2);
 
-    swr_alloc_set_opts2(
+    const int allocResult = swr_alloc_set_opts2(
         &m_swr_context,
         &out_layout,
         AV_SAMPLE_FMT_FLTP,
         m_output_sample_rate,
-        &frame->ch_layout,
-        static_cast<AVSampleFormat>(frame->format),
-        frame->sample_rate,
+        &m_input_channel_layout,
+        inputSampleFormat,
+        inputSampleRate,
         0,
         nullptr);
 
     av_channel_layout_uninit(&out_layout);
+    if (allocResult < 0) {
+        resetResampler();
+        return false;
+    }
 #else
+    const uint64_t inputLayout = frame->channel_layout
+        ? frame->channel_layout
+        : av_get_default_channel_layout(frame->channels);
+    if (m_resampler_configured &&
+        m_input_sample_rate == inputSampleRate &&
+        m_input_sample_format == inputSampleFormat &&
+        m_input_channel_layout == inputLayout) {
+        return true;
+    }
+
+    resetResampler();
+    m_input_channel_layout = inputLayout;
     m_swr_context = swr_alloc_set_opts(
         nullptr,
         AV_CH_LAYOUT_STEREO,
         AV_SAMPLE_FMT_FLTP,
         m_output_sample_rate,
-        frame->channel_layout,
-        static_cast<AVSampleFormat>(frame->format),
-        frame->sample_rate,
+        inputLayout,
+        inputSampleFormat,
+        inputSampleRate,
         0,
         nullptr);
 #endif
 
     if (!m_swr_context || swr_init(m_swr_context) < 0) {
         blog(LOG_ERROR, "Failed to initialize audio resampler");
-        if (m_swr_context) {
-            swr_free(&m_swr_context);
-        }
+        resetResampler();
         return false;
     }
 
+    m_input_sample_rate = inputSampleRate;
+    m_input_sample_format = inputSampleFormat;
+    m_resampler_configured = true;
     return true;
+}
+
+void AudioDecoder::resetResampler()
+{
+    if (m_swr_context)
+        swr_free(&m_swr_context);
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    av_channel_layout_uninit(&m_input_channel_layout);
+#else
+    m_input_channel_layout = 0;
+#endif
+    m_input_sample_rate = 0;
+    m_input_sample_format = AV_SAMPLE_FMT_NONE;
+    m_resampler_configured = false;
 }
 
 bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
@@ -252,9 +302,9 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
         }
 
         const int out_samples = av_rescale_rnd(
-            swr_get_delay(m_swr_context, m_frame->sample_rate) + m_frame->nb_samples,
+            swr_get_delay(m_swr_context, m_input_sample_rate) + m_frame->nb_samples,
             m_output_sample_rate,
-            m_frame->sample_rate,
+            m_input_sample_rate,
             AV_ROUND_UP);
 
         if (out_samples <= 0) {

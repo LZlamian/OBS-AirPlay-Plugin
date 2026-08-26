@@ -194,8 +194,13 @@ bool obs_module_load(void)
         start_airplay_ble_helper();
         g_uxplay_integration = std::make_shared<UxPlayIntegration>();
         if (!g_uxplay_integration->start(mac_address, 7000, g_server_name)) {
-            blog(LOG_WARNING, "Failed to start UxPlay integration - continuing with basic server only");
-            // Don't return false - continue with basic server
+            blog(LOG_ERROR,
+                 "Failed to start UxPlay integration; the AirPlay source will remain unavailable. "
+                 "Check whether port 7000 is in use and review the preceding UxPlay log messages.");
+            // Keep the module loaded so users can inspect properties and logs.
+            // The old hand-written socket fallback did not implement a complete
+            // AirPlay handshake and could falsely report that receiving worked.
+            return true;
         } else {
             blog(LOG_INFO, "UxPlay integration started successfully");
 
@@ -232,18 +237,6 @@ bool obs_module_load(void)
 
             return true;
         }
-        
-        // Start the basic AirPlay server as fallback (UxPlay failed to start)
-        blog(LOG_INFO, "Starting basic AirPlay server as fallback...");
-        bool started = g_airplay_server->start();
-        if (started) {
-            blog(LOG_INFO, "AirPlay server started successfully");
-        } else {
-            blog(LOG_ERROR, "Failed to start AirPlay server - start() returned false");
-        }
-        
-        blog(LOG_INFO, "All AirPlay services started successfully");
-        return true;
         
     } catch (const std::exception& e) {
         blog(LOG_ERROR, "Failed to start AirPlay server: %s", e.what());

@@ -159,7 +159,58 @@ void AirPlayServer::resetDecoders()
     if (m_audio_decoder) m_audio_decoder->flush();
     m_video_frame_counter = 0; // re-enable first-frame timing log on reconnect
     m_first_decoded_frame_ns = 0;
+    m_audio_frame_counter = 0;
+    resetStreamClock();
     blog(LOG_INFO, "AirPlay decoders flushed for reconnect");
+}
+
+void AirPlayServer::resetStreamClock()
+{
+    std::lock_guard<std::mutex> lock(m_timestamp_mutex);
+    m_timestamp_initialized = false;
+    m_timestamp_source_origin = 0;
+    m_timestamp_obs_origin = 0;
+}
+
+uint64_t AirPlayServer::normalizeTimestamp(uint64_t source_timestamp)
+{
+    const uint64_t now = os_gettime_ns();
+    if (source_timestamp == 0)
+        return now;
+
+    constexpr uint64_t kMaximumClockDeltaNs = UINT64_C(5000000000);
+    std::lock_guard<std::mutex> lock(m_timestamp_mutex);
+
+    auto resetAnchor = [&] {
+        m_timestamp_initialized = true;
+        m_timestamp_source_origin = source_timestamp;
+        m_timestamp_obs_origin = now;
+        return now;
+    };
+
+    if (!m_timestamp_initialized)
+        return resetAnchor();
+
+    uint64_t normalized = 0;
+    if (source_timestamp >= m_timestamp_source_origin) {
+        const uint64_t delta = source_timestamp - m_timestamp_source_origin;
+        if (UINT64_MAX - m_timestamp_obs_origin < delta)
+            return resetAnchor();
+        normalized = m_timestamp_obs_origin + delta;
+    } else {
+        const uint64_t delta = m_timestamp_source_origin - source_timestamp;
+        if (delta > m_timestamp_obs_origin)
+            return resetAnchor();
+        normalized = m_timestamp_obs_origin - delta;
+    }
+
+    // A sender restart or clock discontinuity must not leave OBS waiting on a
+    // timestamp far in the future (or treating fresh media as stale).
+    if ((normalized > now && normalized - now > kMaximumClockDeltaNs) ||
+        (now > normalized && now - normalized > kMaximumClockDeltaNs)) {
+        return resetAnchor();
+    }
+    return normalized;
 }
 
 void AirPlayServer::stop()
@@ -870,8 +921,6 @@ void AirPlayServer::unregisterSource(obs_source_t* source)
 
 void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)
 {
-    UNUSED_PARAMETER(pts);
-
     if (!data || size == 0) {
         return;
     }
@@ -918,7 +967,7 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
                                            frame.color_matrix,
                                            frame.color_range_min,
                                            frame.color_range_max);
-    frame.timestamp = os_gettime_ns();
+    frame.timestamp = normalizeTimestamp(pts);
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     const uint64_t t_output_start = tele ? os_gettime_ns() : 0;
@@ -1027,8 +1076,6 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
 
 void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)
 {
-    UNUSED_PARAMETER(pts);
-
     if (!data || size == 0 || !m_audio_decoder) {
         return;
     }
@@ -1057,7 +1104,7 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     audio.speakers = SPEAKERS_STEREO;
     audio.samples_per_sec = static_cast<uint32_t>(sample_rate);
     audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
-    audio.timestamp = os_gettime_ns();
+    audio.timestamp = normalizeTimestamp(pts);
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     const uint64_t t_output_start = tele ? os_gettime_ns() : 0;

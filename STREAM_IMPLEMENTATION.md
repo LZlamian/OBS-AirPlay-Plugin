@@ -47,10 +47,10 @@ iOS Device                    OBS Plugin
 
 ```bash
 # Install OpenSSL (new requirement for decryption)
-brew install openssl
+brew install openssl@3
 
 # Existing dependencies
-brew install cmake pkg-config ffmpeg libplist fdk-aac
+brew install cmake pkg-config ffmpeg libplist openssl@3
 ```
 
 ### Build Commands

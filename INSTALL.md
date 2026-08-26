@@ -3,7 +3,7 @@
 ## Prerequisites
 
 You need:
-1. **macOS 10.15 or later**
+1. **macOS 12 or later**
 2. **OBS Studio** installed at `/Applications/OBS.app`
 3. **Homebrew** package manager
 4. **Xcode Command Line Tools**
@@ -27,12 +27,7 @@ Click "Install" when prompted.
 ### 3. Install Dependencies
 
 ```bash
-brew install cmake pkg-config ffmpeg libplist
-```
-
-**Optional but recommended:**
-```bash
-brew install fdk-aac
+brew install cmake pkg-config ffmpeg libplist openssl@3
 ```
 
 ### 4. Download and Extract the Plugin
@@ -101,6 +96,9 @@ This creates:
 - `dist/obs-airplay-v<version>-macos-x86_64.pkg`
 
 Note: `scripts/package-macos.sh` now validates dependency architecture early and fails with a clear message if the requested arch is unavailable locally.
+It also rejects dependencies whose deployment target is newer than macOS 12.
+For public releases, set `OBS_AIRPLAY_CODESIGN_IDENTITY` and
+`OBS_AIRPLAY_INSTALLER_IDENTITY` to your Developer ID identities.
 
 ## Verify Installation
 
@@ -111,9 +109,9 @@ In OBS:
 2. Search for "AirPlay" (Cmd+F)
 3. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 1.1.0)
-   AirPlay server started successfully
-   mDNS advertising started for 'OBS AirPlay'
+   OBS AirPlay Plugin loaded (version 2.0.1)
+   UxPlay integration started successfully
+   UxPlay integration active on port 7000
    ```
 
 ### 2. Add AirPlay Source
@@ -236,11 +234,8 @@ xcode-select --install
 
 ### Change Server Name
 
-Edit `src/plugin-main.cpp`:
-```cpp
-g_airplay_server->start("My Custom Name", 7000, 5000);
-```
-Then rebuild: `./build.sh`
+Open the AirPlay source properties in OBS and edit **Server Name**. The mDNS
+advertisement updates automatically after you stop typing.
 
 ### Use Different Ports
 
@@ -289,14 +284,15 @@ A: Not currently. Install the official OBS from https://obsproject.com
 **Q: Does this work with OBS version X?**
 A: Works with OBS 28.0 or later. Check your version in Help → About OBS
 
-**Q: Can I build a universal binary (Intel + Apple Silicon)?**
-A: Yes, but requires building separately for each architecture
+**Q: Can I build for Intel from Apple Silicon?**
+A: Yes if OBS and every dependency contains x86_64 code. The packaging script
+checks this before building; a hosted Intel CI runner is usually simpler.
 
 ## Success Checklist
 
 - [ ] Xcode Command Line Tools installed
 - [ ] Homebrew installed
-- [ ] Dependencies installed (cmake, pkg-config, ffmpeg, libplist)
+- [ ] Dependencies installed (cmake, pkg-config, ffmpeg, libplist, openssl@3)
 - [ ] OBS Studio installed
 - [ ] Plugin built successfully
 - [ ] Plugin appears in OBS log

@@ -22,6 +22,7 @@ public:
 private:
     bool configureDecoder(uint8_t ct);
     bool configureResampler(const AVFrame* frame);
+    void resetResampler();
 
     AVCodecContext* m_codec_context;
     AVFrame* m_frame;
@@ -29,4 +30,12 @@ private:
     SwrContext* m_swr_context;
     uint8_t m_codec_type;
     int m_output_sample_rate;
+    int m_input_sample_rate;
+    AVSampleFormat m_input_sample_format;
+    bool m_resampler_configured;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    AVChannelLayout m_input_channel_layout = {};
+#else
+    uint64_t m_input_channel_layout;
+#endif
 };

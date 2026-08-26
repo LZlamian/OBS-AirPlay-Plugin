@@ -2,7 +2,17 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.0.0**
+Current release: **v2.0.1**
+
+## What's new in v2.0.1
+
+- Automatic daily update checks for newer stable GitHub releases, with defer and skip controls and no silent installation
+- Shared audio/video clock mapping and resampler reuse for steadier long-running playback
+- Clear receiver startup failures instead of an unavailable source appearing healthy
+- Release packaging checks for architecture, macOS 12 compatibility, portable x86 code generation, signing, and third-party notices
+- A checksum-pinned dependency build path for reproducible macOS release artifacts
+
+See the [v2.0.1 release notes](RELEASE_NOTES_v2.0.1.md) for the complete summary.
 
 ## Features
 
@@ -20,14 +30,14 @@ Current release: **v2.0.0**
 - ✅ **Persistent receiver identity** — keeps Bonjour and AirPlay key identity stable across OBS restarts
 - ✅ **Sub-second initial connection** — an optimized receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
 - ✅ **Fast first frame** — optimized TCP negotiation and detailed connection telemetry bring a typical tap-to-OBS-frame time below one second
+- ✅ **Update notifications** — checks for a newer stable GitHub release at most once per day and lets you view, defer, or skip it
 
 ## Requirements
 
 ### macOS
-- macOS 10.15 (Catalina) or later
+- macOS 12 (Monterey) or later
 - OBS Studio 28.0 or later
-- Xcode Command Line Tools
-- Homebrew (for dependencies)
+- Xcode Command Line Tools and Homebrew only when building from source
 
 ### System Requirements
 - Your iOS device and Mac must be on the same network
@@ -58,6 +68,23 @@ On first launch, macOS may ask whether **OBS AirPlay Discovery** can use Bluetoo
 
 Download the latest `.pkg` installer from the [Releases page](https://github.com/LZlamian/OBS-AirPlay-Plugin/releases) and double-click to install.
 
+The release package contains its runtime dependencies; Homebrew is not required
+to install it.
+
+### Update notifications
+
+OBS AirPlay checks GitHub's stable-release endpoint at most once every 24 hours.
+When a newer version is available, **OBS AirPlay Discovery** prompts you to view
+the release, try again later, or skip that version. It never downloads or
+installs an update silently; close OBS before running the downloaded installer.
+
+The check sends a standard HTTPS request to `api.github.com`. It contains the
+installed plugin version in its User-Agent and no OBS settings or AirPlay data.
+
+### Build from source
+
+#### 1. Install build tools
+
 ```bash
 # Install Xcode Command Line Tools
 xcode-select --install
@@ -70,10 +97,18 @@ brew install \
     cmake \
     pkg-config \
     ffmpeg \
-    libplist
+    libplist \
+    openssl@3
 ```
 
-### 2. Clone OBS Studio Source
+Release packaging rejects dependencies built for a newer macOS version than
+the documented baseline. Run `scripts/build-macos-release-deps.sh` first and
+pass its printed `OBS_AIRPLAY_DEPS_PREFIX` value to `scripts/package-macos.sh`
+to build the pinned macOS 12 release dependencies. Set
+`OBS_AIRPLAY_CODESIGN_IDENTITY` and `OBS_AIRPLAY_INSTALLER_IDENTITY` to the
+appropriate Developer ID identities before running `scripts/package-macos.sh`.
+
+#### 2. Clone OBS Studio Source
 
 You need the OBS Studio source code to build plugins:
 
@@ -84,7 +119,7 @@ cd ~/Developer
 git clone --recursive --branch 30.2.0 https://github.com/obsproject/obs-studio.git
 ```
 
-### 3. Clone This Plugin
+#### 3. Clone This Plugin
 
 ```bash
 cd ~/Developer
@@ -92,7 +127,7 @@ git clone https://github.com/yourusername/obs-airplay-plugin.git
 cd obs-airplay-plugin
 ```
 
-### 4. Build the Plugin
+#### 4. Build the Plugin
 
 ```bash
 mkdir build
@@ -108,7 +143,7 @@ cmake .. \
 cmake --build . --config Release
 ```
 
-### 5. Install the Plugin
+#### 5. Install the Plugin
 
 ```bash
 # Create the plugins directory if it doesn't exist
@@ -118,7 +153,7 @@ mkdir -p ~/Library/Application\ Support/obs-studio/plugins
 cp -r obs-airplay.plugin ~/Library/Application\ Support/obs-studio/plugins/
 ```
 
-### 6. Restart OBS Studio
+#### 6. Restart OBS Studio
 
 Close and reopen OBS Studio to load the plugin.
 

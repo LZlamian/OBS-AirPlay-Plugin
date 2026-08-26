@@ -4,7 +4,7 @@
 
 ```bash
 # 1. Install dependencies
-brew install cmake pkg-config ffmpeg libplist
+brew install cmake pkg-config ffmpeg libplist openssl@3
 
 # 2. Build and install
 ./build.sh
@@ -27,7 +27,7 @@ Unlike the abandoned mika314/obs-airplay project, this plugin:
 1. ✅ **Has proper Bonjour/mDNS advertising** - Your device actually shows up in iOS Screen Mirroring
 2. ✅ **Works with modern OBS** - Compatible with OBS 28.0+ and latest macOS
 3. ✅ **Native macOS APIs** - Uses Apple's DNS Service Discovery framework
-4. ✅ **No external servers** - Everything runs inside OBS
+4. ✅ **Self-contained** - Receiving runs inside OBS; a bundled helper handles Bluetooth discovery and update prompts
 5. ✅ **Proper AirPlay protocol** - Handles the full handshake and streaming
 
 ## Why Wasn't It Showing Up Before?
@@ -102,11 +102,9 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS
 3. Search for "AirPlay"
 4. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 1.1.0)
-   AirPlay server started successfully
-   mDNS advertising started for 'OBS AirPlay'
-   Server socket listening on port 7000
-   Server socket listening on port 5000
+   OBS AirPlay Plugin loaded (version 2.0.1)
+   UxPlay integration started successfully
+   UxPlay integration active on port 7000
    ```
 
 ### 2. Check mDNS Advertising

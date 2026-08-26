@@ -106,6 +106,8 @@ private:
 
     // Generate MAC address
     std::string generateMACAddress();
+    uint64_t normalizeTimestamp(uint64_t source_timestamp);
+    void resetStreamClock();
     std::string m_mac_address;
 
     std::unique_ptr<H264Decoder> m_h264_decoder;
@@ -115,6 +117,13 @@ private:
     uint64_t m_video_frame_counter = 0;
     uint64_t m_first_decoded_frame_ns = 0;
     uint64_t m_audio_frame_counter = 0;
+
+    // UxPlay timestamps use a stable nanosecond clock, while OBS expects its
+    // own monotonic timebase. A shared anchor preserves A/V offsets.
+    std::mutex m_timestamp_mutex;
+    bool m_timestamp_initialized = false;
+    uint64_t m_timestamp_source_origin = 0;
+    uint64_t m_timestamp_obs_origin = 0;
 
     // Latency telemetry (rolling window stats)
     uint64_t m_v_decode_ns_sum = 0, m_v_decode_ns_max = 0;

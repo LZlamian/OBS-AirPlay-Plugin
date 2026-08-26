@@ -28,7 +28,7 @@ if [ ! -d "/Applications/OBS.app" ]; then
 fi
 
 # Get OBS version
-OBS_VERSION=$(defaults read /Applications/OBS.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo "unknown")
+OBS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" /Applications/OBS.app/Contents/Info.plist 2>/dev/null || echo "unknown")
 echo -e "${GREEN}Found OBS Studio version: ${OBS_VERSION}${NC}\n"
 
 # Check for required dependencies
@@ -50,6 +50,10 @@ fi
 
 if ! brew list libplist &> /dev/null; then
     MISSING_DEPS+=("libplist")
+fi
+
+if ! brew list openssl@3 &> /dev/null; then
+    MISSING_DEPS+=("openssl@3")
 fi
 
 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then

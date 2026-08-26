@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16...3.26)
 
-project(obs-airplay VERSION 2.0.0)
+if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
+        "Oldest macOS version supported by the packaged plugin")
+endif()
+
+project(obs-airplay VERSION 2.0.1)
 
 set(PLUGIN_AUTHOR "LZlamian")
 set(MACOS_BUNDLEID "com.lzlamian.obs-airplay")
@@ -13,6 +18,11 @@ option(OBS_AIRPLAY_FAST_CONNECT
     "Use AirServer-style initial GET /info with a direct pair-verify fallback"
     ON)
 
+# UxPlay otherwise enables -march=native on Intel, which can produce a package
+# that crashes on an older x86_64 CPU than the build machine.
+set(NO_MARCH_NATIVE ON CACHE BOOL
+    "Build UxPlay without host-specific CPU instructions")
+
 # Find OBS Studio installation
 if(APPLE)
     # Try to find OBS in common locations
@@ -24,7 +34,8 @@ if(APPLE)
     
     # Get OBS version
     execute_process(
-        COMMAND defaults read "${OBS_BUNDLE_PATH}/Contents/Info.plist" CFBundleShortVersionString
+        COMMAND /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString"
+                "${OBS_BUNDLE_PATH}/Contents/Info.plist"
         OUTPUT_VARIABLE OBS_VERSION
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
@@ -236,23 +247,10 @@ find_package(PkgConfig REQUIRED)
 # Find FFmpeg components using pkg-config
 pkg_check_modules(FFMPEG REQUIRED 
     libavcodec 
-    libavformat 
     libavutil 
     libswscale 
     libswresample
 )
-
-pkg_check_modules(LIBPLIST REQUIRED libplist-2.0)
-
-# OpenSSL for AirPlay encryption
-find_package(OpenSSL REQUIRED)
-
-# FDK-AAC is optional but recommended
-pkg_check_modules(FDK_AAC fdk-aac)
-
-if(NOT FDK_AAC_FOUND)
-    message(WARNING "FDK-AAC not found. AAC decoding may be limited. Install with: brew install fdk-aac")
-endif()
 
 # Add UxPlay as subdirectory
 add_subdirectory(uxplay/lib)
@@ -287,8 +285,6 @@ add_library(obs-airplay MODULE
 target_include_directories(obs-airplay PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${FFMPEG_INCLUDE_DIRS}
-    ${LIBPLIST_INCLUDE_DIRS}
-    ${FDK_AAC_INCLUDE_DIRS}
 )
 
 target_compile_definitions(obs-airplay PRIVATE
@@ -305,18 +301,12 @@ endif()
 target_link_libraries(obs-airplay PRIVATE
     ${LIBOBS_LIB}
     ${FFMPEG_LIBRARIES}
-    ${LIBPLIST_LIBRARIES}
-    ${FDK_AAC_LIBRARIES}
-    OpenSSL::SSL
-    OpenSSL::Crypto
     airplay  # UxPlay library
 )
 
 # Add library directories
 target_link_directories(obs-airplay PRIVATE
     ${FFMPEG_LIBRARY_DIRS}
-    ${LIBPLIST_LIBRARY_DIRS}
-    ${FDK_AAC_LIBRARY_DIRS}
 )
 
 # macOS-specific settings
@@ -345,6 +335,9 @@ if(APPLE)
 
     add_executable(obs-airplay-ble-discovery MACOSX_BUNDLE
         src/airplay-ble-discovery.mm
+    )
+    target_compile_definitions(obs-airplay-ble-discovery PRIVATE
+        PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
     )
     target_link_libraries(obs-airplay-ble-discovery PRIVATE
         ${COCOA_LIBRARY}
@@ -390,6 +383,12 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "$<TARGET_BUNDLE_DIR:obs-airplay-ble-discovery>"
                 "${PLUGIN_BUNDLE_DIR}/Contents/Resources/OBS AirPlay Discovery.app"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/LICENSE"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/LICENSE"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/uxplay/LICENSE"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/LICENSE-UxPlay-GPL-3.0.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/THIRD_PARTY_NOTICES.md"
         
         # Copy Info.plist
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/Info.plist" "${PLUGIN_BUNDLE_DIR}/Contents/Info.plist"
