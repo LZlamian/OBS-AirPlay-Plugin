@@ -1,10 +1,12 @@
 #include "uxplay-integration.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstring>
 #include <pthread.h>
+#include <utility>
 #if defined(__APPLE__)
 #include <pthread/qos.h>
 #endif
@@ -45,7 +47,8 @@ void boost_caller_thread_qos_once(const char* tag)
 } // namespace
 
 UxPlayIntegration::UxPlayIntegration()
-    : m_raop(nullptr)
+    : m_media_player(std::make_unique<MediaPlayer>())
+    , m_raop(nullptr)
     , m_dnssd(nullptr)
     , m_hw_addr{}
     , m_server_name("OBS AirPlay")
@@ -231,44 +234,69 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             return -15.0;
         };
         callbacks.on_video_play = [](void* cls, const char* location, const float start_position) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(location);
-            UNUSED_PARAMETER(start_position);
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (!self || !self->m_media_player || !location || !*location) {
+                blog(LOG_ERROR, "[MEDIA] POST /play did not provide a usable media URL");
+                return;
+            }
+            blog(LOG_INFO, "[MEDIA] POST /play supplied a media URL (start=%.3fs)",
+                 start_position);
+            // Stop a previous URL worker before resetting shared OBS output
+            // state. This makes rapid source switching deterministic.
+            self->m_media_player->stop();
+            self->processConnReset();
+            self->m_media_player->play(location, start_position);
         };
         callbacks.on_video_scrub = [](void* cls, const float position) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(position);
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (self && self->m_media_player) {
+                blog(LOG_INFO, "[MEDIA] POST /scrub requested %.3fs", position);
+                self->m_media_player->seek(position);
+            }
         };
         callbacks.on_video_rate = [](void* cls, const float rate) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(rate);
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (self && self->m_media_player) {
+                self->m_media_player->setRate(rate);
+            }
         };
         callbacks.on_video_stop = [](void* cls) {
-            UNUSED_PARAMETER(cls);
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (self && self->m_media_player) {
+                blog(LOG_INFO, "[MEDIA] stopping URL playback and clearing retained output");
+                self->m_media_player->stop();
+                self->processConnReset();
+            }
         };
         callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) {
-            UNUSED_PARAMETER(cls);
             if (!playback_video) {
                 return;
             }
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            const MediaPlaybackInfo info = self && self->m_media_player
+                ? self->m_media_player->getPlaybackInfo() : MediaPlaybackInfo{};
             playback_video->stallcount = 0;
-            playback_video->duration = 0.0;
-            playback_video->position = 0.0;
-            playback_video->seek_start = 0.0;
-            playback_video->seek_duration = 0.0;
-            playback_video->rate = 0.0f;
-            playback_video->ready_to_play = false;
-            playback_video->playback_buffer_empty = true;
-            playback_video->playback_buffer_full = false;
-            playback_video->playback_likely_to_keep_up = false;
+            // Do not turn a live/unknown-duration HLS stream into an ever-
+            // growing finite movie.  UxPlay emits empty range arrays for 0.
+            playback_video->duration = info.ended ? -1.0
+                : (info.duration_known ? info.duration : 0.0);
+            playback_video->position = info.ready_to_play ? info.position : 0.0;
+            playback_video->seek_start = info.seek_start;
+            playback_video->seek_duration = info.seek_duration;
+            playback_video->rate = info.rate;
+            playback_video->ready_to_play = info.ready_to_play;
+            playback_video->playback_buffer_empty = info.playback_buffer_empty;
+            playback_video->playback_buffer_full = info.playback_buffer_full;
+            playback_video->playback_likely_to_keep_up = info.playback_likely_to_keep_up;
             playback_video->num_loaded_time_ranges = 0;
             playback_video->num_seekable_time_ranges = 0;
             playback_video->loadedTimeRanges = nullptr;
             playback_video->seekableTimeRanges = nullptr;
         };
         callbacks.on_video_playlist_remove = [](void* cls) -> float {
-            UNUSED_PARAMETER(cls);
-            return 0.0f;
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            return self && self->m_media_player
+                ? self->m_media_player->pauseForPlaylistRemoval() : 0.0f;
         };
 
         // Required by UxPlay mirror thread.
@@ -282,6 +310,12 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             if (cls) {
                 auto* self = static_cast<UxPlayIntegration*>(cls);
                 blog(LOG_INFO, "[UxPlay] Video reset (type=%d) — flushing decoders", static_cast<int>(reset_type));
+                if (self->m_media_player &&
+                    (reset_type == RESET_TYPE_HLS_SHUTDOWN ||
+                     reset_type == RESET_TYPE_HLS_EOS ||
+                     reset_type == RESET_TYPE_NOHOLD)) {
+                    self->m_media_player->stop();
+                }
                 self->processConnReset();
             }
         };
@@ -395,6 +429,22 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }
         blog(LOG_INFO, "raop_init2 completed successfully");
         raop_set_dnssd(m_raop, m_dnssd);
+
+        // Safari does not use the type-110 screen-mirroring stream for a
+        // website's Media AirPlay button. It opens the HTTP AirPlay channel
+        // (/reverse, /play, /playback-info), which UxPlay disables by default.
+        // Keep the advertised feature bits and the request handlers in sync.
+        if (raop_set_plist(m_raop, "hls", 1) != 0) {
+            blog(LOG_ERROR, "Failed to enable Safari Media AirPlay protocol mode");
+            raop_destroy(m_raop);
+            dnssd_destroy(m_dnssd);
+            m_raop = nullptr;
+            m_dnssd = nullptr;
+            return false;
+        }
+        dnssd_set_airplay_features(m_dnssd, 0, 1);
+        dnssd_set_airplay_features(m_dnssd, 4, 1);
+        blog(LOG_INFO, "Safari Media AirPlay enabled (HTTP /reverse + /play URL playback)");
         
         // Start HTTP server
         blog(LOG_INFO, "Starting HTTP server...");
@@ -564,6 +614,10 @@ void UxPlayIntegration::stop()
     }
     
     blog(LOG_INFO, "Stopping UxPlay integration");
+
+    if (m_media_player) {
+        m_media_player->stop();
+    }
     
     // raop_destroy/dnssd_destroy are called outside m_mutex to avoid deadlock:
     // UxPlay's audio/video threads may be blocked waiting for m_mutex (in
@@ -612,6 +666,20 @@ void UxPlayIntegration::setAudioCallback(AudioDataCallback callback)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_audio_callback = callback;
+}
+
+void UxPlayIntegration::setMediaVideoCallback(MediaVideoCallback callback)
+{
+    if (m_media_player) {
+        m_media_player->setVideoCallback(std::move(callback));
+    }
+}
+
+void UxPlayIntegration::setMediaAudioCallback(MediaAudioCallback callback)
+{
+    if (m_media_player) {
+        m_media_player->setAudioCallback(std::move(callback));
+    }
 }
 
 void UxPlayIntegration::processVideoData(video_decode_struct* data)

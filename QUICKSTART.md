@@ -102,7 +102,7 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS
 3. Search for "AirPlay"
 4. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 2.0.1)
+   OBS AirPlay Plugin loaded (version 2.1.0)
    UxPlay integration started successfully
    UxPlay integration active on port 7000
    ```

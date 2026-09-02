@@ -113,7 +113,7 @@ else
   )
 fi
 
-if [[ -f "${PREFIX}/lib/libavcodec.dylib" && -f "${PREFIX}/lib/pkgconfig/libavcodec.pc" ]]; then
+if [[ -f "${PREFIX}/lib/libavformat.dylib" && -f "${PREFIX}/lib/pkgconfig/libavformat.pc" ]]; then
   echo "==> Reusing FFmpeg ${FFMPEG_VERSION}"
 else
   echo "==> Building FFmpeg ${FFMPEG_VERSION}"
@@ -135,16 +135,19 @@ else
         --disable-everything \
         --disable-avdevice \
         --disable-avfilter \
-        --disable-avformat \
-        --disable-network \
+        --enable-avformat \
+        --enable-network \
+        --enable-openssl \
         --enable-avcodec \
         --enable-avutil \
         --enable-swscale \
         --enable-swresample \
-        --enable-decoder=aac,alac,h264,hevc \
-        --enable-parser=aac,h264,hevc \
-        --extra-cflags="${COMMON_CFLAGS}" \
-        --extra-ldflags="-arch ${ARCH} -mmacosx-version-min=${MACOS_DEPLOYMENT_TARGET}"
+        --enable-decoder=aac,alac,h264,hevc,mp3 \
+        --enable-parser=aac,h264,hevc,mpegaudio \
+        --enable-demuxer=aac,hls,mov,mp3,mpegts \
+        --enable-protocol=crypto,file,http,https,tcp,tls,udp \
+        --extra-cflags="${COMMON_CFLAGS} -I${PREFIX}/include" \
+        --extra-ldflags="-arch ${ARCH} -mmacosx-version-min=${MACOS_DEPLOYMENT_TARGET} -L${PREFIX}/lib"
     make -j"${JOBS}"
     make install
   )

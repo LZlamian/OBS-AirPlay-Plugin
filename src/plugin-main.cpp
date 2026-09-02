@@ -221,6 +221,21 @@ bool obs_module_load(void)
                     g_airplay_server->ingestAudioBitstream(data, size, codec_type, pts);
                 }
             });
+
+            // Safari's media controls use URL playback, not the encoded
+            // type-110 mirroring callbacks above. The media player decodes to
+            // OBS-ready I420 video and planar float audio.
+            g_uxplay_integration->setMediaVideoCallback([](const MediaVideoFrame& frame) {
+                if (g_airplay_server) {
+                    g_airplay_server->outputMediaVideoFrame(frame);
+                }
+            });
+
+            g_uxplay_integration->setMediaAudioCallback([](const MediaAudioFrame& frame) {
+                if (g_airplay_server) {
+                    g_airplay_server->outputMediaAudioFrame(frame);
+                }
+            });
             
             g_uxplay_integration->setConnectionResetCallback([]() {
                 if (g_airplay_server) {

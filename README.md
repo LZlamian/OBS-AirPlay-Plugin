@@ -2,24 +2,27 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.0.1**
+Current release: **v2.1.0**
 
-## What's new in v2.0.1
+## What's new in v2.1.0
 
-- Automatic daily update checks for newer stable GitHub releases, with defer and skip controls and no silent installation
-- Shared audio/video clock mapping and resampler reuse for steadier long-running playback
-- Clear receiver startup failures instead of an unavailable source appearing healthy
-- Release packaging checks for architecture, macOS 12 compatibility, portable x86 code generation, signing, and third-party notices
-- A checksum-pinned dependency build path for reproducible macOS release artifacts
+- Safari Media AirPlay playback for public MP4 and HLS video, in addition to screen mirroring from native apps
+- Reverse-channel fetching for Safari page-local `blob:` MP4 media, including generated and imported videos
+- Receiver-side H.264/HEVC video and AAC audio demuxing, decoding, seeking, pause, resume, and playback-status reporting
+- Secure temporary-file handling for reverse-fetched media, with a 128 MiB safety limit and automatic cleanup
+- Clearer media/protocol timing logs plus stale-frame cleanup when playback stops or switches sources
+- Regression coverage for native AirPlay controls, malformed messages, MP4, HLS, HEVC, and exact device-sized blob transfers
 
-See the [v2.0.1 release notes](RELEASE_NOTES_v2.0.1.md) for the complete summary.
+See the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for the complete summary.
 
 ## Features
 
 - ✅ Native Bonjour/mDNS advertising (shows up in iOS Screen Mirroring)
 - ✅ AirPlay protocol support
+- ✅ **Safari Media AirPlay** — play website MP4 and HLS video directly in OBS
+- ✅ **Page-local video support** — Safari `blob:` MP4 media is fetched over AirPlay's reverse channel
 - ✅ RAOP (Remote Audio Output Protocol) for audio streaming
-- ✅ H.264 video decoding
+- ✅ H.264 and HEVC video decoding
 - ✅ AAC audio decoding
 - ✅ No password required
 - ✅ Works on the same network/VLAN
@@ -123,7 +126,7 @@ git clone --recursive --branch 30.2.0 https://github.com/obsproject/obs-studio.g
 
 ```bash
 cd ~/Developer
-git clone https://github.com/yourusername/obs-airplay-plugin.git
+git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git
 cd obs-airplay-plugin
 ```
 
@@ -186,6 +189,11 @@ You should now see your device mirrored through AirPlay as an OBS source 🎉
    - Tap "Screen Mirroring"
    - You should see "OBS AirPlay" in the list
    - Tap it to connect
+
+   To send a website video instead of mirroring the whole screen, open a
+   compatible MP4 or HLS video in Safari, tap its AirPlay control, and select
+   the OBS receiver. Safari may take a few seconds to transfer or open the
+   media before the first frame appears.
 
 3. **Start Streaming**
    - Your iOS screen should now appear in OBS
@@ -264,6 +272,12 @@ You should now see your device mirrored through AirPlay as an OBS source 🎉
    - Right-click the AirPlay source -> Properties
    - Verify the server is running
 
+3. **Safari Media AirPlay**
+   - Public media must be reachable by the Mac running OBS
+   - Page-local videos are transferred completely before playback begins
+   - DRM-protected and encrypted MediaSource content is not supported
+   - Reverse-fetched `blob:` MP4 files are limited to 128 MiB
+
 ## Configuration
 
 ### Changing Server Name
@@ -302,7 +316,8 @@ Currently, password protection is disabled. To enable it, modify the TXT records
 2. **AirPlay Protocol**
    - Port: 7000 (TCP)
    - HTTP-based protocol
-   - Handles video streaming and control
+   - Handles screen mirroring plus Safari `/reverse`, `/play`, playback-info,
+     rate, and scrub controls
 
 3. **RAOP (Remote Audio Output Protocol)**
    - Port: 5000 (TCP)
@@ -310,8 +325,8 @@ Currently, password protection is disabled. To enable it, modify the TXT records
    - Handles audio streaming
 
 ### Video Format
-- Codec: H.264
-- Container: MPEG-TS
+- Codecs: H.264 and HEVC
+- Containers/protocols: MP4, MPEG-TS, and HLS
 - Resolution: Depends on source device
 
 ### Audio Format
@@ -338,7 +353,9 @@ obs-airplay-plugin/
     ├── h264-decoder.cpp     # Video decoder
     ├── h264-decoder.hpp
     ├── audio-decoder.cpp    # Audio decoder
-    └── audio-decoder.hpp
+    ├── audio-decoder.hpp
+    ├── media-player.cpp     # Safari URL/blob demux, decode, and playback clock
+    └── media-player.hpp
 ```
 
 ### Building for Development
@@ -383,8 +400,11 @@ tail -f ~/Library/Application\ Support/obs-studio/logs/$(ls -t ~/Library/Applica
    - 4K support planned for future release
 
 2. **DRM Content**
-   - Protected content (Netflix, etc.) cannot be mirrored
-   - This is an Apple limitation
+   - Protected or encrypted Safari media cannot be fetched or decoded
+
+3. **Safari Page-Local Media**
+   - `blob:` MP4 media must be transferred completely before playback starts
+   - Reverse-fetched files are currently limited to 128 MiB
 
 ## Contributing
 

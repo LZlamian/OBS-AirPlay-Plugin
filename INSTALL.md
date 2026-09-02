@@ -109,7 +109,7 @@ In OBS:
 2. Search for "AirPlay" (Cmd+F)
 3. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 2.0.1)
+   OBS AirPlay Plugin loaded (version 2.1.0)
    UxPlay integration started successfully
    UxPlay integration active on port 7000
    ```

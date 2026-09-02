@@ -157,11 +157,26 @@ void AirPlayServer::resetDecoders()
     if (m_h264_decoder) m_h264_decoder->flush();
     if (m_h265_decoder) m_h265_decoder->flush();
     if (m_audio_decoder) m_audio_decoder->flush();
-    m_video_frame_counter = 0; // re-enable first-frame timing log on reconnect
-    m_first_decoded_frame_ns = 0;
-    m_audio_frame_counter = 0;
+    {
+        // Native and URL playback both update these counters while holding
+        // m_sources_mutex. Keep reconnect/source-switch resets synchronized.
+        std::lock_guard<std::mutex> sources_lock(m_sources_mutex);
+        for (obs_weak_source_t* weak : m_registered_sources) {
+            obs_source_t* source = obs_weak_source_get_source(weak);
+            if (source) {
+                // OBS documents a null asynchronous frame as deactivating the
+                // texture and releasing all retained frames.
+                obs_source_output_video(source, nullptr);
+                obs_source_release(source);
+            }
+        }
+        m_video_frame_counter = 0; // re-enable first-frame timing log on reconnect
+        m_first_decoded_frame_ns = 0;
+        m_audio_frame_counter = 0;
+    }
+    airplay_source_notify_frame_queued(0);
     resetStreamClock();
-    blog(LOG_INFO, "AirPlay decoders flushed for reconnect");
+    blog(LOG_INFO, "AirPlay decoders flushed and retained OBS frame cleared");
 }
 
 void AirPlayServer::resetStreamClock()
@@ -1153,5 +1168,84 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
              static_cast<unsigned int>(codec_type),
              audio.frames,
              audio.samples_per_sec);
+    }
+}
+
+void AirPlayServer::outputMediaVideoFrame(const MediaVideoFrame& decoded)
+{
+    if (!decoded.data[0] || decoded.width <= 0 || decoded.height <= 0) {
+        return;
+    }
+
+    obs_source_frame frame = {};
+    for (int i = 0; i < 3; ++i) {
+        frame.data[i] = const_cast<uint8_t*>(decoded.data[i]);
+        frame.linesize[i] = decoded.linesize[i];
+    }
+    frame.width = static_cast<uint32_t>(decoded.width);
+    frame.height = static_cast<uint32_t>(decoded.height);
+    frame.format = VIDEO_FORMAT_I420;
+    frame.full_range = false;
+    frame.trc = VIDEO_TRC_DEFAULT;
+    video_format_get_parameters_for_format(VIDEO_CS_709,
+                                           VIDEO_RANGE_PARTIAL,
+                                           frame.format,
+                                           frame.color_matrix,
+                                           frame.color_range_min,
+                                           frame.color_range_max);
+    frame.timestamp = decoded.timestamp_ns ? decoded.timestamp_ns : os_gettime_ns();
+
+    const bool first_frame = m_video_frame_counter == 0;
+    std::lock_guard<std::mutex> lock(m_sources_mutex);
+    for (obs_weak_source_t* weak : m_registered_sources) {
+        obs_source_t* source = obs_weak_source_get_source(weak);
+        if (source) {
+            obs_source_output_video(source, &frame);
+            obs_source_release(source);
+        }
+    }
+    ++m_video_frame_counter;
+    if (first_frame) {
+        blog(LOG_INFO, "[MEDIA] first Safari video frame queued to OBS (%dx%d)",
+             decoded.width, decoded.height);
+        airplay_source_notify_frame_queued(os_gettime_ns());
+    } else if ((m_video_frame_counter % 300) == 0) {
+        blog(LOG_INFO, "[MEDIA] output Safari video frame #%llu (%dx%d)",
+             static_cast<unsigned long long>(m_video_frame_counter),
+             decoded.width, decoded.height);
+    }
+}
+
+void AirPlayServer::outputMediaAudioFrame(const MediaAudioFrame& decoded)
+{
+    if (!decoded.data[0] || !decoded.data[1] || decoded.frames == 0 ||
+        decoded.sample_rate == 0) {
+        return;
+    }
+
+    obs_source_audio audio = {};
+    audio.data[0] = reinterpret_cast<uint8_t*>(const_cast<float*>(decoded.data[0]));
+    audio.data[1] = reinterpret_cast<uint8_t*>(const_cast<float*>(decoded.data[1]));
+    audio.frames = decoded.frames;
+    audio.speakers = SPEAKERS_STEREO;
+    audio.samples_per_sec = decoded.sample_rate;
+    audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
+    audio.timestamp = decoded.timestamp_ns ? decoded.timestamp_ns : os_gettime_ns();
+
+    std::lock_guard<std::mutex> lock(m_sources_mutex);
+    for (obs_weak_source_t* weak : m_registered_sources) {
+        obs_source_t* source = obs_weak_source_get_source(weak);
+        if (source) {
+            obs_source_output_audio(source, &audio);
+            obs_source_release(source);
+        }
+    }
+    ++m_audio_frame_counter;
+    if (m_audio_frame_counter == 1) {
+        blog(LOG_INFO, "[MEDIA] first Safari audio frame queued to OBS (%u Hz, %u frames)",
+             decoded.sample_rate, decoded.frames);
+    } else if ((m_audio_frame_counter % 500) == 0) {
+        blog(LOG_INFO, "[MEDIA] output Safari audio frame #%llu",
+             static_cast<unsigned long long>(m_audio_frame_counter));
     }
 }

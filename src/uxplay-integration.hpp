@@ -7,6 +7,9 @@
 #include <mutex>
 #include <atomic>
 #include <cstddef>
+#include <memory>
+
+#include "media-player.hpp"
 
 // UxPlay core includes
 extern "C" {
@@ -61,6 +64,8 @@ public:
     // Set callbacks for video, audio, and connection reset
     void setVideoCallback(VideoFrameCallback callback);
     void setAudioCallback(AudioDataCallback callback);
+    void setMediaVideoCallback(MediaVideoCallback callback);
+    void setMediaAudioCallback(MediaAudioCallback callback);
     void setConnectionResetCallback(ConnectionResetCallback callback);
     
 private:
@@ -72,6 +77,10 @@ private:
     AudioDataCallback m_audio_callback;
     ConnectionResetCallback m_reset_callback;
     std::mutex m_mutex;
+
+    // Safari's Media AirPlay mode sends a URL through POST /play rather than
+    // the encoded mirroring stream used by Photos and Screen Mirroring.
+    std::unique_ptr<MediaPlayer> m_media_player;
     
     // UxPlay RAOP instance
     raop_t* m_raop;

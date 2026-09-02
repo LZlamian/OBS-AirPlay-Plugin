@@ -5,7 +5,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         "Oldest macOS version supported by the packaged plugin")
 endif()
 
-project(obs-airplay VERSION 2.0.1)
+project(obs-airplay VERSION 2.1.0)
 
 set(PLUGIN_AUTHOR "LZlamian")
 set(MACOS_BUNDLEID "com.lzlamian.obs-airplay")
@@ -246,6 +246,7 @@ find_package(PkgConfig REQUIRED)
 
 # Find FFmpeg components using pkg-config
 pkg_check_modules(FFMPEG REQUIRED 
+    libavformat
     libavcodec 
     libavutil 
     libswscale 
@@ -264,6 +265,7 @@ set(obs-airplay_SOURCES
     src/uxplay-integration.cpp
     src/h264-decoder.cpp
     src/audio-decoder.cpp
+    src/media-player.cpp
 )
 
 set(obs-airplay_HEADERS
@@ -273,6 +275,7 @@ set(obs-airplay_HEADERS
     src/uxplay-integration.hpp
     src/h264-decoder.hpp
     src/audio-decoder.hpp
+    src/media-player.hpp
 )
 
 # Create the plugin library
@@ -410,3 +413,41 @@ endif()
 install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
         DESTINATION "$ENV{HOME}/Library/Application Support/obs-studio/plugins"
         USE_SOURCE_PERMISSIONS)
+
+include(CTest)
+if(BUILD_TESTING)
+    pkg_check_modules(PLIST_TEST REQUIRED libplist-2.0)
+
+    add_executable(obs-airplay-media-smoke
+        tests/media-player-smoke.cpp
+        src/media-player.cpp
+    )
+    target_include_directories(obs-airplay-media-smoke PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${OBS_INCLUDE_DIR}
+        ${FFMPEG_INCLUDE_DIRS}
+    )
+    target_compile_definitions(obs-airplay-media-smoke PRIVATE
+        PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
+    )
+    target_link_directories(obs-airplay-media-smoke PRIVATE
+        ${FFMPEG_LIBRARY_DIRS}
+    )
+    target_link_libraries(obs-airplay-media-smoke PRIVATE
+        ${FFMPEG_LIBRARIES}
+    )
+
+    add_executable(obs-airplay-protocol-smoke
+        tests/protocol-smoke.cpp
+    )
+    target_include_directories(obs-airplay-protocol-smoke PRIVATE
+        ${CMAKE_SOURCE_DIR}/uxplay/lib
+        ${PLIST_TEST_INCLUDE_DIRS}
+    )
+    target_link_libraries(obs-airplay-protocol-smoke PRIVATE
+        airplay
+    )
+    add_test(NAME obs-airplay-protocol-smoke
+        COMMAND obs-airplay-protocol-smoke
+    )
+endif()

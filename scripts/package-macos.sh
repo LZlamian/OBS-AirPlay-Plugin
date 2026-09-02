@@ -15,7 +15,7 @@ INSTALL_PATH="${INSTALL_BASE}/${PLUGIN_NAME}"
 
 PACKAGE_ID="com.obsairplay.plugin"
 VERSION="$(sed -nE 's/^project\(obs-airplay VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' "${ROOT_DIR}/CMakeLists.txt" | head -n1)"
-VERSION="${VERSION:-2.0.1}"
+VERSION="${VERSION:-2.1.0}"
 ARCH="${ARCH_OVERRIDE:-$(uname -m)}"
 MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET_OVERRIDE:-12.0}"
 DEPS_PREFIX="${OBS_AIRPLAY_DEPS_PREFIX:-}"
@@ -47,6 +47,7 @@ check_arch_support() {
 
   local required_files=(
     "${OBS_LIB}"
+    "${FFMPEG_LIBDIR}/libavformat.dylib"
     "${FFMPEG_LIBDIR}/libavcodec.dylib"
     "${FFMPEG_LIBDIR}/libavutil.dylib"
     "${FFMPEG_LIBDIR}/libswscale.dylib"
@@ -103,6 +104,7 @@ version_greater_than() {
 
 validate_build_dependency_targets() {
   local dependencies=(
+    "${FFMPEG_LIBDIR}/libavformat.dylib"
     "${FFMPEG_LIBDIR}/libavcodec.dylib"
     "${FFMPEG_LIBDIR}/libavutil.dylib"
     "${FFMPEG_LIBDIR}/libswscale.dylib"
