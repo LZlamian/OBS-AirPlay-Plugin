@@ -157,9 +157,18 @@ int scrubDrag(const char* location)
         player.seek(target);
         wait_for(100);
     }
+    // A held scrubber re-sends the final position; no extra frames follow.
+    wait_for(800);
+    const unsigned int frames_before_repeats = video_frames.load();
+    for (int i = 0; i < 10; ++i) {
+        player.seek(30.5);
+        wait_for(50);
+    }
+    const bool repeats_ignored = video_frames.load() == frames_before_repeats;
     wait_for(1500);
     MediaPlaybackInfo info = player.getPlaybackInfo();
-    const bool paused_ok = !info.ended && info.position >= 30.45 && info.position < 30.7;
+    const bool paused_ok = !info.ended && info.position >= 30.45 && info.position < 30.7 &&
+        repeats_ignored;
     const unsigned int frames_before_resume = video_frames.load();
     player.setRate(1.0f);
     wait_for(1500);

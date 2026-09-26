@@ -181,16 +181,18 @@ void airplay_source_video_tick(void* data, float seconds)
         return;
     }
 
-    obs_source_frame* frame = obs_source_get_frame(airplay_source->source);
-    if (!frame) {
+    // Only observe: obs_source_get_frame() would take the source's current
+    // async frame away from the renderer before it is uploaded, so a single
+    // frame (a paused item, a still) would never be drawn.
+    const uint32_t width = obs_source_get_width(airplay_source->source);
+    const uint32_t height = obs_source_get_height(airplay_source->source);
+    if (!width || !height) {
         return;
     }
 
     const uint64_t now = os_gettime_ns();
     blog(LOG_INFO,
-         "[DISPLAY] first AirPlay frame selected by OBS graphics thread %.2fms after queue (%ux%u)",
-         now >= queued_ns ? (now - queued_ns) / 1e6 : 0.0,
-         frame->width, frame->height);
-    obs_source_release_frame(airplay_source->source, frame);
+         "[DISPLAY] first AirPlay frame reached the OBS video tick %.2fms after queue (%ux%u)",
+         now >= queued_ns ? (now - queued_ns) / 1e6 : 0.0, width, height);
     g_first_frame_queued_ns.store(0, std::memory_order_release);
 }

@@ -578,6 +578,7 @@ public:
             // its first frame.
             preview_pending = true;
             resync_on_resume = false;
+            last_seek_target = -1.0;
             clock_initialized = false;
         }
         stop_requested.store(false, std::memory_order_release);
@@ -613,6 +614,15 @@ public:
                  position, info.position);
             return;
         }
+        // A held scrubber re-sends the same position; the frame for it is
+        // already on screen, so do not fetch and decode it again.
+        constexpr double kSamePositionTolerance = 0.0005;
+        if (info.rate <= 0.0f && !info.ended && !seek_pending && !preview_pending &&
+            last_seek_target >= 0.0 &&
+            std::fabs(position - last_seek_target) < kSamePositionTolerance) {
+            return;
+        }
+        last_seek_target = std::max(0.0, position);
         seek_target = std::max(0.0, position);
         seek_pending = true;
         ++seek_generation;
@@ -1406,6 +1416,7 @@ private:
     bool seek_pending = false;
     double seek_target = 0.0;
     uint64_t seek_generation = 0;
+    double last_seek_target = -1.0;
     double discard_video_before = -1.0;
     double discard_audio_before = -1.0;
     bool preview_pending = false;

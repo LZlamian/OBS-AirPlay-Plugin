@@ -12,7 +12,7 @@ This release adds standard iOS "AirPlay video" from native apps that play local 
   - An item that starts paused (for example a still-image clip) shows its first frame.
   - Rate changes continue from the last frame shown, so sparse still clips keep their full length.
   - A frame that is waiting when playback pauses is shown on resume instead of dropped.
-  - Small corrective scrubs within 0.35 s of the current position, while playing, are ignored rather than causing a keyframe re-decode hitch.
+  - Small corrective scrubs within 0.35 s of the current position, while playing, are ignored rather than causing a keyframe re-decode hitch; while paused, repeated scrubs to the position already shown are ignored.
 - **Accurate `/playback-info`.** While an item opens, it reports the requested start position instead of 0. When the sender sets `actionAtItemEnd` to pause, a finished item is held on its last frame with `position = duration` instead of shutting the session down.
 - **No blank frames during switches.**
   - A new item keeps the previous frame on screen until its own first frame arrives.
@@ -22,6 +22,7 @@ This release adds standard iOS "AirPlay video" from native apps that play local 
 
 ## Fixes
 
+- **Paused items and stills always appear.** A startup diagnostic used `obs_source_get_frame()`, which takes the source's current frame away from the renderer. The first frame of each item could then go undrawn, and a paused item or still (which has only that one frame) left the previous picture on screen until playback resumed. The diagnostic now only observes.
 - **Screen mirroring resumes after AirPlay video.** When iOS returned to mirroring on the same connection after an AirPlay video session, UxPlay re-keyed the mirror decryption but kept the previous stream's partial-block state, so every packet of the resumed mirror decoded as garbage and OBS stayed black. Re-keying now resets that state; the phone's screen comes back about 100 ms after the sender stops.
 - **Robust transfers from sender media servers.** Progressive HTTP media (MP4/MOV) now goes through a byte-exact input layer: whenever a server ends a response early or drops a kept-alive connection, it continues with a fresh range request at the exact offset. Previously FFmpeg reported end of file mid-sample, which lost keyframes (still images showed nothing) or stopped playback during scrubbing.
 - A read that ends well before the known duration re-requests from the current position; genuine ends (all data read, or demuxed packets covering the stated duration) are never retried, so short still clips cannot cause request storms.
