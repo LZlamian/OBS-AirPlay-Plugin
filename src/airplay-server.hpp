@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include "uxplay-integration.hpp"
 #include "h264-decoder.hpp"
@@ -40,7 +41,15 @@ public:
     bool isRunning() const { return m_running; }
     
     // Flush FFmpeg decoder contexts (call on client reconnect for clean state)
-    void resetDecoders();
+    // clear_output=false keeps the last frame on screen (URL media item
+    // switches); a later frame or reset replaces it.
+    void resetDecoders(bool clear_output = true);
+
+    // Called after each decoded screen-mirroring frame reaches OBS.
+    void setMirrorFrameOutputCallback(std::function<void()> callback)
+    {
+        m_mirror_frame_output_callback = std::move(callback);
+    }
 
     // Register a source to receive AirPlay data
     void registerSource(obs_source_t* source);
@@ -60,6 +69,7 @@ public:
     void outputMediaAudioFrame(const MediaAudioFrame& decoded);
     
 private:
+    std::function<void()> m_mirror_frame_output_callback;
     std::atomic<bool> m_running;
     std::string m_server_name;
     uint16_t m_airplay_port;

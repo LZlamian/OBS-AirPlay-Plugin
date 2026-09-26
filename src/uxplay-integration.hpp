@@ -6,6 +6,8 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
 
@@ -32,7 +34,8 @@ typedef std::function<void(const uint8_t* data, size_t size, uint64_t pts, bool 
 typedef std::function<void(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)> AudioDataCallback;
 
 // Connection reset callback (called when AirPlay client disconnects/reconnects)
-typedef std::function<void()> ConnectionResetCallback;
+// clear_output=false flushes decoders but keeps the last frame on screen.
+typedef std::function<void(bool clear_output)> ConnectionResetCallback;
 
 class UxPlayIntegration {
 public:
@@ -67,6 +70,10 @@ public:
     void setMediaVideoCallback(MediaVideoCallback callback);
     void setMediaAudioCallback(MediaAudioCallback callback);
     void setConnectionResetCallback(ConnectionResetCallback callback);
+
+    // A decoded mirroring frame reached OBS: it replaces the held AirPlay
+    // video frame, so a pending post-/stop clear is no longer needed.
+    void onMirrorFrameOutput();
     
 private:
     std::atomic<bool> m_running{false};
@@ -98,5 +105,19 @@ private:
     // Internal video/audio/reset processing
     void processVideoData(video_decode_struct* data);
     void processAudioData(audio_decode_struct* data);
-    void processConnReset();
+    void processConnReset(bool clear_output = true);
+
+    // URL media (AirPlay video) item on screen: mirror teardowns must not
+    // blank it, and /stop clears it only after a short grace period so an
+    // immediate item switch never flashes an empty source.
+    std::atomic<bool> m_media_active{false};
+    std::thread m_clear_thread;
+    std::mutex m_clear_mutex;
+    std::condition_variable m_clear_cv;
+    std::atomic<bool> m_clear_pending{false};  // written under m_clear_mutex
+    bool m_clear_exit = false;
+    std::chrono::steady_clock::time_point m_clear_deadline;
+    void scheduleDeferredClear();
+    void cancelDeferredClear();
+    void deferredClearLoop();
 };

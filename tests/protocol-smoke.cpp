@@ -148,6 +148,18 @@ std::string receiveResponse(int fd)
     return received > 0 ? std::string(buffer, static_cast<size_t>(received)) : std::string();
 }
 
+std::string receiveUntil(int fd, const char* marker)
+{
+    std::string result;
+    char buffer[4096] = {};
+    while (result.find(marker) == std::string::npos) {
+        const ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
+        if (received <= 0) break;
+        result.append(buffer, static_cast<size_t>(received));
+    }
+    return result;
+}
+
 std::string httpExchange(unsigned short port, const std::string& request)
 {
     const int fd = connectLocal(port);
@@ -234,17 +246,6 @@ int main(int argc, char** argv)
         "CSeq: 1\r\n"
         "Content-Length: 0\r\n\r\n");
     const int reverse_fd = connectLocal(port);
-    const std::string reverse_request =
-        std::string("POST /reverse HTTP/1.1\r\n") +
-        "Host: 127.0.0.1\r\n" +
-        "X-Apple-Session-ID: " + session + "\r\n" +
-        "X-Apple-Purpose: event\r\n" +
-        "Connection: Upgrade\r\n" +
-        "Upgrade: PTTH/1.0\r\n" +
-        "Content-Length: 0\r\n\r\n";
-    const bool reverse_sent = reverse_fd >= 0 &&
-        sendAll(reverse_fd, reverse_request.data(), reverse_request.size());
-    const std::string reverse_response = reverse_sent ? receiveResponse(reverse_fd) : "";
 
     plist_t root = plist_new_dict();
     plist_dict_set_item(root, "uuid", plist_new_string("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
@@ -346,7 +347,62 @@ int main(int argc, char** argv)
     free(missing_body);
     const std::string missing_response = missing_sent
         ? receiveResponse(missing_fd) : std::string();
+    // A rejected /play must not close the connection: iOS abandons the whole
+    // AirPlay session when it does. The same socket must keep working.
+    const std::string after_reject_request = control_request("GET", "/playback-info");
+    const std::string after_reject_response =
+        missing_fd >= 0 && sendAll(missing_fd, after_reject_request.data(),
+                                   after_reject_request.size())
+        ? receiveResponse(missing_fd) : std::string();
     if (missing_fd >= 0) close(missing_fd);
+
+    // Reproduce the device ordering: a stateful sender-local /play can arrive
+    // before the sender upgrades the reverse channel. The receiver must retain
+    // the playlist and send FCUP after the 101 response is written.
+    const char* pending_blob_url = "blob:https://pwa.example/pending-item";
+    plist_t pending_root = plist_new_dict();
+    plist_dict_set_item(pending_root, "uuid",
+                        plist_new_string("99999999-aaaa-bbbb-cccc-dddddddddddd"));
+    plist_dict_set_item(pending_root, "Content-Location",
+                        plist_new_string(pending_blob_url));
+    const std::string pending_response =
+        binaryPlistExchange(port, "/play", session, pending_root);
+    plist_free(pending_root);
+
+    const std::string reverse_request =
+        std::string("POST /reverse HTTP/1.1\r\n") +
+        "Host: 127.0.0.1\r\n" +
+        "X-Apple-Session-ID: " + session + "\r\n" +
+        "X-Apple-Purpose: event\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Upgrade: PTTH/1.0\r\n" +
+        "Content-Length: 0\r\n\r\n";
+    const bool reverse_sent = reverse_fd >= 0 &&
+        sendAll(reverse_fd, reverse_request.data(), reverse_request.size());
+    const std::string reverse_response = reverse_sent
+        ? receiveUntil(reverse_fd, "101 Switching Protocols") : "";
+    const std::string pending_fcup_request = reverse_sent
+        ? (reverse_response.find("POST /event") != std::string::npos
+            ? reverse_response : receiveUntil(reverse_fd, "POST /event"))
+        : "";
+
+    plist_t pending_params = plist_new_dict();
+    plist_dict_set_item(pending_params, "FCUP_Response_StatusCode", plist_new_uint(0));
+    plist_dict_set_item(pending_params, "FCUP_Response_RequestID", plist_new_uint(1));
+    plist_dict_set_item(pending_params, "FCUP_Response_URL", plist_new_string(pending_blob_url));
+    const char pending_mp4[] = {
+        '\x00', '\x00', '\x00', '\x18', 'f', 't', 'y', 'p',
+        'i', 's', 'o', 'm', '\x00', '\x00', '\x02', '\x00',
+        'i', 's', 'o', 'm', 'i', 's', 'o', '2'
+    };
+    plist_dict_set_item(pending_params, "FCUP_Response_Data",
+                        plist_new_data(pending_mp4, sizeof(pending_mp4)));
+    plist_t pending_action = plist_new_dict();
+    plist_dict_set_item(pending_action, "type", plist_new_string("unhandledURLResponse"));
+    plist_dict_set_item(pending_action, "params", pending_params);
+    const std::string pending_action_response =
+        binaryPlistExchange(port, "/action", session, pending_action);
+    plist_free(pending_action);
 
     // Reproduce the device path: a stateful blob /play must stop the previous
     // URL player and ask Safari to return the page-local object over PTTH.
@@ -382,6 +438,54 @@ int main(int argc, char** argv)
         binaryPlistExchange(port, "/action", session, blob_action);
     plist_free(blob_action);
 
+    bool blob_spooled = false;
+    std::string blob_spooled_location;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        blob_spooled = state.spooled_bytes.size() >= sizeof(mp4_header) &&
+            !std::memcmp(state.spooled_bytes.data(), mp4_header, sizeof(mp4_header)) &&
+            state.spooled_size == static_cast<off_t>(mp4_payload.size()) &&
+            state.spooled_mode == 0600;
+        blob_spooled_location = state.spooled_location;
+    }
+
+    // A native media app may report an iPad-local file:// URL instead of a
+    // Safari blob:. The receiver must send the same reverse fetch request and
+    // never try to open the iPad's path on the Mac.
+    const char* file_url =
+        "file:///private/var/mobile/Containers/Data/Application/import.mov";
+    plist_t file_root = plist_new_dict();
+    plist_dict_set_item(file_root, "uuid",
+                        plist_new_string("dddddddd-eeee-ffff-0000-111111111111"));
+    plist_dict_set_item(file_root, "Content-Location", plist_new_string(file_url));
+    const std::string file_response = binaryPlistExchange(port, "/play", session, file_root);
+    plist_free(file_root);
+    const std::string file_fcup_request = receiveResponse(reverse_fd);
+
+    plist_t file_params = plist_new_dict();
+    plist_dict_set_item(file_params, "FCUP_Response_StatusCode", plist_new_uint(0));
+    plist_dict_set_item(file_params, "FCUP_Response_RequestID", plist_new_uint(1));
+    plist_dict_set_item(file_params, "FCUP_Response_URL", plist_new_string(file_url));
+    plist_dict_set_item(file_params, "FCUP_Response_Data",
+                        plist_new_data(mp4_payload.data(), mp4_payload.size()));
+    plist_t file_action = plist_new_dict();
+    plist_dict_set_item(file_action, "type", plist_new_string("unhandledURLResponse"));
+    plist_dict_set_item(file_action, "params", file_params);
+    const std::string file_action_response =
+        binaryPlistExchange(port, "/action", session, file_action);
+    plist_free(file_action);
+
+    bool file_spooled = false;
+    std::string file_spooled_location;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        file_spooled = state.spooled_bytes.size() >= sizeof(mp4_header) &&
+            !std::memcmp(state.spooled_bytes.data(), mp4_header, sizeof(mp4_header)) &&
+            state.spooled_size == static_cast<off_t>(mp4_payload.size()) &&
+            state.spooled_mode == 0600;
+        file_spooled_location = state.spooled_location;
+    }
+
     plist_t selected_root = plist_new_dict();
     char* selected_body = nullptr;
     uint32_t selected_size = 0;
@@ -409,6 +513,106 @@ int main(int argc, char** argv)
         binaryPlistExchange(port, "/action", session, empty_action);
     const std::string action_without_play_2 =
         binaryPlistExchange(port, "/action", session, empty_action);
+
+    // iOS AVPlayer AirPlay of an app-local file: no Content-Location; the
+    // sender serves the file itself and sends host + path (device capture).
+    const auto hosted_play = [&](double start) {
+        plist_t hosted_root = plist_new_dict();
+        plist_dict_set_item(hosted_root, "uuid",
+                            plist_new_string("F17F8872-BD0E-4529-821B-FA2D649C630E"));
+        plist_dict_set_item(hosted_root, "mediaType", plist_new_string("file"));
+        plist_dict_set_item(hosted_root, "host",
+                            plist_new_string("[fe80::1492:202d:7134:1f10]:7001"));
+        plist_dict_set_item(hosted_root, "path",
+                            plist_new_string("/1/767d07bd-907d-5fa4-872c-e2bb5587025f.mp4"));
+        plist_dict_set_item(hosted_root, "Start-Position-Seconds", plist_new_real(start));
+        plist_dict_set_item(hosted_root, "Start-Position", plist_new_real(0.635));
+        plist_dict_set_item(hosted_root, "rate", plist_new_real(1.0));
+        plist_dict_set_item(hosted_root, "streamType", plist_new_uint(0));
+        plist_dict_set_item(hosted_root, "clientBundleID", plist_new_string("com.shelfcsl.Shelf"));
+        const std::string response = binaryPlistExchange(port, "/play", session, hosted_root);
+        plist_free(hosted_root);
+        return response;
+    };
+    const std::string hosted_response = hosted_play(231.865);
+    std::string hosted_location;
+    float hosted_start = -1.0f;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        hosted_location = state.location;
+        hosted_start = state.start_position;
+    }
+    // A repeated /play for the same item must use the new start position.
+    const std::string hosted_repeat_response = hosted_play(12.0);
+    float hosted_repeat_start = -1.0f;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        hosted_repeat_start = state.start_position;
+    }
+    // The URL must point at the connection's address (127.0.0.1 here), not
+    // at the advertised host, with the advertised port and path.
+    const bool hosted_ok = hosted_response.find("200 OK") != std::string::npos &&
+        hosted_repeat_response.find("200 OK") != std::string::npos &&
+        hosted_location == "http://127.0.0.1:7001/1/767d07bd-907d-5fa4-872c-e2bb5587025f.mp4" &&
+        std::fabs(hosted_start - 231.865f) < 0.01f &&
+        std::fabs(hosted_repeat_start - 12.0f) < 0.01f;
+
+    // AVPlayer replacing its current item (device capture): playlistRemove
+    // for the old uuid, then playlistInsert with a new item and no /play.
+    plist_t remove_item = plist_new_dict();
+    plist_dict_set_item(remove_item, "uuid",
+                        plist_new_string("F17F8872-BD0E-4529-821B-FA2D649C630E"));
+    plist_t remove_params = plist_new_dict();
+    plist_dict_set_item(remove_params, "item", remove_item);
+    plist_t remove_action = plist_new_dict();
+    plist_dict_set_item(remove_action, "type", plist_new_string("playlistRemove"));
+    plist_dict_set_item(remove_action, "params", remove_params);
+    const std::string remove_response =
+        binaryPlistExchange(port, "/action", session, remove_action);
+    // A second remove while nothing is current must not fail.
+    const std::string remove_again_response =
+        binaryPlistExchange(port, "/action", session, remove_action);
+    plist_free(remove_action);
+
+    plist_t insert_item = plist_new_dict();
+    plist_dict_set_item(insert_item, "uuid",
+                        plist_new_string("2669CBEE-7337-4945-8620-5A4FF6263A57"));
+    plist_dict_set_item(insert_item, "mediaType", plist_new_string("file"));
+    plist_dict_set_item(insert_item, "streamType", plist_new_uint(0));
+    plist_dict_set_item(insert_item, "host",
+                        plist_new_string("[fe80::1492:202d:7134:1f10]:7001"));
+    plist_dict_set_item(insert_item, "path",
+                        plist_new_string("/1/2669CBEE-7337-4945-8620-5A4FF6263A57.mp4"));
+    plist_dict_set_item(insert_item, "clientProcName", plist_new_string("Shelf"));
+    plist_t insert_params = plist_new_dict();
+    plist_dict_set_item(insert_params, "item", insert_item);
+    plist_t insert_action = plist_new_dict();
+    plist_dict_set_item(insert_action, "type", plist_new_string("playlistInsert"));
+    plist_dict_set_item(insert_action, "params", insert_params);
+    const std::string insert_response =
+        binaryPlistExchange(port, "/action", session, insert_action);
+    plist_free(insert_action);
+    std::string inserted_location;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        inserted_location = state.location;
+    }
+    // Controls must reach the inserted item.
+    const std::string insert_scrub_response = httpExchange(
+        port, control_request("POST", "/scrub?position=80.5"));
+    float insert_scrub = -1.0f;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        insert_scrub = state.scrub_position;
+    }
+    const bool insert_ok = remove_response.find("200 OK") != std::string::npos &&
+        remove_again_response.find("200 OK") != std::string::npos &&
+        insert_response.find("200 OK") != std::string::npos &&
+        inserted_location == "http://127.0.0.1:7001/1/2669CBEE-7337-4945-8620-5A4FF6263A57.mp4" &&
+        insert_scrub_response.find("200 OK") != std::string::npos &&
+        std::fabs(insert_scrub - 80.5f) < 0.01f;
+    std::printf("playlist_replace=%s inserted_url=%s\n", insert_ok ? "ok" : "FAILED",
+                inserted_location.c_str());
 
     // Restore valid state, then exercise malformed plist/type/session cleanup
     // paths where type must still be either initialized or safely null.
@@ -444,13 +648,10 @@ int main(int argc, char** argv)
         state.cv.wait_for(lock, std::chrono::seconds(2), [&] { return !state.location.empty(); });
     }
 
-    const bool blob_spooled =
-        state.spooled_bytes.size() >= sizeof(mp4_header) &&
-        !std::memcmp(state.spooled_bytes.data(), mp4_header, sizeof(mp4_header)) &&
-        state.spooled_size == static_cast<off_t>(mp4_payload.size()) &&
-        state.spooled_mode == 0600;
-    const bool spool_cleaned = !state.spooled_location.empty() &&
-        access(state.spooled_location.c_str(), F_OK) != 0;
+    const bool file_spool_cleaned = !file_spooled_location.empty() &&
+        access(file_spooled_location.c_str(), F_OK) != 0;
+    const bool blob_spool_replaced = !blob_spooled_location.empty() &&
+        access(blob_spooled_location.c_str(), F_OK) != 0;
     const bool passed = native_response.find("200 OK") != std::string::npos &&
         native_response.find("CSeq: 1") != std::string::npos &&
         reverse_response.find("101 Switching Protocols") != std::string::npos &&
@@ -464,10 +665,20 @@ int main(int argc, char** argv)
         classic_response.find("200 OK") != std::string::npos &&
         unsafe_response.find("400 Bad Request") != std::string::npos &&
         missing_response.find("400 Bad Request") != std::string::npos &&
+        missing_response.find("Connection: close") == std::string::npos &&
+        after_reject_response.find("200 OK") != std::string::npos &&
+        hosted_ok && insert_ok &&
+        pending_response.find("200 OK") != std::string::npos &&
+        pending_fcup_request.find(pending_blob_url) != std::string::npos &&
+        pending_action_response.find("200 OK") != std::string::npos &&
         blob_response.find("200 OK") != std::string::npos &&
         blob_fcup_request.find(blob_url) != std::string::npos &&
         blob_action_response.find("200 OK") != std::string::npos &&
-        blob_spooled && spool_cleaned &&
+        blob_spooled && blob_spool_replaced &&
+        file_response.find("200 OK") != std::string::npos &&
+        file_fcup_request.find(file_url) != std::string::npos &&
+        file_action_response.find("200 OK") != std::string::npos &&
+        file_spooled && file_spool_cleaned &&
         !selected_response.empty() &&
         action_without_session.find("400 Bad Request") != std::string::npos &&
         action_without_play_1.find("400 Bad Request") != std::string::npos &&
@@ -481,11 +692,14 @@ int main(int argc, char** argv)
         state.location == "https://example.test/recovery.mp4" &&
         std::fabs(state.start_position) < 0.001f &&
         std::fabs(state.playback_rate - 0.5f) < 0.001f &&
-        std::fabs(state.scrub_position - 7.5f) < 0.001f &&
-        state.stop_count == 4 && state.playback_info_count == 1 &&
-        state.play_count == 5;
-    std::printf("native=%s reverse=%s bplist=%s classic=%s unsafe=%s missing_url=%s blob=%s "
-                "spool_size=%lld spool_mode=%03o spool_header=%zu spool_cleaned=%d "
+        std::fabs(state.scrub_position - 80.5f) < 0.001f &&
+        state.stop_count == 6 && state.playback_info_count == 2 &&
+        state.play_count == 10;
+    std::printf("sender_hosted=%s hosted_url=%s hosted_start=%.3f reject_keeps_connection=%s\n",
+                hosted_ok ? "ok" : "failed", hosted_location.c_str(), hosted_start,
+                after_reject_response.find("200 OK") != std::string::npos ? "yes" : "no");
+    std::printf("native=%s reverse=%s bplist=%s classic=%s unsafe=%s missing_url=%s blob=%s file=%s "
+                "spool_size=%lld spool_mode=%03o spool_header=%zu blob_replaced=%d file_cleaned=%d "
                 "repeated_actions=%s controls=%s callback_url=%s start=%.2f rate=%.2f "
                 "scrub=%.2f stop=%d plays=%d\n",
                 native_response.empty() ? "missing" : "ok",
@@ -497,9 +711,13 @@ int main(int argc, char** argv)
                 blob_response.find("200 OK") == std::string::npos ||
                         blob_action_response.find("200 OK") == std::string::npos || !blob_spooled
                     ? "failed" : "reverse-spooled",
+                file_response.find("200 OK") == std::string::npos ||
+                        file_fcup_request.find(file_url) == std::string::npos ||
+                        file_action_response.find("200 OK") == std::string::npos || !file_spooled
+                    ? "failed" : "reverse-spooled",
                 static_cast<long long>(state.spooled_size),
                 static_cast<unsigned>(state.spooled_mode),
-                state.spooled_bytes.size(), spool_cleaned,
+                state.spooled_bytes.size(), blob_spool_replaced, file_spool_cleaned,
                 action_without_play_1.find("400 Bad Request") == std::string::npos ||
                         action_missing_type_2.find("400 Bad Request") == std::string::npos ||
                         invalid_action_response.find("400 Bad Request") == std::string::npos
@@ -509,9 +727,24 @@ int main(int argc, char** argv)
                 state.location.c_str(), state.start_position, state.playback_rate,
                 state.scrub_position, state.stop_count, state.play_count);
 
+    // Closing the last AirPlay video connection without POST /stop must stop
+    // URL playback so the output does not keep a stale frame.
+    int stops_before_close = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        stops_before_close = state.stop_count;
+    }
     if (play_fd >= 0) close(play_fd);
+    int stops_after_close = stops_before_close;
+    for (int i = 0; i < 40 && stops_after_close == stops_before_close; ++i) {
+        usleep(50000);
+        std::lock_guard<std::mutex> lock(state.mutex);
+        stops_after_close = state.stop_count;
+    }
+    const bool close_stops = stops_after_close == stops_before_close + 1;
+    std::printf("close_without_stop=%s\n", close_stops ? "stopped" : "FAILED");
     if (reverse_fd >= 0) close(reverse_fd);
     raop_stop_httpd(raop);
     raop_destroy(raop);
-    return passed ? 0 : 1;
+    return passed && close_stops ? 0 : 1;
 }

@@ -2,18 +2,17 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.1.0**
+Current release: **v2.2.0**
 
-## What's new in v2.1.0
+## What's new in v2.2.0
 
-- Safari Media AirPlay playback for public MP4 and HLS video, in addition to screen mirroring from native apps
-- Reverse-channel fetching for Safari page-local `blob:` MP4 media, including generated and imported videos
-- Receiver-side H.264/HEVC video and AAC audio demuxing, decoding, seeking, pause, resume, and playback-status reporting
-- Secure temporary-file handling for reverse-fetched media, with a 128 MiB safety limit and automatic cleanup
-- Clearer media/protocol timing logs plus stale-frame cleanup when playback stops or switches sources
-- Regression coverage for native AirPlay controls, malformed messages, MP4, HLS, HEVC, and exact device-sized blob transfers
+- iOS "AirPlay video" from native apps that play local files with AVPlayer (`allowsExternalPlayback`): OBS fetches the video from the sender's own media server
+- Item switches on the same player (`playlistRemove`/`playlistInsert`) play the new item instead of being rejected
+- Playback that follows the sender: no keyframe pre-roll after seeks, preview frames when seeking while paused, still clips, accurate `/playback-info`, hold on the last frame at item end
+- No blank frames between items; a rejected `/play` no longer drops the AirPlay connection
+- Optional `[MEDIA-TRACE]` protocol trace for diagnosing AirPlay video senders
 
-See the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for the complete summary.
+See the [v2.2.0 release notes](RELEASE_NOTES_v2.2.0.md) for the complete summary, and the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for Safari Media AirPlay.
 
 ## Features
 
@@ -21,6 +20,8 @@ See the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for the complete summary
 - ✅ AirPlay protocol support
 - ✅ **Safari Media AirPlay** — play website MP4 and HLS video directly in OBS
 - ✅ **Page-local video support** — Safari `blob:` MP4 media is fetched over AirPlay's reverse channel
+- ✅ **iOS AirPlay video from native apps** — AVPlayer local-file playback (`mediaType=file`) is fetched from the sender's media server, with play/pause, seek, and item switches
+- ✅ **Sender-local media support** — stateful `file:` and `blob:` media URLs are fetched over AirPlay's reverse channel, including senders that establish `/reverse` after `/play`
 - ✅ RAOP (Remote Audio Output Protocol) for audio streaming
 - ✅ H.264 and HEVC video decoding
 - ✅ AAC audio decoding

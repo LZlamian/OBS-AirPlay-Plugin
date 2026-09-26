@@ -237,9 +237,15 @@ bool obs_module_load(void)
                 }
             });
             
-            g_uxplay_integration->setConnectionResetCallback([]() {
+            g_airplay_server->setMirrorFrameOutputCallback([]() {
+                if (g_uxplay_integration) {
+                    g_uxplay_integration->onMirrorFrameOutput();
+                }
+            });
+
+            g_uxplay_integration->setConnectionResetCallback([](bool clear_output) {
                 if (g_airplay_server) {
-                    g_airplay_server->resetDecoders();
+                    g_airplay_server->resetDecoders(clear_output);
                 }
             });
 

@@ -151,7 +151,7 @@ bool AirPlayServer::start(const std::string& server_name, uint16_t airplay_port,
     return true;
 }
 
-void AirPlayServer::resetDecoders()
+void AirPlayServer::resetDecoders(bool clear_output)
 {
     std::lock_guard<std::mutex> lock(m_decoder_mutex);
     if (m_h264_decoder) m_h264_decoder->flush();
@@ -162,6 +162,7 @@ void AirPlayServer::resetDecoders()
         // m_sources_mutex. Keep reconnect/source-switch resets synchronized.
         std::lock_guard<std::mutex> sources_lock(m_sources_mutex);
         for (obs_weak_source_t* weak : m_registered_sources) {
+            if (!clear_output) break;
             obs_source_t* source = obs_weak_source_get_source(weak);
             if (source) {
                 // OBS documents a null asynchronous frame as deactivating the
@@ -176,7 +177,8 @@ void AirPlayServer::resetDecoders()
     }
     airplay_source_notify_frame_queued(0);
     resetStreamClock();
-    blog(LOG_INFO, "AirPlay decoders flushed and retained OBS frame cleared");
+    blog(LOG_INFO, clear_output ? "AirPlay decoders flushed and retained OBS frame cleared"
+                                : "AirPlay decoders flushed (last OBS frame kept)");
 }
 
 void AirPlayServer::resetStreamClock()
@@ -1034,6 +1036,9 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     }
     if (first_frame) {
         airplay_source_notify_frame_queued(os_gettime_ns());
+    }
+    if (m_mirror_frame_output_callback) {
+        m_mirror_frame_output_callback();
     }
     const uint64_t t_output_end = tele ? os_gettime_ns() : 0;
 

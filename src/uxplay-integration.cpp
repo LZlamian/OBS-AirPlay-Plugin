@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <utility>
 #if defined(__APPLE__)
 #include <pthread/qos.h>
@@ -44,6 +46,30 @@ void boost_caller_thread_qos_once(const char* tag)
     (void)tag;
 #endif
 }
+
+#ifndef OBS_AIRPLAY_MEDIA_TRACE_DEFAULT
+#define OBS_AIRPLAY_MEDIA_TRACE_DEFAULT 0
+#endif
+
+// The AirPlay video protocol trace ([MEDIA-TRACE] lines: /play, /reverse,
+// FCUP, playback controls) is off by default.  Enable it with the
+// OBS_AIRPLAY_MEDIA_TRACE=1 environment variable or by creating the file
+// ~/Library/Application Support/obs-studio/obs-airplay-media-trace
+bool media_trace_requested()
+{
+    if (const char* env = std::getenv("OBS_AIRPLAY_MEDIA_TRACE")) {
+        return env[0] && std::strcmp(env, "0") != 0;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        const std::string flag = std::string(home) +
+            "/Library/Application Support/obs-studio/obs-airplay-media-trace";
+        struct stat st {};
+        if (stat(flag.c_str(), &st) == 0) {
+            return true;
+        }
+    }
+    return OBS_AIRPLAY_MEDIA_TRACE_DEFAULT != 0;
+}
 } // namespace
 
 UxPlayIntegration::UxPlayIntegration()
@@ -54,11 +80,66 @@ UxPlayIntegration::UxPlayIntegration()
     , m_server_name("OBS AirPlay")
     , m_actual_port(0)
 {
+    m_clear_thread = std::thread(&UxPlayIntegration::deferredClearLoop, this);
 }
 
 UxPlayIntegration::~UxPlayIntegration()
 {
     stop();
+    {
+        std::lock_guard<std::mutex> lock(m_clear_mutex);
+        m_clear_exit = true;
+    }
+    m_clear_cv.notify_all();
+    if (m_clear_thread.joinable()) {
+        m_clear_thread.join();
+    }
+}
+
+void UxPlayIntegration::scheduleDeferredClear()
+{
+    constexpr auto kGracePeriod = std::chrono::milliseconds(450);
+    {
+        std::lock_guard<std::mutex> lock(m_clear_mutex);
+        m_clear_pending = true;
+        m_clear_deadline = std::chrono::steady_clock::now() + kGracePeriod;
+    }
+    m_clear_cv.notify_all();
+}
+
+void UxPlayIntegration::onMirrorFrameOutput()
+{
+    // Only a decoded picture counts; codec headers alone do not replace the
+    // held frame (seen after iOS resumes an idle mirror stream).
+    if (m_clear_pending) {
+        cancelDeferredClear();
+    }
+}
+
+void UxPlayIntegration::cancelDeferredClear()
+{
+    std::lock_guard<std::mutex> lock(m_clear_mutex);
+    m_clear_pending = false;
+}
+
+void UxPlayIntegration::deferredClearLoop()
+{
+    std::unique_lock<std::mutex> lock(m_clear_mutex);
+    while (!m_clear_exit) {
+        if (!m_clear_pending) {
+            m_clear_cv.wait(lock);
+            continue;
+        }
+        if (std::chrono::steady_clock::now() < m_clear_deadline) {
+            m_clear_cv.wait_until(lock, m_clear_deadline);
+            continue;
+        }
+        m_clear_pending = false;
+        lock.unlock();
+        blog(LOG_INFO, "[MEDIA] no new AirPlay video item followed /stop; clearing output");
+        processConnReset(true);
+        lock.lock();
+    }
 }
 
 bool UxPlayIntegration::start(const std::string& device_id_str, int port,
@@ -200,7 +281,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                 auto* self = static_cast<UxPlayIntegration*>(cls);
                 blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
                 self->m_connection_timing_active.store(false);
-                self->processConnReset();
+                self->processConnReset(!self->m_media_active.load());
             }
         };
         callbacks.video_flush = [](void* cls) {
@@ -241,10 +322,13 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             }
             blog(LOG_INFO, "[MEDIA] POST /play supplied a media URL (start=%.3fs)",
                  start_position);
-            // Stop a previous URL worker before resetting shared OBS output
-            // state. This makes rapid source switching deterministic.
+            // Stop a previous URL worker before resetting shared decoder
+            // state. The previous frame stays on screen until the new item's
+            // first frame replaces it, so switches never flash an empty source.
+            self->cancelDeferredClear();
             self->m_media_player->stop();
-            self->processConnReset();
+            self->processConnReset(false);
+            self->m_media_active.store(true);
             self->m_media_player->play(location, start_position);
         };
         callbacks.on_video_scrub = [](void* cls, const float position) {
@@ -263,9 +347,11 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         callbacks.on_video_stop = [](void* cls) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             if (self && self->m_media_player) {
-                blog(LOG_INFO, "[MEDIA] stopping URL playback and clearing retained output");
+                blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
                 self->m_media_player->stop();
-                self->processConnReset();
+                self->m_media_active.store(false);
+                self->processConnReset(false);
+                self->scheduleDeferredClear();
             }
         };
         callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) {
@@ -278,9 +364,14 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             playback_video->stallcount = 0;
             // Do not turn a live/unknown-duration HLS stream into an ever-
             // growing finite movie.  UxPlay emits empty range arrays for 0.
-            playback_video->duration = info.ended ? -1.0
+            // At the end of a finite item UxPlay either holds it paused (when
+            // the sender set actionAtItemEnd=pause) or shuts the session down.
+            playback_video->ended = info.ended;
+            playback_video->duration = info.ended && !info.duration_known ? -1.0
                 : (info.duration_known ? info.duration : 0.0);
-            playback_video->position = info.ready_to_play ? info.position : 0.0;
+            // While opening, report the requested start position so an
+            // AVPlayer sender's timeline does not jump back to zero.
+            playback_video->position = info.position;
             playback_video->seek_start = info.seek_start;
             playback_video->seek_duration = info.seek_duration;
             playback_video->rate = info.rate;
@@ -315,8 +406,12 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                      reset_type == RESET_TYPE_HLS_EOS ||
                      reset_type == RESET_TYPE_NOHOLD)) {
                     self->m_media_player->stop();
+                    self->m_media_active.store(false);
+                    self->cancelDeferredClear();
                 }
-                self->processConnReset();
+                // iOS tears down its (idle) mirror stream right after an
+                // AirPlay video item starts; that must not blank the item.
+                self->processConnReset(!self->m_media_active.load());
             }
         };
         callbacks.video_set_codec = [](void* cls, video_codec_t codec) -> int {
@@ -369,6 +464,14 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }, this);
         
         blog(LOG_INFO, "RAOP initialized successfully");
+
+        if (media_trace_requested()) {
+            // Raise UxPlay's logger (default LOGGER_WARNING) so the [MEDIA]
+            // INFO lines and the [MEDIA-TRACE] protocol dump reach the OBS log.
+            raop_set_log_level(m_raop, LOGGER_INFO);
+            raop_set_media_trace_level(m_raop, LOGGER_INFO);
+            blog(LOG_INFO, "AirPlay media protocol trace enabled ([MEDIA-TRACE] lines)");
+        }
 
         // Initialize DNS-SD context needed by UxPlay's RAOP handlers (/info and TXT payloads)
         std::array<char, 6> hw_addr = {};
@@ -644,7 +747,7 @@ void UxPlayIntegration::setConnectionResetCallback(ConnectionResetCallback callb
     m_reset_callback = callback;
 }
 
-void UxPlayIntegration::processConnReset()
+void UxPlayIntegration::processConnReset(bool clear_output)
 {
     ConnectionResetCallback callback;
     {
@@ -652,7 +755,7 @@ void UxPlayIntegration::processConnReset()
         callback = m_reset_callback;
     }
     if (callback) {
-        callback();
+        callback(clear_output);
     }
 }
 
