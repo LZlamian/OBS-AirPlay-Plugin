@@ -9,7 +9,10 @@ Current release: **v2.2.0**
 - iOS "AirPlay video" from native apps that play local files with AVPlayer (`allowsExternalPlayback`): OBS fetches the video from the sender's own media server
 - Item switches on the same player (`playlistRemove`/`playlistInsert`) play the new item instead of being rejected
 - Playback that follows the sender: no keyframe pre-roll after seeks, preview frames when seeking while paused, still clips, accurate `/playback-info`, hold on the last frame at item end
-- No blank frames between items; a rejected `/play` no longer drops the AirPlay connection
+- Paused items and still images (photos, PDF pages) always appear; no blank frames between items
+- Screen mirroring comes back after an app stops AirPlay video (previously OBS stayed black)
+- Robust transfers from the sender's media server: early-ended responses continue with fresh range requests instead of losing frames
+- A rejected `/play` no longer drops the AirPlay connection
 - Optional `[MEDIA-TRACE]` protocol trace for diagnosing AirPlay video senders
 
 See the [v2.2.0 release notes](RELEASE_NOTES_v2.2.0.md) for the complete summary, and the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for Safari Media AirPlay.
@@ -385,7 +388,12 @@ tail -f ~/Library/Application\ Support/obs-studio/logs/$(ls -t ~/Library/Applica
    - Filter for "OBS" or "AirPlay"
    - Run OBS and watch for messages
 
-3. **Attach Debugger**
+3. **AirPlay video protocol trace**
+   - Create `~/Library/Application Support/obs-studio/obs-airplay-media-trace` (or start OBS with `OBS_AIRPLAY_MEDIA_TRACE=1`) and restart OBS
+   - The OBS log then shows every AirPlay video request and response (`/play`, `/action`, `/scrub`, `/rate`, `/stop`, `/playback-info`, reverse-HTTP) as `[MEDIA-TRACE]` lines, plus UxPlay's `[MEDIA]` lines
+   - Delete the file and restart OBS to turn it off; the trace is verbose
+
+4. **Attach Debugger**
    ```bash
    # Find OBS process ID
    ps aux | grep OBS
@@ -406,6 +414,9 @@ tail -f ~/Library/Application\ Support/obs-studio/logs/$(ls -t ~/Library/Applica
 3. **Safari Page-Local Media**
    - `blob:` MP4 media must be transferred completely before playback starts
    - Reverse-fetched files are currently limited to 128 MiB
+
+4. **AirPlay Video Playback Rates**
+   - Rates other than pause (0) and normal (1) apply to video only; audio is not time-stretched
 
 ## Contributing
 
