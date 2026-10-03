@@ -55,7 +55,7 @@ private:
     bool receiveFrame(DecodedVideoFrame& out_frame, int* error);
     bool outputHardwareFrame(DecodedVideoFrame& out_frame);
     bool outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_frame);
-    void noteMode(bool hardware, int width, int height);
+    void noteMode(bool hardware, int width, int height, bool nv12, bool full_range);
 
     static enum AVPixelFormat chooseFormat(AVCodecContext* context,
                                            const enum AVPixelFormat* formats);
@@ -88,4 +88,5 @@ private:
     bool m_logged_hardware = false;
     int m_logged_width = 0;
     int m_logged_height = 0;
+    bool m_logged_full_range = false;
 };

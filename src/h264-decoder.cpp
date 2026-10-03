@@ -294,19 +294,21 @@ bool H264Decoder::fallBackToSoftware(const char* reason)
     return true;
 }
 
-void H264Decoder::noteMode(bool hardware, int width, int height)
+void H264Decoder::noteMode(bool hardware, int width, int height, bool nv12, bool full_range)
 {
     m_last_frame_hardware = hardware;
-    if (m_mode_logged && m_logged_hardware == hardware &&
-        m_logged_width == width && m_logged_height == height) {
+    if (m_mode_logged && m_logged_hardware == hardware && m_logged_width == width &&
+        m_logged_height == height && m_logged_full_range == full_range) {
         return;
     }
     m_mode_logged = true;
     m_logged_hardware = hardware;
     m_logged_width = width;
     m_logged_height = height;
-    blog(LOG_INFO, "[DECODE] mirror video %dx%d: %s", width, height,
-         hardware ? "VideoToolbox hardware decoding" : "software decoding");
+    m_logged_full_range = full_range;
+    blog(LOG_INFO, "[DECODE] mirror video %dx%d: %s (%s, %s range)", width, height,
+         hardware ? "VideoToolbox hardware decoding" : "software decoding",
+         nv12 ? "NV12" : "I420", full_range ? "full" : "video");
 }
 
 bool H264Decoder::outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_frame)
@@ -427,7 +429,7 @@ bool H264Decoder::receiveFrame(DecodedVideoFrame& out_frame, int* error)
         *error = AVERROR_EXTERNAL;
         return false;
     }
-    noteMode(hardware, out_frame.width, out_frame.height);
+    noteMode(hardware, out_frame.width, out_frame.height, out_frame.nv12, out_frame.full_range);
     return true;
 }
 

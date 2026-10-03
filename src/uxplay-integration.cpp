@@ -424,6 +424,13 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
             blog(LOG_INFO, "[CONNECT] +%.2fms codec configuration received (%s)",
                  elapsed_ms, codec == VIDEO_CODEC_H265 ? "H265/HEVC" : "H264");
+            // A new mirror stream starts here (it begins with its parameter
+            // sets and a keyframe): start its decoder state fresh, so a
+            // software fallback or statistics from an earlier stream do not
+            // carry over. The picture on screen is left alone.
+            if (self) {
+                self->processConnReset(false, true);
+            }
             return 0;
         };
         
