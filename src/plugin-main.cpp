@@ -243,9 +243,10 @@ bool obs_module_load(void)
                 }
             });
 
-            g_uxplay_integration->setConnectionResetCallback([](bool clear_output) {
+            g_uxplay_integration->setConnectionResetCallback(
+                [](bool clear_output, bool flush_decoders) {
                 if (g_airplay_server) {
-                    g_airplay_server->resetDecoders(clear_output);
+                    g_airplay_server->resetDecoders(clear_output, flush_decoders);
                 }
             });
 

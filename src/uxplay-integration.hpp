@@ -35,7 +35,8 @@ typedef std::function<void(const uint8_t* data, size_t size, uint8_t codec_type,
 
 // Connection reset callback (called when AirPlay client disconnects/reconnects)
 // clear_output=false flushes decoders but keeps the last frame on screen.
-typedef std::function<void(bool clear_output)> ConnectionResetCallback;
+// flush_decoders=false also leaves the mirror decoders untouched.
+typedef std::function<void(bool clear_output, bool flush_decoders)> ConnectionResetCallback;
 
 class UxPlayIntegration {
 public:
@@ -105,7 +106,7 @@ private:
     // Internal video/audio/reset processing
     void processVideoData(video_decode_struct* data);
     void processAudioData(audio_decode_struct* data);
-    void processConnReset(bool clear_output = true);
+    void processConnReset(bool clear_output = true, bool flush_decoders = true);
 
     // URL media (AirPlay video) item on screen: mirror teardowns must not
     // blank it, and /stop clears it only after a short grace period so an

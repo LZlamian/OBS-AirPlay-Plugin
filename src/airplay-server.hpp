@@ -43,7 +43,11 @@ public:
     // Flush FFmpeg decoder contexts (call on client reconnect for clean state)
     // clear_output=false keeps the last frame on screen (URL media item
     // switches); a later frame or reset replaces it.
-    void resetDecoders(bool clear_output = true);
+    // flush_decoders=false leaves the mirror decoders alone: an AirPlay video
+    // /play or /stop is not a mirror stream boundary, and a flushed H.264
+    // decoder shows nothing until the next keyframe, which a mirror stream
+    // that keeps running may not send.
+    void resetDecoders(bool clear_output = true, bool flush_decoders = true);
 
     // Called after each decoded screen-mirroring frame reaches OBS.
     void setMirrorFrameOutputCallback(std::function<void()> callback)

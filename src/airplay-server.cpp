@@ -151,12 +151,14 @@ bool AirPlayServer::start(const std::string& server_name, uint16_t airplay_port,
     return true;
 }
 
-void AirPlayServer::resetDecoders(bool clear_output)
+void AirPlayServer::resetDecoders(bool clear_output, bool flush_decoders)
 {
     std::lock_guard<std::mutex> lock(m_decoder_mutex);
-    if (m_h264_decoder) m_h264_decoder->flush();
-    if (m_h265_decoder) m_h265_decoder->flush();
-    if (m_audio_decoder) m_audio_decoder->flush();
+    if (flush_decoders) {
+        if (m_h264_decoder) m_h264_decoder->flush();
+        if (m_h265_decoder) m_h265_decoder->flush();
+        if (m_audio_decoder) m_audio_decoder->flush();
+    }
     {
         // Native and URL playback both update these counters while holding
         // m_sources_mutex. Keep reconnect/source-switch resets synchronized.
@@ -177,8 +179,8 @@ void AirPlayServer::resetDecoders(bool clear_output)
     }
     airplay_source_notify_frame_queued(0);
     resetStreamClock();
-    blog(LOG_INFO, clear_output ? "AirPlay decoders flushed and retained OBS frame cleared"
-                                : "AirPlay decoders flushed (last OBS frame kept)");
+    blog(LOG_INFO, "AirPlay output reset (decoders %s, last OBS frame %s)",
+         flush_decoders ? "flushed" : "kept", clear_output ? "cleared" : "kept");
 }
 
 void AirPlayServer::resetStreamClock()

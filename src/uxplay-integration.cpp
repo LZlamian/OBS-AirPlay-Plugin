@@ -137,7 +137,8 @@ void UxPlayIntegration::deferredClearLoop()
         m_clear_pending = false;
         lock.unlock();
         blog(LOG_INFO, "[MEDIA] no new AirPlay video item followed /stop; clearing output");
-        processConnReset(true);
+        // The mirror stream may still be running; only the picture is cleared.
+        processConnReset(true, false);
         lock.lock();
     }
 }
@@ -327,7 +328,9 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             // first frame replaces it, so switches never flash an empty source.
             self->cancelDeferredClear();
             self->m_media_player->stop();
-            self->processConnReset(false);
+            // Not a mirror stream boundary: iOS may cancel this item and keep
+            // mirroring without a new keyframe, so leave the mirror decoder.
+            self->processConnReset(false, false);
             self->m_media_active.store(true);
             self->m_media_player->play(location, start_position);
         };
@@ -350,7 +353,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                 blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
                 self->m_media_player->stop();
                 self->m_media_active.store(false);
-                self->processConnReset(false);
+                self->processConnReset(false, false);
                 self->scheduleDeferredClear();
             }
         };
@@ -747,7 +750,7 @@ void UxPlayIntegration::setConnectionResetCallback(ConnectionResetCallback callb
     m_reset_callback = callback;
 }
 
-void UxPlayIntegration::processConnReset(bool clear_output)
+void UxPlayIntegration::processConnReset(bool clear_output, bool flush_decoders)
 {
     ConnectionResetCallback callback;
     {
@@ -755,7 +758,7 @@ void UxPlayIntegration::processConnReset(bool clear_output)
         callback = m_reset_callback;
     }
     if (callback) {
-        callback(clear_output);
+        callback(clear_output, flush_decoders);
     }
 }
 
