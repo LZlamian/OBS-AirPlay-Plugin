@@ -5,7 +5,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         "Oldest macOS version supported by the packaged plugin")
 endif()
 
-project(obs-airplay VERSION 2.2.0)
+project(obs-airplay VERSION 2.2.1)
 
 set(PLUGIN_AUTHOR "LZlamian")
 set(MACOS_BUNDLEID "com.lzlamian.obs-airplay")

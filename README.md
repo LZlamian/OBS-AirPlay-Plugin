@@ -2,7 +2,7 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.2.0**
+Current release: **v2.2.1** — a maintenance release that fixes the Discovery helper showing as "Not Responding" ([release notes](RELEASE_NOTES_v2.2.1.md)).
 
 ## What's new in v2.2.0
 
