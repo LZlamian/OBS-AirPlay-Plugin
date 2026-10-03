@@ -113,7 +113,12 @@ else
   )
 fi
 
-if [[ -f "${PREFIX}/lib/libavformat.dylib" && -f "${PREFIX}/lib/pkgconfig/libavformat.pc" ]]; then
+# The feature stamp makes a prefix built before a configure change (e.g.
+# without VideoToolbox hardware decoding) rebuild instead of being reused.
+FFMPEG_FEATURES="videotoolbox-hwaccel-v1"
+FFMPEG_STAMP="${PREFIX}/.obs-airplay-ffmpeg-features"
+if [[ -f "${PREFIX}/lib/libavformat.dylib" && -f "${PREFIX}/lib/pkgconfig/libavformat.pc" \
+      && "$(cat "${FFMPEG_STAMP}" 2>/dev/null)" == "${FFMPEG_FEATURES}" ]]; then
   echo "==> Reusing FFmpeg ${FFMPEG_VERSION}"
 else
   echo "==> Building FFmpeg ${FFMPEG_VERSION}"
@@ -143,6 +148,8 @@ else
         --enable-swscale \
         --enable-swresample \
         --enable-decoder=aac,alac,h264,hevc,mp3 \
+        --enable-videotoolbox \
+        --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox \
         --enable-parser=aac,h264,hevc,mpegaudio \
         --enable-demuxer=aac,hls,mov,mp3,mpegts \
         --enable-protocol=crypto,file,http,https,tcp,tls,udp \
@@ -151,6 +158,7 @@ else
     make -j"${JOBS}"
     make install
   )
+  printf '%s' "${FFMPEG_FEATURES}" > "${FFMPEG_STAMP}"
 fi
 
 echo "==> Release dependencies are ready"

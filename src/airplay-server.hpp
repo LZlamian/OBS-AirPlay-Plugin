@@ -133,6 +133,9 @@ private:
     std::mutex m_decoder_mutex;
     uint64_t m_video_frame_counter = 0;
     uint64_t m_first_decoded_frame_ns = 0;
+    // Mirror statistics window ([MIRROR] line every ~10 s while frames arrive).
+    uint64_t m_mirror_stats_started_ns = 0;
+    uint32_t m_mirror_stats_frames = 0;
     uint64_t m_audio_frame_counter = 0;
 
     // UxPlay timestamps use a stable nanosecond clock, while OBS expects its

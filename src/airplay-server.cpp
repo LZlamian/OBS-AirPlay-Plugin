@@ -174,6 +174,7 @@ void AirPlayServer::resetDecoders(bool clear_output, bool flush_decoders)
             }
         }
         m_video_frame_counter = 0; // re-enable first-frame timing log on reconnect
+        m_mirror_stats_started_ns = 0;
         m_first_decoded_frame_ns = 0;
         m_audio_frame_counter = 0;
     }
@@ -977,11 +978,14 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     frame.linesize[2] = decoded.linesize[2];
     frame.width = static_cast<uint32_t>(decoded.width);
     frame.height = static_cast<uint32_t>(decoded.height);
-    frame.format = VIDEO_FORMAT_I420;
-    frame.full_range = false;
+    // Hardware decoding delivers NV12; OBS takes it directly, so no colour
+    // conversion happens on the CPU.
+    frame.format = decoded.nv12 ? VIDEO_FORMAT_NV12 : VIDEO_FORMAT_I420;
+    frame.full_range = decoded.full_range;
     frame.trc = VIDEO_TRC_DEFAULT;
     video_format_get_parameters_for_format(VIDEO_CS_709,
-                                           VIDEO_RANGE_PARTIAL,
+                                           decoded.full_range ? VIDEO_RANGE_FULL
+                                                              : VIDEO_RANGE_PARTIAL,
                                            frame.format,
                                            frame.color_matrix,
                                            frame.color_range_min,
@@ -1045,6 +1049,38 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     const uint64_t t_output_end = tele ? os_gettime_ns() : 0;
 
     ++m_video_frame_counter;
+
+    // One line every ~10 s of mirroring: size, frame rate, decode mode and a
+    // coarse brightness marker (16 = black), to tell a moving picture from a
+    // held or black one after the fact.
+    {
+        const uint64_t stats_now = os_gettime_ns();
+        if (!m_mirror_stats_started_ns) {
+            m_mirror_stats_started_ns = stats_now;
+            m_mirror_stats_frames = 0;
+        }
+        ++m_mirror_stats_frames;
+        constexpr uint64_t kMirrorStatsIntervalNs = UINT64_C(10000000000);
+        if (stats_now - m_mirror_stats_started_ns >= kMirrorStatsIntervalNs) {
+            uint64_t luma_sum = 0;
+            uint32_t samples = 0;
+            for (int y = 0; y < decoded.height; y += 48) {
+                const uint8_t* row = decoded.data[0] + y * decoded.linesize[0];
+                for (int x = 0; x < decoded.width; x += 48) {
+                    luma_sum += row[x];
+                    ++samples;
+                }
+            }
+            const double seconds = (stats_now - m_mirror_stats_started_ns) / 1e9;
+            blog(LOG_INFO, "[MIRROR] %dx%d %s, %u frames in %.1fs (%.1f fps), %s decoding, luma avg %.0f",
+                 decoded.width, decoded.height, is_h265 ? "HEVC" : "H264",
+                 m_mirror_stats_frames, seconds, m_mirror_stats_frames / seconds,
+                 decoder->usingHardware() ? "hardware" : "software",
+                 samples ? static_cast<double>(luma_sum) / samples : 0.0);
+            m_mirror_stats_started_ns = stats_now;
+            m_mirror_stats_frames = 0;
+        }
+    }
 
     if (tele) {
         const uint64_t decode_ns = t_decode_end - t_decode_start;

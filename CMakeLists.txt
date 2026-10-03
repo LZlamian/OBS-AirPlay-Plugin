@@ -363,10 +363,13 @@ if(APPLE)
     message(STATUS "Cocoa: ${COCOA_LIBRARY}")
     
     # Link frameworks - dns_sd is provided by System.framework
+    # CoreVideo: the mirror decoder reads VideoToolbox pixel buffers directly.
+    find_library(CORE_VIDEO_LIBRARY CoreVideo REQUIRED)
     target_link_libraries(obs-airplay PRIVATE 
         ${SYSTEM_LIBRARY}
         ${CORE_FOUNDATION}
         ${COCOA_LIBRARY}
+        ${CORE_VIDEO_LIBRARY}
     )
     
     # Set macOS bundle properties
@@ -436,6 +439,26 @@ if(BUILD_TESTING)
     target_link_libraries(obs-airplay-media-smoke PRIVATE
         ${FFMPEG_LIBRARIES}
     )
+
+    # Mirror decoder: hardware vs software output, size changes, recovery.
+    add_executable(obs-airplay-decoder-smoke
+        tests/video-decoder-smoke.cpp
+        src/h264-decoder.cpp
+    )
+    target_include_directories(obs-airplay-decoder-smoke PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${OBS_INCLUDE_DIR}
+        ${FFMPEG_INCLUDE_DIRS}
+    )
+    target_link_directories(obs-airplay-decoder-smoke PRIVATE
+        ${FFMPEG_LIBRARY_DIRS}
+    )
+    target_link_libraries(obs-airplay-decoder-smoke PRIVATE
+        ${FFMPEG_LIBRARIES}
+    )
+    if(APPLE)
+        target_link_libraries(obs-airplay-decoder-smoke PRIVATE "-framework CoreVideo")
+    endif()
 
     add_executable(obs-airplay-protocol-smoke
         tests/protocol-smoke.cpp
