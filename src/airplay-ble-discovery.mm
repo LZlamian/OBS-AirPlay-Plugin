@@ -207,12 +207,15 @@ int main(int argc, const char *argv[])
         __strong AirPlayBLEDelegate *delegate = [[AirPlayBLEDelegate alloc] init];
         (void)delegate;
 
-        [NSTimer scheduledTimerWithTimeInterval:1.0
-                                         repeats:YES
-                                           block:^(__unused NSTimer *timer) {
+        // Common modes: keep watching the parent while the update prompt's
+        // modal session is running, so the helper never outlives OBS.
+        NSTimer *parentWatch = [NSTimer timerWithTimeInterval:1.0
+                                                      repeats:YES
+                                                        block:^(__unused NSTimer *timer) {
             if (kill(parentPID, 0) != 0 && errno == ESRCH)
                 exit(0);
         }];
+        [[NSRunLoop mainRunLoop] addTimer:parentWatch forMode:NSRunLoopCommonModes];
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
@@ -220,7 +223,10 @@ int main(int argc, const char *argv[])
                 checkForUpdates(parentPID);
         });
 
-        [[NSRunLoop mainRunLoop] run];
+        // Run AppKit's event loop, not a bare run loop: an NSApplication
+        // that never dequeues window-server events is reported by macOS as
+        // "Not Responding" (and counted as hung) even though it is idle.
+        [NSApp run];
     }
     return 0;
 }
