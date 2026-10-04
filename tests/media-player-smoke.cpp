@@ -218,6 +218,30 @@ int switchToStill(const char* video, const char* still)
     return ok ? 0 : 1;
 }
 
+// An audio-only item paused before it starts must wait, not decode itself
+// to the end, and play from the start once resumed.
+int pausedAudio(const char* location)
+{
+    std::atomic<unsigned int> audio_frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([](const MediaVideoFrame&) {});
+    player.setAudioCallback([&](const MediaAudioFrame&) { ++audio_frames; });
+    player.play(location, 0.0);
+    player.setRate(0.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    const MediaPlaybackInfo paused = player.getPlaybackInfo();
+    const unsigned int paused_frames = audio_frames.load();
+    player.setRate(1.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    const MediaPlaybackInfo resumed = player.getPlaybackInfo();
+    player.stop();
+    const bool ok = !paused.ended && paused_frames == 0 && paused.position < 0.1 &&
+        audio_frames.load() > 0 && resumed.position > 0.5 && resumed.position < 1.5;
+    std::printf("paused-audio paused_ended=%d paused_frames=%u resumed_position=%.3f -> %s\n",
+                paused.ended, paused_frames, resumed.position, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     if (std::getenv("MEDIA_SMOKE_FFMPEG_VERBOSE")) {
@@ -231,6 +255,9 @@ int main(int argc, char** argv)
     }
     if (argc == 3 && std::strcmp(argv[1], "--scrub-drag") == 0) {
         return scrubDrag(argv[2]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--paused-audio") == 0) {
+        return pausedAudio(argv[2]);
     }
     if (argc == 3 && std::strcmp(argv[1], "--sparse-clip") == 0) {
         return sparseClip(argv[2]);
@@ -251,15 +278,34 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL\n", argv[0]);
         return 2;
     }
 
     std::atomic<unsigned int> video_frames{0};
     std::atomic<unsigned int> audio_frames{0};
+    // The first picture: size, layout and the luma at the centre of each
+    // quadrant (top-left, top-right, bottom-left, bottom-right), to check
+    // orientation and range.
+    int first_width = 0;
+    int first_height = 0;
+    bool first_nv12 = false;
+    bool first_full_range = false;
+    int first_luma[4] = {0, 0, 0, 0};
     MediaPlayer player;
     player.setVideoCallback([&](const MediaVideoFrame& frame) {
         if (frame.data[0] && frame.width > 0 && frame.height > 0 && frame.timestamp_ns > 0) {
+            if (video_frames.load() == 0) {
+                first_width = frame.width;
+                first_height = frame.height;
+                first_nv12 = frame.nv12;
+                first_full_range = frame.full_range;
+                for (int q = 0; q < 4; ++q) {
+                    const int x = frame.width / 4 + (q % 2) * (frame.width / 2);
+                    const int y = frame.height / 4 + (q / 2) * (frame.height / 2);
+                    first_luma[q] = frame.data[0][y * frame.linesize[0] + x];
+                }
+            }
             ++video_frames;
         }
     });
@@ -300,5 +346,8 @@ int main(int argc, char** argv)
                 info.ready_to_play, info.ended, info.has_video, info.has_audio,
                 video_frames.load(), audio_frames.load(), info.duration, info.position,
                 startup_only ? "startup" : "complete");
+    std::printf("first-picture=%dx%d %s %s-range quadrant-luma=%d,%d,%d,%d\n", first_width,
+                first_height, first_nv12 ? "nv12" : "i420", first_full_range ? "full" : "video",
+                first_luma[0], first_luma[1], first_luma[2], first_luma[3]);
     return passed ? 0 : 1;
 }

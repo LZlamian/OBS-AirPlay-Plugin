@@ -1,4 +1,5 @@
 #include "media-player.hpp"
+#include "hardware-decode-option.hpp"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -21,9 +22,12 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/display.h>
 #include <libavutil/error.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -384,6 +388,71 @@ double timestamp_seconds(const AVFrame* frame, const AVStream* stream,
     }
     const double absolute = frame->best_effort_timestamp * av_q2d(stream->time_base);
     return std::max(0.0, absolute - format_start_seconds);
+}
+
+// Clockwise quarter turns needed to show a stream upright. Phones store a
+// portrait recording as a landscape picture plus a display matrix; the
+// decoder does not apply it.
+int display_quarter_turns(const AVStream* stream)
+{
+    if (!stream || !stream->codecpar) {
+        return 0;
+    }
+    const AVPacketSideData* side = av_packet_side_data_get(
+        stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
+        AV_PKT_DATA_DISPLAYMATRIX);
+    if (!side || side->size < 9 * sizeof(int32_t)) {
+        return 0;
+    }
+    // Counter-clockwise degrees the picture is rotated by for display.
+    const double angle = av_display_rotation_get(reinterpret_cast<const int32_t*>(side->data));
+    if (std::isnan(angle)) {
+        return 0;
+    }
+    const int turns = static_cast<int>(std::lround(-angle / 90.0));
+    return ((turns % 4) + 4) % 4;
+}
+
+// Rotates one plane by clockwise quarter turns. `pixel` is the bytes per
+// sample group: 1, or 2 for NV12's interleaved chroma. After one or three
+// turns the destination is `height` wide and `width` tall.
+void rotate_plane(const uint8_t* src, int src_stride, int width, int height, int pixel,
+                  int turns, uint8_t* dst, int dst_stride)
+{
+    if (turns == 2) {
+        for (int y = 0; y < height; ++y) {
+            const uint8_t* in = src + static_cast<ptrdiff_t>(height - 1 - y) * src_stride +
+                                static_cast<ptrdiff_t>(width - 1) * pixel;
+            uint8_t* out = dst + static_cast<ptrdiff_t>(y) * dst_stride;
+            for (int x = 0; x < width; ++x, in -= pixel, out += pixel) {
+                out[0] = in[0];
+                if (pixel == 2) out[1] = in[1];
+            }
+        }
+        return;
+    }
+    // One turn: destination (x, y) is source column y, row height-1-x.
+    // Three turns: source column width-1-y, row x.
+    // Worked through in bands of destination rows, so that the source is
+    // read along its rows and only a few destination rows are open at a
+    // time (a plain column walk misses the cache on every sample of a 4K
+    // picture).
+    constexpr int kBand = 16;
+    for (int band = 0; band < width; band += kBand) {
+        const int band_end = std::min(width, band + kBand);
+        for (int x = 0; x < height; ++x) {
+            const int row = turns == 1 ? height - 1 - x : x;
+            const uint8_t* in_row = src + static_cast<ptrdiff_t>(row) * src_stride;
+            for (int y = band; y < band_end; ++y) {
+                const int column = turns == 1 ? y : width - 1 - y;
+                const uint8_t* in = in_row + static_cast<ptrdiff_t>(column) * pixel;
+                uint8_t* out = dst + static_cast<ptrdiff_t>(y) * dst_stride +
+                               static_cast<ptrdiff_t>(x) * pixel;
+                out[0] = in[0];
+                if (pixel == 2) out[1] = in[1];
+            }
+        }
+    }
 }
 
 // Byte-exact input for progressive HTTP media (MP4/MOV).  Sender media
@@ -771,7 +840,21 @@ private:
         return resolved;
     }
 
-    bool openDecoder(AVFormatContext* format, int stream_index, AVCodecContext** decoder)
+    // Per-item video output state, owned by run().
+    struct VideoOutput {
+        SwsContext* scaler = nullptr;
+        AVFrame* i420 = nullptr;      // software conversion target
+        AVFrame* transfer = nullptr;  // hardware surface copied to memory
+        AVFrame* rotated = nullptr;   // upright picture for rotated streams
+        int turns = 0;                // clockwise quarter turns to apply
+        bool hardware = false;        // the decoder was opened for hardware
+        int hardware_errors = 0;      // consecutive, since the last picture
+        bool reopen_in_software = false;
+        bool mode_logged = false;
+    };
+
+    bool openDecoder(AVFormatContext* format, int stream_index, AVCodecContext** decoder,
+                     bool allow_hardware = false, bool* hardware = nullptr)
     {
         if (!format || stream_index < 0 || !decoder) {
             return false;
@@ -788,6 +871,26 @@ private:
             return false;
         }
         int result = avcodec_parameters_to_context(context, stream->codecpar);
+        if (hardware) *hardware = false;
+        if (result >= 0 && stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            AVBufferRef* device = nullptr;
+            if (allow_hardware && hardware_decode_requested() &&
+                av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                       nullptr, nullptr, 0) >= 0 && device) {
+                // FFmpeg's default format choice uses the device when the
+                // stream can be decoded in hardware. The hardware decoder
+                // does the work; no decoder threads needed.
+                context->hw_device_ctx = device;
+                context->thread_count = 1;
+                if (hardware) *hardware = true;
+            } else {
+                // FFmpeg's default is a single thread, too slow for 4K or
+                // HEVC files. This is file playback, so the frame of delay
+                // per thread does not matter.
+                context->thread_count = 0;
+                context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+            }
+        }
         if (result >= 0) {
             result = avcodec_open2(context, codec, nullptr);
         }
@@ -824,7 +927,9 @@ private:
                 return false;
             }
             if (info.rate <= 0.0f) {
-                if (preview_pending) {
+                // (An audio-only item has no picture to preview: it simply
+                // waits for playback to start.)
+                if (preview_pending && info.has_video) {
                     if (!is_video) {
                         // Keep decoding until the video frame at the seek
                         // target is reached; resume re-seeks, so no audio is lost.
@@ -908,41 +1013,126 @@ private:
     }
 
     void emitVideo(AVFrame* decoded, AVStream* stream, double format_start_seconds,
-                   SwsContext** scaler, AVFrame* i420)
+                   VideoOutput* out)
     {
+        const bool hardware_frame = decoded->format == AV_PIX_FMT_VIDEOTOOLBOX;
+        if (out->hardware && !hardware_frame) {
+            // The stream cannot be decoded in hardware and FFmpeg carried on
+            // in software inside the single-threaded hardware context:
+            // run() reopens a threaded software decoder.
+            out->reopen_in_software = true;
+        }
+
         const double position = timestamp_seconds(decoded, stream, format_start_seconds);
         if (position < 0.0 || shouldDiscard(position, true)) {
             return;
         }
 
-        AVFrame* output = decoded;
-        if (decoded->format != AV_PIX_FMT_YUV420P) {
-            *scaler = sws_getCachedContext(
-                *scaler, decoded->width, decoded->height,
-                static_cast<AVPixelFormat>(decoded->format),
-                decoded->width, decoded->height, AV_PIX_FMT_YUV420P,
+        AVFrame* picture = decoded;
+        if (hardware_frame) {
+            av_frame_unref(out->transfer);
+            if (av_hwframe_transfer_data(out->transfer, decoded, 0) < 0) {
+                noteHardwareError(out, "could not read the decoded picture");
+                return;
+            }
+            out->transfer->color_range = decoded->color_range;
+            out->transfer->colorspace = decoded->colorspace;
+            picture = out->transfer;
+        }
+        out->hardware_errors = 0;
+
+        // NV12 (hardware) and I420 go to OBS as they are, in the stream's
+        // own range; everything else (10-bit, 4:2:2, ...) is converted.
+        const bool nv12 = picture->format == AV_PIX_FMT_NV12;
+        const bool i420 = picture->format == AV_PIX_FMT_YUV420P ||
+                          picture->format == AV_PIX_FMT_YUVJ420P;
+        bool full_range = picture->color_range == AVCOL_RANGE_JPEG ||
+                          picture->format == AV_PIX_FMT_YUVJ420P;
+        const bool bt601 = picture->colorspace == AVCOL_SPC_SMPTE170M ||
+                           picture->colorspace == AVCOL_SPC_BT470BG;
+        if (!out->mode_logged) {
+            out->mode_logged = true;
+            blog(LOG_INFO, "[MEDIA] video %dx%d: %s decoding (%s, %s range%s)",
+                 picture->width, picture->height,
+                 hardware_frame ? "VideoToolbox hardware" : "software",
+                 av_get_pix_fmt_name(static_cast<AVPixelFormat>(picture->format)),
+                 full_range ? "full" : "video",
+                 out->turns ? ", rotated upright" : "");
+        }
+        if (!nv12 && !i420) {
+            // swscale converts full-range (YUVJ) layouts to video range and
+            // leaves the range of everything else untouched.
+            const AVPixFmtDescriptor* descriptor =
+                av_pix_fmt_desc_get(static_cast<AVPixelFormat>(picture->format));
+            if (descriptor && std::strncmp(descriptor->name, "yuvj", 4) == 0) {
+                full_range = false;
+            }
+            out->scaler = sws_getCachedContext(
+                out->scaler, picture->width, picture->height,
+                static_cast<AVPixelFormat>(picture->format),
+                picture->width, picture->height, AV_PIX_FMT_YUV420P,
                 SWS_BILINEAR, nullptr, nullptr, nullptr);
-            if (!*scaler) {
+            if (!out->scaler) {
                 blog(LOG_ERROR, "[MEDIA] failed to create video converter");
                 return;
             }
-            if (i420->width != decoded->width || i420->height != decoded->height ||
-                i420->format != AV_PIX_FMT_YUV420P) {
-                av_frame_unref(i420);
-                i420->format = AV_PIX_FMT_YUV420P;
-                i420->width = decoded->width;
-                i420->height = decoded->height;
-                if (av_frame_get_buffer(i420, 32) < 0) {
+            AVFrame* i420_frame = out->i420;
+            if (i420_frame->width != picture->width || i420_frame->height != picture->height ||
+                i420_frame->format != AV_PIX_FMT_YUV420P) {
+                av_frame_unref(i420_frame);
+                i420_frame->format = AV_PIX_FMT_YUV420P;
+                i420_frame->width = picture->width;
+                i420_frame->height = picture->height;
+                if (av_frame_get_buffer(i420_frame, 32) < 0) {
                     blog(LOG_ERROR, "[MEDIA] failed to allocate converted video frame");
                     return;
                 }
             }
-            if (av_frame_make_writable(i420) < 0) {
+            if (av_frame_make_writable(i420_frame) < 0) {
                 return;
             }
-            sws_scale(*scaler, decoded->data, decoded->linesize, 0, decoded->height,
-                      i420->data, i420->linesize);
-            output = i420;
+            sws_scale(out->scaler, picture->data, picture->linesize, 0, picture->height,
+                      i420_frame->data, i420_frame->linesize);
+            picture = i420_frame;
+        }
+
+        if (out->turns) {
+            const int width = picture->width;
+            const int height = picture->height;
+            const int rotated_width = out->turns == 2 ? width : height;
+            const int rotated_height = out->turns == 2 ? height : width;
+            const AVPixelFormat layout = nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+            AVFrame* rotated = out->rotated;
+            if (rotated->width != rotated_width || rotated->height != rotated_height ||
+                rotated->format != layout) {
+                av_frame_unref(rotated);
+                rotated->format = layout;
+                rotated->width = rotated_width;
+                rotated->height = rotated_height;
+                if (av_frame_get_buffer(rotated, 32) < 0) {
+                    blog(LOG_ERROR, "[MEDIA] failed to allocate rotated video frame");
+                    return;
+                }
+            }
+            if (av_frame_make_writable(rotated) < 0) {
+                return;
+            }
+            const int chroma_width = (width + 1) / 2;
+            const int chroma_height = (height + 1) / 2;
+            rotate_plane(picture->data[0], picture->linesize[0], width, height, 1,
+                         out->turns, rotated->data[0], rotated->linesize[0]);
+            if (nv12) {
+                rotate_plane(picture->data[1], picture->linesize[1], chroma_width,
+                             chroma_height, 2, out->turns, rotated->data[1],
+                             rotated->linesize[1]);
+            } else {
+                for (int plane = 1; plane <= 2; ++plane) {
+                    rotate_plane(picture->data[plane], picture->linesize[plane],
+                                 chroma_width, chroma_height, 1, out->turns,
+                                 rotated->data[plane], rotated->linesize[plane]);
+                }
+            }
+            picture = rotated;
         }
 
         uint64_t timestamp_ns = 0;
@@ -957,19 +1147,37 @@ private:
         }
         if (callback) {
             MediaVideoFrame frame;
-            frame.width = output->width;
-            frame.height = output->height;
+            frame.width = picture->width;
+            frame.height = picture->height;
             frame.timestamp_ns = timestamp_ns;
-            for (int i = 0; i < 3; ++i) {
-                frame.data[i] = output->data[i];
-                frame.linesize[i] = output->linesize[i];
+            frame.nv12 = nv12;
+            frame.full_range = full_range;
+            frame.bt601 = bt601;
+            for (int i = 0; i < (nv12 ? 2 : 3); ++i) {
+                frame.data[i] = picture->data[i];
+                frame.linesize[i] = picture->linesize[i];
             }
             callback(frame);
         }
 
         if (!first_video_logged.exchange(true)) {
             blog(LOG_INFO, "[MEDIA] first decoded video frame (%dx%d, %.3fs)",
-                 output->width, output->height, position);
+                 picture->width, picture->height, position);
+        }
+    }
+
+    // Counts a hardware decoding failure; after a few in a row run() reopens
+    // the decoder in software for the rest of the item.
+    void noteHardwareError(VideoOutput* out, const char* what)
+    {
+        if (!out->hardware || out->reopen_in_software) {
+            return;
+        }
+        constexpr int kMaxHardwareErrors = 3;
+        if (++out->hardware_errors >= kMaxHardwareErrors) {
+            blog(LOG_WARNING, "[MEDIA] hardware decoding stopped (%s); continuing in software",
+                 what);
+            out->reopen_in_software = true;
         }
     }
 
@@ -1060,8 +1268,8 @@ private:
     }
 
     void drainDecoder(AVCodecContext* decoder, AVStream* stream, bool video,
-                      double format_start_seconds, SwsContext** scaler,
-                      AVFrame* i420, SwrContext** resampler,
+                      double format_start_seconds, VideoOutput* video_output,
+                      SwrContext** resampler,
                       AVChannelLayout* input_layout, int* input_rate,
                       AVSampleFormat* input_format, AVFrame* decoded)
     {
@@ -1072,10 +1280,11 @@ private:
             }
             if (result < 0) {
                 blog(LOG_WARNING, "[MEDIA] decode failed: %s", ffmpeg_error(result).c_str());
+                if (video) noteHardwareError(video_output, "repeated decode errors");
                 break;
             }
             if (video) {
-                emitVideo(decoded, stream, format_start_seconds, scaler, i420);
+                emitVideo(decoded, stream, format_start_seconds, video_output);
             } else {
                 emitAudio(decoded, stream, decoder, format_start_seconds,
                           resampler, input_layout, input_rate, input_format);
@@ -1189,8 +1398,13 @@ private:
 
         AVCodecContext* video_decoder = nullptr;
         AVCodecContext* audio_decoder = nullptr;
-        if (video_index >= 0 && !openDecoder(format, video_index, &video_decoder)) {
+        VideoOutput video_output;
+        if (video_index >= 0 &&
+            !openDecoder(format, video_index, &video_decoder, true, &video_output.hardware)) {
             blog(LOG_WARNING, "[MEDIA] video stream will be skipped");
+        }
+        if (video_decoder) {
+            video_output.turns = display_quarter_turns(format->streams[video_index]);
         }
         if (audio_index >= 0 && !openDecoder(format, audio_index, &audio_decoder)) {
             blog(LOG_WARNING, "[MEDIA] audio stream will be skipped");
@@ -1236,8 +1450,9 @@ private:
 
         AVPacket* packet = av_packet_alloc();
         AVFrame* decoded = av_frame_alloc();
-        AVFrame* i420 = av_frame_alloc();
-        SwsContext* scaler = nullptr;
+        video_output.i420 = av_frame_alloc();
+        video_output.transfer = av_frame_alloc();
+        video_output.rotated = av_frame_alloc();
         SwrContext* resampler = nullptr;
         AVChannelLayout input_layout = {};
         int input_rate = 0;
@@ -1354,25 +1569,51 @@ private:
                 stream = format->streams[audio_index];
             }
 
-            if (decoder && avcodec_send_packet(decoder, packet) >= 0) {
-                drainDecoder(decoder, stream, is_video, format_start_seconds,
-                             &scaler, i420, &resampler, &input_layout,
-                             &input_rate, &input_format, decoded);
+            if (decoder) {
+                const int sent = avcodec_send_packet(decoder, packet);
+                if (sent >= 0) {
+                    drainDecoder(decoder, stream, is_video, format_start_seconds,
+                                 &video_output, &resampler, &input_layout,
+                                 &input_rate, &input_format, decoded);
+                } else if (is_video) {
+                    noteHardwareError(&video_output, "repeated errors sending packets");
+                }
             }
             av_packet_unref(packet);
+
+            if (video_output.reopen_in_software) {
+                // Hardware decoding failed or does not take this stream:
+                // decode the rest of the item in software, continuing from
+                // the picture on screen.
+                video_output.reopen_in_software = false;
+                video_output.hardware = false;
+                video_output.hardware_errors = 0;
+                video_output.mode_logged = false;
+                avcodec_free_context(&video_decoder);
+                if (!openDecoder(format, video_index, &video_decoder)) {
+                    blog(LOG_WARNING, "[MEDIA] software video decoder could not be opened");
+                }
+                std::lock_guard<std::mutex> lock(state_mutex);
+                if (!seek_pending) {
+                    seek_target = info.position;
+                    seek_pending = true;
+                    discard_video_before = discard_audio_before = seek_target;
+                    clock_initialized = false;
+                }
+            }
         }
 
         if (!stop_requested.load(std::memory_order_acquire)) {
             if (video_decoder) {
                 avcodec_send_packet(video_decoder, nullptr);
                 drainDecoder(video_decoder, format->streams[video_index], true,
-                             format_start_seconds, &scaler, i420, &resampler,
+                             format_start_seconds, &video_output, &resampler,
                              &input_layout, &input_rate, &input_format, decoded);
             }
             if (audio_decoder) {
                 avcodec_send_packet(audio_decoder, nullptr);
                 drainDecoder(audio_decoder, format->streams[audio_index], false,
-                             format_start_seconds, &scaler, i420, &resampler,
+                             format_start_seconds, &video_output, &resampler,
                              &input_layout, &input_rate, &input_format, decoded);
             }
             std::lock_guard<std::mutex> lock(state_mutex);
@@ -1385,8 +1626,10 @@ private:
 
         av_channel_layout_uninit(&input_layout);
         swr_free(&resampler);
-        if (scaler) sws_freeContext(scaler);
-        av_frame_free(&i420);
+        if (video_output.scaler) sws_freeContext(video_output.scaler);
+        av_frame_free(&video_output.rotated);
+        av_frame_free(&video_output.transfer);
+        av_frame_free(&video_output.i420);
         av_frame_free(&decoded);
         av_packet_free(&packet);
         avcodec_free_context(&audio_decoder);

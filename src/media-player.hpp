@@ -11,6 +11,12 @@ struct MediaVideoFrame {
     int width = 0;
     int height = 0;
     uint64_t timestamp_ns = 0;
+    // false: I420 (three planes). true: NV12 (Y plane + interleaved UV plane),
+    // as produced by hardware decoding.
+    bool nv12 = false;
+    bool full_range = false;
+    // BT.601 matrix (standard-definition material); BT.709 otherwise.
+    bool bt601 = false;
 };
 
 struct MediaAudioFrame {

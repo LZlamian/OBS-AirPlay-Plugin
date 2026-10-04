@@ -2,13 +2,8 @@
 #include "airplay-source.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include <algorithm>
 #include <cstring>
-#include <ctime>
 #include <sstream>
 #include <random>
 #include <iomanip>
@@ -17,19 +12,11 @@
 std::atomic<bool> g_latency_telemetry_enabled{false};
 
 AirPlayServer::AirPlayServer()
-    : m_running(false)
-    , m_airplay_port(7000)
-    , m_raop_port(5000)
-    , m_airplay_socket(-1)
-    , m_raop_socket(-1)
 {
     m_mac_address = generateMACAddress();
     m_h264_decoder = std::make_unique<H264Decoder>();
     m_h265_decoder = std::make_unique<H264Decoder>(AV_CODEC_ID_HEVC);
     m_audio_decoder = std::make_unique<AudioDecoder>();
-    
-    // Note: UxPlay integration is now handled in plugin-main.cpp
-    // This server only handles basic AirPlay connections and mDNS
 }
 
 AirPlayServer::~AirPlayServer()
@@ -52,111 +39,13 @@ std::string AirPlayServer::generateMACAddress()
     return ss.str();
 }
 
-bool AirPlayServer::createServerSocket(int& socket_fd, uint16_t port)
-{
-    blog(LOG_INFO, "Creating server socket on port %d...", port);
-    
-    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd < 0) {
-        blog(LOG_ERROR, "Failed to create socket: %s", strerror(errno));
-        return false;
-    }
-    blog(LOG_INFO, "Socket created: fd=%d", socket_fd);
-    
-    // Set socket options
-    int opt = 1;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        blog(LOG_WARNING, "Failed to set SO_REUSEADDR: %s", strerror(errno));
-    } else {
-        blog(LOG_INFO, "SO_REUSEADDR set successfully");
-    }
-    
-    // Bind socket
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(port);
-    
-    blog(LOG_INFO, "Attempting to bind socket %d to 0.0.0.0:%d...", socket_fd, port);
-    if (bind(socket_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        blog(LOG_ERROR, "Failed to bind socket to port %d: %s (errno=%d)", 
-             port, strerror(errno), errno);
-        close(socket_fd);
-        socket_fd = -1;
-        return false;
-    }
-    blog(LOG_INFO, "Socket %d bound successfully to 0.0.0.0:%d", socket_fd, port);
-    
-    // Listen
-    blog(LOG_INFO, "Calling listen() on socket %d...", socket_fd);
-    if (listen(socket_fd, 5) < 0) {
-        blog(LOG_ERROR, "Failed to listen on socket: %s (errno=%d)", strerror(errno), errno);
-        close(socket_fd);
-        socket_fd = -1;
-        return false;
-    }
-    
-    blog(LOG_INFO, "✓ Server socket %d is LISTENING on 0.0.0.0:%d", socket_fd, port);
-    return true;
-}
-
-bool AirPlayServer::start(const std::string& server_name, uint16_t airplay_port, uint16_t raop_port)
-{
-    blog(LOG_INFO, "========================================");
-    blog(LOG_INFO, "Starting AirPlay Server");
-    blog(LOG_INFO, "  Name: %s", server_name.c_str());
-    blog(LOG_INFO, "  AirPlay Port: %d", airplay_port);
-    blog(LOG_INFO, "  RAOP Port: %d", raop_port);
-    blog(LOG_INFO, "  MAC Address: %s", m_mac_address.c_str());
-    blog(LOG_INFO, "========================================");
-    
-    if (m_running) {
-        blog(LOG_WARNING, "AirPlay server already running");
-        return false;
-    }
-    
-    m_server_name = server_name;
-    m_airplay_port = airplay_port;
-    m_raop_port = raop_port;
-    
-    // Create server sockets
-    blog(LOG_INFO, "Step 1: Creating AirPlay socket...");
-    if (!createServerSocket(m_airplay_socket, m_airplay_port)) {
-        blog(LOG_ERROR, "Failed to create AirPlay socket");
-        return false;
-    }
-    
-    blog(LOG_INFO, "Step 2: Creating RAOP socket...");
-    if (!createServerSocket(m_raop_socket, m_raop_port)) {
-        blog(LOG_ERROR, "Failed to create RAOP socket");
-        close(m_airplay_socket);
-        m_airplay_socket = -1;
-        return false;
-    }
-    
-    // Start listener threads
-    blog(LOG_INFO, "Step 3: Starting listener threads...");
-    m_running = true;
-    m_airplay_listener_thread = std::thread(&AirPlayServer::airplayListenerLoop, this);
-    m_raop_listener_thread = std::thread(&AirPlayServer::raopListenerLoop, this);
-    
-    blog(LOG_INFO, "========================================");
-    blog(LOG_INFO, "✓ AirPlay server '%s' STARTED SUCCESSFULLY", m_server_name.c_str());
-    blog(LOG_INFO, "✓ AirPlay listening on: 0.0.0.0:%d", m_airplay_port);
-    blog(LOG_INFO, "✓ RAOP listening on: 0.0.0.0:%d", m_raop_port);
-    blog(LOG_INFO, "✓ Ready to accept iPad connections!");
-    blog(LOG_INFO, "========================================");
-    
-    return true;
-}
-
 void AirPlayServer::resetDecoders(bool clear_output, bool flush_decoders)
 {
     std::lock_guard<std::mutex> lock(m_decoder_mutex);
     if (flush_decoders) {
         if (m_h264_decoder) m_h264_decoder->flush();
         if (m_h265_decoder) m_h265_decoder->flush();
+        std::lock_guard<std::mutex> audio_lock(m_audio_decoder_mutex);
         if (m_audio_decoder) m_audio_decoder->flush();
     }
     {
@@ -235,684 +124,12 @@ uint64_t AirPlayServer::normalizeTimestamp(uint64_t source_timestamp)
 
 void AirPlayServer::stop()
 {
-    if (!m_running) {
-        return;
-    }
-    
-    m_running = false;
-    
-    // Close server sockets
-    if (m_airplay_socket >= 0) {
-        close(m_airplay_socket);
-        m_airplay_socket = -1;
-    }
-    
-    if (m_raop_socket >= 0) {
-        close(m_raop_socket);
-        m_raop_socket = -1;
-    }
-    
-    // Close all connections. Move threads out of the map before joining to
-    // avoid deadlocking with closeConnection(), which also takes this mutex.
-    std::vector<std::thread> connection_threads;
-    {
-        std::lock_guard<std::mutex> lock(m_connections_mutex);
-        connection_threads.reserve(m_connections.size());
-        for (auto& [fd, conn] : m_connections) {
-            conn->active = false;
-            close(fd);
-            if (conn->handler_thread.joinable()) {
-                connection_threads.emplace_back(std::move(conn->handler_thread));
-            }
-        }
-        m_connections.clear();
-    }
-    for (auto& t : connection_threads) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-    
-    // Wait for listener threads
-    if (m_airplay_listener_thread.joinable()) {
-        m_airplay_listener_thread.join();
-    }
-    
-    if (m_raop_listener_thread.joinable()) {
-        m_raop_listener_thread.join();
-    }
-    
     // Release all weak source refs
-    {
-        std::lock_guard<std::mutex> lock(m_sources_mutex);
-        for (obs_weak_source_t* weak : m_registered_sources) {
-            obs_weak_source_release(weak);
-        }
-        m_registered_sources.clear();
+    std::lock_guard<std::mutex> lock(m_sources_mutex);
+    for (obs_weak_source_t* weak : m_registered_sources) {
+        obs_weak_source_release(weak);
     }
-
-    blog(LOG_INFO, "AirPlay server stopped");
-}
-
-void AirPlayServer::airplayListenerLoop()
-{
-    blog(LOG_INFO, "AirPlay listener thread started - waiting for connections on port %d", m_airplay_port);
-    blog(LOG_INFO, "Socket FD: %d, Bound to: 0.0.0.0:%d", m_airplay_socket, m_airplay_port);
-
-    // Set accept timeout once, outside the loop
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(m_airplay_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
-    while (m_running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        
-        blog(LOG_DEBUG, "AirPlay: Calling accept() on socket %d...", m_airplay_socket);
-        int client_socket = accept(m_airplay_socket, (struct sockaddr*)&client_addr, &client_len);
-        
-        if (client_socket < 0) {
-            if (errno == EWOULDBLOCK || errno == EAGAIN) {
-                // Timeout - this is normal, just loop again
-                continue;
-            }
-            if (m_running) {
-                blog(LOG_ERROR, "Accept failed: %s (errno=%d)", strerror(errno), errno);
-            }
-            continue;
-        }
-        
-        char client_ip_buf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_buf, sizeof(client_ip_buf));
-        std::string client_ip(client_ip_buf);
-        uint16_t client_port = ntohs(client_addr.sin_port);
-        blog(LOG_INFO, "*** NEW AIRPLAY CONNECTION *** from %s:%d (socket fd=%d)", 
-             client_ip.c_str(), client_port, client_socket);
-        
-        // Insert into map before starting thread so closeConnection() can always find the entry
-        auto conn = std::make_unique<AirPlayConnection>();
-        conn->socket_fd = client_socket;
-        conn->client_address = client_ip;
-        conn->active = true;
-        {
-            std::lock_guard<std::mutex> lock(m_connections_mutex);
-            m_connections[client_socket] = std::move(conn);
-            m_connections[client_socket]->handler_thread =
-                std::thread(&AirPlayServer::handleAirPlayConnection, this, client_socket, client_ip);
-        }
-    }
-    
-    blog(LOG_INFO, "AirPlay listener thread stopped");
-}
-
-void AirPlayServer::raopListenerLoop()
-{
-    blog(LOG_INFO, "RAOP listener thread started - waiting for connections on port %d", m_raop_port);
-    blog(LOG_INFO, "Socket FD: %d, Bound to: 0.0.0.0:%d", m_raop_socket, m_raop_port);
-
-    // Set accept timeout once, outside the loop
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(m_raop_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
-    while (m_running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        
-        blog(LOG_DEBUG, "RAOP: Calling accept() on socket %d...", m_raop_socket);
-        int client_socket = accept(m_raop_socket, (struct sockaddr*)&client_addr, &client_len);
-        
-        if (client_socket < 0) {
-            if (errno == EWOULDBLOCK || errno == EAGAIN) {
-                continue;
-            }
-            if (m_running) {
-                blog(LOG_ERROR, "RAOP accept failed: %s (errno=%d)", strerror(errno), errno);
-            }
-            continue;
-        }
-        
-        char client_ip_buf[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip_buf, sizeof(client_ip_buf));
-        std::string client_ip(client_ip_buf);
-        uint16_t client_port = ntohs(client_addr.sin_port);
-        blog(LOG_INFO, "*** NEW RAOP CONNECTION *** from %s:%d (socket fd=%d)", 
-             client_ip.c_str(), client_port, client_socket);
-        
-        // Insert into map before starting thread so closeConnection() can always find the entry
-        auto conn = std::make_unique<AirPlayConnection>();
-        conn->socket_fd = client_socket;
-        conn->client_address = client_ip;
-        conn->active = true;
-        {
-            std::lock_guard<std::mutex> lock(m_connections_mutex);
-            m_connections[client_socket] = std::move(conn);
-            m_connections[client_socket]->handler_thread =
-                std::thread(&AirPlayServer::handleRAOPConnection, this, client_socket, client_ip);
-        }
-    }
-    
-    blog(LOG_INFO, "RAOP listener thread stopped");
-}
-
-void AirPlayServer::handleAirPlayConnection(int client_socket, const std::string& client_addr)
-{
-    blog(LOG_INFO, "==> Handling AirPlay connection from %s (socket %d)", client_addr.c_str(), client_socket);
-    
-    char buffer[4096];
-    while (m_running) {
-        memset(buffer, 0, sizeof(buffer));
-        blog(LOG_DEBUG, "AirPlay handler: Waiting for data from %s...", client_addr.c_str());
-        ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-        
-        if (bytes_read <= 0) {
-            if (bytes_read < 0) {
-                blog(LOG_ERROR, "Receive error from %s: %s (errno=%d)", 
-                     client_addr.c_str(), strerror(errno), errno);
-            } else {
-                blog(LOG_INFO, "Client %s closed connection (bytes_read=0)", client_addr.c_str());
-            }
-            break;
-        }
-        
-        blog(LOG_INFO, "Received %zd bytes from %s", bytes_read, client_addr.c_str());
-        std::string request(buffer, bytes_read);
-        blog(LOG_DEBUG, "AirPlay request from %s (%zd bytes)", client_addr.c_str(), bytes_read);
-        
-        std::string response = handleHTTPRequest(request);
-        
-        if (!response.empty()) {
-            blog(LOG_INFO, "Sending %zu byte response to %s", response.length(), client_addr.c_str());
-            ssize_t sent = send(client_socket, response.c_str(), response.length(), 0);
-            if (sent < 0) {
-                blog(LOG_ERROR, "Failed to send response to %s: %s", 
-                     client_addr.c_str(), strerror(errno));
-                break;
-            }
-            blog(LOG_INFO, "Sent %zd bytes to %s", sent, client_addr.c_str());
-        } else {
-            blog(LOG_WARNING, "Empty response generated for request from %s", client_addr.c_str());
-        }
-    }
-    
-    closeConnection(client_socket);
-    blog(LOG_INFO, "<== AirPlay connection from %s closed", client_addr.c_str());
-}
-
-void AirPlayServer::handleRAOPConnection(int client_socket, const std::string& client_addr)
-{
-    blog(LOG_INFO, "Handling RAOP connection from %s", client_addr.c_str());
-    
-    char buffer[4096];
-    while (m_running) {
-        memset(buffer, 0, sizeof(buffer));
-        ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-        
-        if (bytes_read <= 0) {
-            break;
-        }
-        
-        std::string request(buffer, bytes_read);
-        
-        // Parse request
-        std::istringstream iss(request);
-        std::string method, uri, version;
-        iss >> method >> uri >> version;
-        
-        // Parse headers
-        std::map<std::string, std::string> headers;
-        std::string line;
-        blog(LOG_INFO, "Starting header parsing for request...");
-        
-        // Skip the first line (method, uri, version)
-        std::getline(iss, line);
-        blog(LOG_INFO, "Request line: %s", line.c_str());
-        
-        // Parse headers until empty line
-        while (std::getline(iss, line)) {
-            // Remove \r if present
-            if (!line.empty() && line.back() == '\r') {
-                line.pop_back();
-            }
-            
-            blog(LOG_INFO, "Header line: '%s' (length=%zu)", line.c_str(), line.length());
-            
-            // Empty line marks end of headers
-            if (line.empty()) {
-                break;
-            }
-            
-            size_t colon = line.find(':');
-            if (colon != std::string::npos) {
-                std::string key = line.substr(0, colon);
-                std::string value = line.substr(colon + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                headers[key] = value;
-                blog(LOG_INFO, "Parsed header: '%s' = '%s'", key.c_str(), value.c_str());
-            }
-        }
-        blog(LOG_INFO, "Header parsing complete. Found %zu headers.", headers.size());
-        
-        std::string cseq = headers.count("CSeq") ? headers["CSeq"] : "0";
-        blog(LOG_INFO, "Extracted CSeq: '%s' from headers", cseq.c_str());
-        std::string response;
-        
-        // On RAOP port, ALL requests use RTSP protocol (even POST/GET)
-        blog(LOG_INFO, "RAOP RTSP: %s %s", method.c_str(), uri.c_str());
-        
-        if (method == "OPTIONS") {
-                response = "RTSP/1.0 200 OK\r\n";
-                response += "CSeq: " + cseq + "\r\n";
-                response += "Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER\r\n";
-                response += "Server: AirTunes/377.28.01\r\n";
-                response += "\r\n";
-            }
-            else if (method == "ANNOUNCE") {
-                response = "RTSP/1.0 200 OK\r\n";
-                response += "CSeq: " + cseq + "\r\n";
-                response += "Server: AirTunes/377.28.01\r\n";
-                response += "\r\n";
-            }
-            else if (method == "GET" && uri == "/info") {
-                response = handleServerInfo(cseq);
-                blog(LOG_INFO, "Sent server info response");
-            }
-            else if (method == "POST" && uri == "/pair-setup") {
-                blog(LOG_DEBUG, "RAOP RTSP: pair-setup request (%zu bytes)", request.size());
-                response = handlePairSetup(cseq);
-                blog(LOG_INFO, "Sent pair-setup response");
-            }
-            else if (method == "POST" && uri == "/pair-verify") {
-                response = handlePairVerify(cseq);
-                blog(LOG_INFO, "Sent pair-verify response");
-            }
-            else if (method == "POST" && uri == "/fp-setup") {
-                response = handleFairPlaySetup(cseq);
-                blog(LOG_INFO, "Sent fp-setup response");
-            }
-            else if (method == "POST" && uri.find("/command") != std::string::npos) {
-                response = handleRTSPOK(cseq);
-                blog(LOG_INFO, "Sent command response");
-            }
-            else if (method == "POST" && uri == "/stream") {
-                // This is the key request - iOS wants to start streaming!
-                blog(LOG_INFO, "RAOP RTSP: Stream setup request received!");
-                response = handleStreamSetup(request, cseq);
-            }
-            else {
-                // Default OK for any other RTSP request
-                blog(LOG_INFO, "RAOP RTSP: Unhandled %s %s - responding OK", method.c_str(), uri.c_str());
-                response = handleRTSPOK(cseq);
-            }
-        
-        if (!response.empty()) {
-            ssize_t sent = send(client_socket, response.c_str(), response.length(), 0);
-            if (sent < 0) {
-                blog(LOG_ERROR, "Failed to send response: %s", strerror(errno));
-                break;
-            }
-            blog(LOG_DEBUG, "Sent %zd bytes response", sent);
-        }
-    }
-    
-    closeConnection(client_socket);
-    blog(LOG_INFO, "RAOP connection from %s closed", client_addr.c_str());
-}
-
-std::string AirPlayServer::handleHTTPRequest(const std::string& request)
-{
-    std::istringstream iss(request);
-    std::string method, path, version;
-    iss >> method >> path >> version;
-    
-    blog(LOG_DEBUG, "HTTP Request: %s %s %s", method.c_str(), path.c_str(), version.c_str());
-    
-    // Parse headers
-    std::map<std::string, std::string> headers;
-    std::string line;
-    while (std::getline(iss, line) && line != "\r" && !line.empty()) {
-        size_t colon = line.find(':');
-        if (colon != std::string::npos) {
-            std::string key = line.substr(0, colon);
-            std::string value = line.substr(colon + 1);
-            // Trim whitespace
-            value.erase(0, value.find_first_not_of(" \t\r\n"));
-            value.erase(value.find_last_not_of(" \t\r\n") + 1);
-            headers[key] = value;
-        }
-    }
-    
-    // Extract CSeq for response
-    std::string cseq = "0";
-    if (headers.find("CSeq") != headers.end()) {
-        cseq = headers["CSeq"];
-    }
-    
-    if (path == "/server-info") {
-        return handleServerInfo(cseq);
-    } else if (path == "/info") {
-        return handleServerInfo(cseq);
-    } else if (path == "/pair-setup") {
-        return handlePairSetup(cseq);
-    } else if (path == "/pair-verify") {
-        return handlePairVerify(cseq);
-    } else if (path == "/fp-setup") {
-        return handleFairPlaySetup(cseq);
-    } else if (method == "POST" && path == "/play") {
-        return handlePlay(cseq);
-    } else if (method == "POST" && path == "/stop") {
-        return handleStop(cseq);
-    } else if (method == "POST" && path == "/rate") {
-        return handleRate(cseq);
-    } else if (method == "GET" && path == "/playback-info") {
-        return handlePlaybackInfo(cseq);
-    } else if (method == "POST" && path.find("/feedback") != std::string::npos) {
-        return handleOK(cseq);
-    } else if (method == "OPTIONS") {
-        return handleOptions(cseq);
-    }
-    
-    // Log unhandled request for debugging
-    blog(LOG_WARNING, "Unhandled AirPlay request: %s %s", method.c_str(), path.c_str());
-    
-    // Default OK response for unhandled requests
-    return handleOK(cseq);
-}
-
-std::string AirPlayServer::handleOK(const std::string& cseq)
-{
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    return response.str();
-}
-
-std::string AirPlayServer::handleRTSPOK(const std::string& cseq)
-{
-    std::stringstream response;
-    response << "RTSP/1.0 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    return response.str();
-}
-
-std::string AirPlayServer::handleOptions(const std::string& cseq)
-{
-    std::stringstream response;
-    response << "RTSP/1.0 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "\r\n";
-    return response.str();
-}
-
-std::string AirPlayServer::getCurrentDate()
-{
-    time_t now = time(0);
-    struct tm tm_buf;
-    gmtime_r(&now, &tm_buf);
-    char buf[100];
-    strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm_buf);
-    return std::string(buf);
-}
-
-std::string AirPlayServer::handlePairSetup(const std::string& cseq)
-{
-    // iOS is asking for pairing but we advertised as open
-    // Respond that pairing succeeded immediately (no challenge needed)
-    blog(LOG_INFO, "Pair-setup requested - responding with no-auth success");
-    
-    // For no-auth pairing, we need to respond with a specific plist structure
-    std::stringstream plist;
-    plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
-    plist << "<plist version=\"1.0\">\n";
-    plist << "<dict>\n";
-    plist << "  <key>pk</key>\n";
-    plist << "  <data></data>\n";  // Empty public key for no-auth
-    plist << "  <key>pu</key>\n";
-    plist << "  <data></data>\n";  // Empty public key for no-auth
-    plist << "  <key>sp</key>\n";
-    plist << "  <data></data>\n";  // Empty salt for no-auth
-    plist << "</dict>\n";
-    plist << "</plist>\n";
-    
-    std::string body = plist.str();
-    
-    // Use RTSP protocol for RAOP port (even for POST requests)
-    std::stringstream response;
-    response << "RTSP/1.0 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";  // Echo the CSeq from request
-    response << "Server: AirTunes/366.0\r\n";
-    response << "Content-Type: application/x-apple-binary-plist\r\n";
-    response << "Content-Length: " << body.length() << "\r\n";
-    response << "\r\n";
-    response << body;
-    
-    blog(LOG_INFO, "Pair-setup response:\n%s", response.str().c_str());
-    
-    return response.str();
-}
-
-std::string AirPlayServer::handlePairVerify(const std::string& cseq)
-{
-    // Return success without verification since we disabled auth
-    blog(LOG_INFO, "Pair-verify requested (skipped - no auth required)");
-    
-    // Use RTSP protocol for RAOP port (even for POST requests)
-    std::stringstream response;
-    response << "RTSP/1.0 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";  // Echo the CSeq from request
-    response << "Server: AirTunes/366.0\r\n";
-    response << "Content-Type: application/octet-stream\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    
-    return response.str();
-}
-
-std::string AirPlayServer::handleFairPlaySetup(const std::string& cseq)
-{
-    // Return success without FairPlay since we're not doing DRM
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    blog(LOG_INFO, "FairPlay setup requested (skipped)");
-    return response.str();
-}
-
-std::string AirPlayServer::handleStreamSetup(const std::string& request, const std::string& cseq)
-{
-    blog(LOG_INFO, "Stream setup request - iOS wants to start streaming!");
-    
-    // Parse the request to get the plist body
-    size_t body_start = request.find("\r\n\r\n");
-    if (body_start != std::string::npos) {
-        std::string body = request.substr(body_start + 4);
-        blog(LOG_DEBUG, "Stream config body: %s", body.c_str());
-        
-        // TODO: Parse plist for stream configuration
-        // For now, we'll just respond with our ports
-    }
-    
-    // Respond with RTP port configuration
-    std::stringstream plist;
-    plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
-    plist << "<plist version=\"1.0\">\n";
-    plist << "<dict>\n";
-    plist << "  <key>streams</key>\n";
-    plist << "  <array>\n";
-    plist << "    <dict>\n";
-    plist << "      <key>type</key>\n";
-    plist << "      <integer>110</integer>\n";  // Video stream type
-    plist << "      <key>dataPort</key>\n";
-    plist << "      <integer>6000</integer>\n";  // RTP video data port
-    plist << "      <key>controlPort</key>\n";
-    plist << "      <integer>6001</integer>\n";  // RTP video control port
-    plist << "    </dict>\n";
-    plist << "    <dict>\n";
-    plist << "      <key>type</key>\n";
-    plist << "      <integer>96</integer>\n";   // Audio stream type
-    plist << "      <key>dataPort</key>\n";
-    plist << "      <integer>7000</integer>\n";  // RTP audio data port
-    plist << "      <key>controlPort</key>\n";
-    plist << "      <integer>7001</integer>\n";  // RTP audio control port
-    plist << "    </dict>\n";
-    plist << "  </array>\n";
-    plist << "  <key>eventPort</key>\n";
-    plist << "  <integer>0</integer>\n";
-    plist << "</dict>\n";
-    plist << "</plist>\n";
-    
-    std::string body = plist.str();
-    
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "Date: " << getCurrentDate() << "\r\n";
-    response << "Content-Type: application/x-apple-binary-plist\r\n";
-    response << "Content-Length: " << body.length() << "\r\n";
-    response << "Connection: keep-alive\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    if (!cseq.empty() && cseq != "0") {
-        response << "CSeq: " << cseq << "\r\n";
-    }
-    response << "\r\n";
-    response << body;
-    
-    blog(LOG_INFO, "Sent stream setup response with RTP ports: video=6000, audio=7000");
-    
-    return response.str();
-}
-
-std::string AirPlayServer::handlePlaybackInfo(const std::string& cseq)
-{
-    std::stringstream plist;
-    plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
-    plist << "<plist version=\"1.0\">\n";
-    plist << "<dict>\n";
-    plist << "  <key>readyToPlay</key>\n";
-    plist << "  <true/>\n";
-    plist << "  <key>playbackBufferEmpty</key>\n";
-    plist << "  <true/>\n";
-    plist << "  <key>rate</key>\n";
-    plist << "  <real>1.0</real>\n";
-    plist << "  <key>loadedTimeRanges</key>\n";
-    plist << "  <array/>\n";
-    plist << "  <key>seekableTimeRanges</key>\n";
-    plist << "  <array/>\n";
-    plist << "</dict>\n";
-    plist << "</plist>\n";
-    
-    std::string body = plist.str();
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Content-Type: text/x-apple-plist+xml\r\n";
-    response << "Content-Length: " << body.length() << "\r\n";
-    response << "\r\n";
-    response << body;
-    
-    return response.str();
-}
-
-std::string AirPlayServer::handleServerInfo(const std::string& cseq)
-{
-    std::stringstream plist;
-    plist << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    plist << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n";
-    plist << "<plist version=\"1.0\">\n";
-    plist << "<dict>\n";
-    plist << "  <key>deviceid</key>\n";
-    plist << "  <string>" << m_mac_address << "</string>\n";
-    plist << "  <key>features</key>\n";
-    plist << "  <integer>1543503879</integer>\n";
-    plist << "  <key>model</key>\n";
-    plist << "  <string>AppleTV6,2</string>\n";
-    plist << "  <key>protovers</key>\n";
-    plist << "  <string>1.1</string>\n";
-    plist << "  <key>srcvers</key>\n";
-    plist << "  <string>377.28.01</string>\n";
-    plist << "  <key>pi</key>\n";
-    plist << "  <string>00000000-0000-0000-0000-000000000000</string>\n";
-    plist << "  <key>vv</key>\n";
-    plist << "  <integer>2</integer>\n";
-    plist << "  <key>statusFlags</key>\n";
-    plist << "  <integer>68</integer>\n";
-    plist << "</dict>\n";
-    plist << "</plist>\n";
-    
-    std::string body = plist.str();
-    std::stringstream response;
-    response << "RTSP/1.0 200 OK\r\n";  // Use RTSP for RAOP port
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Content-Type: text/x-apple-plist+xml\r\n";
-    response << "Content-Length: " << body.length() << "\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "\r\n";
-    response << body;
-    
-    return response.str();
-}
-
-std::string AirPlayServer::handlePlay(const std::string& cseq)
-{
-    blog(LOG_INFO, "Play request received");
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    return response.str();
-}
-
-std::string AirPlayServer::handleStop(const std::string& cseq)
-{
-    blog(LOG_INFO, "Stop request received");
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    return response.str();
-}
-
-std::string AirPlayServer::handleRate(const std::string& cseq)
-{
-    std::stringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "CSeq: " << cseq << "\r\n";
-    response << "Server: AirTunes/377.28.01\r\n";
-    response << "Content-Length: 0\r\n";
-    response << "\r\n";
-    return response.str();
-}
-
-void AirPlayServer::closeConnection(int socket_fd)
-{
-    std::lock_guard<std::mutex> lock(m_connections_mutex);
-    auto it = m_connections.find(socket_fd);
-    if (it != m_connections.end()) {
-        it->second->active = false;
-        close(socket_fd);
-        if (it->second->handler_thread.joinable()) {
-            it->second->handler_thread.detach();
-        }
-        m_connections.erase(it);
-    }
+    m_registered_sources.clear();
 }
 
 void AirPlayServer::registerSource(obs_source_t* source)
@@ -1051,8 +268,9 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     ++m_video_frame_counter;
 
     // One line every ~10 s of mirroring: size, frame rate, decode mode and a
-    // coarse brightness marker (16 = black), to tell a moving picture from a
-    // held or black one after the fact.
+    // coarse brightness marker (black is 0 in a full-range stream, 16 in a
+    // video-range one), to tell a moving picture from a held or black one
+    // after the fact.
     {
         const uint64_t stats_now = os_gettime_ns();
         if (!m_mirror_stats_started_ns) {
@@ -1144,7 +362,9 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
     const uint64_t t_decode_start = tele ? os_gettime_ns() : 0;
     {
-        std::lock_guard<std::mutex> dec_lock(m_decoder_mutex);
+        // Its own lock: the video lock is held while a picture is decoded
+        // and copied into OBS, and audio must not wait for that.
+        std::lock_guard<std::mutex> dec_lock(m_audio_decoder_mutex);
         if (!m_audio_decoder->decode(data, size, codec_type, left, right, sample_rate)) {
             return;
         }
@@ -1216,22 +436,24 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
 
 void AirPlayServer::outputMediaVideoFrame(const MediaVideoFrame& decoded)
 {
-    if (!decoded.data[0] || decoded.width <= 0 || decoded.height <= 0) {
+    if (!decoded.data[0] || !decoded.data[1] || (!decoded.nv12 && !decoded.data[2]) ||
+        decoded.width <= 0 || decoded.height <= 0) {
         return;
     }
 
     obs_source_frame frame = {};
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < (decoded.nv12 ? 2 : 3); ++i) {
         frame.data[i] = const_cast<uint8_t*>(decoded.data[i]);
         frame.linesize[i] = decoded.linesize[i];
     }
     frame.width = static_cast<uint32_t>(decoded.width);
     frame.height = static_cast<uint32_t>(decoded.height);
-    frame.format = VIDEO_FORMAT_I420;
-    frame.full_range = false;
+    frame.format = decoded.nv12 ? VIDEO_FORMAT_NV12 : VIDEO_FORMAT_I420;
+    frame.full_range = decoded.full_range;
     frame.trc = VIDEO_TRC_DEFAULT;
-    video_format_get_parameters_for_format(VIDEO_CS_709,
-                                           VIDEO_RANGE_PARTIAL,
+    video_format_get_parameters_for_format(decoded.bt601 ? VIDEO_CS_601 : VIDEO_CS_709,
+                                           decoded.full_range ? VIDEO_RANGE_FULL
+                                                              : VIDEO_RANGE_PARTIAL,
                                            frame.format,
                                            frame.color_matrix,
                                            frame.color_range_min,
