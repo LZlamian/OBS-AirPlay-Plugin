@@ -225,6 +225,10 @@ int main(int argc, char** argv)
     }
     raop_set_log_callback(raop, receiverLog, nullptr);
     raop_set_log_level(raop, LOGGER_INFO);
+    if (std::getenv("PROTOCOL_SMOKE_MEDIA_TRACE")) {
+        // Also run the [MEDIA-TRACE] protocol dump over every exchange.
+        raop_set_media_trace_level(raop, LOGGER_INFO);
+    }
     if (raop_set_plist(raop, "hls", 1) != 0) {
         std::fprintf(stderr, "failed to enable HLS receiver mode\n");
         raop_destroy(raop);
@@ -268,6 +272,28 @@ int main(int argc, char** argv)
     play_sent = play_sent && sendAll(play_fd, body, body_size);
     free(body);
     const std::string play_response = play_sent ? receiveResponse(play_fd) : "";
+
+    // A reverse-fetch reply for an item that never asked for one (a plain
+    // URL item has no HLS state) must be rejected, not dereferenced.
+    const auto unexpected_reply = [&](const char* url) {
+        plist_t params = plist_new_dict();
+        plist_dict_set_item(params, "FCUP_Response_StatusCode", plist_new_uint(200));
+        plist_dict_set_item(params, "FCUP_Response_RequestID", plist_new_uint(1));
+        plist_dict_set_item(params, "FCUP_Response_URL", plist_new_string(url));
+        const char playlist[] = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nmedia.m3u8\n";
+        plist_dict_set_item(params, "FCUP_Response_Data",
+                            plist_new_data(playlist, sizeof(playlist) - 1));
+        plist_t action = plist_new_dict();
+        plist_dict_set_item(action, "type", plist_new_string("unhandledURLResponse"));
+        plist_dict_set_item(action, "params", params);
+        const std::string response = binaryPlistExchange(port, "/action", session, action);
+        plist_free(action);
+        return response;
+    };
+    const std::string unexpected_master_response =
+        unexpected_reply("http://127.0.0.1:18765/master.m3u8");
+    const std::string unexpected_media_response =
+        unexpected_reply("http://127.0.0.1:18765/media.m3u8");
 
     const auto control_request = [&](const char* method, const char* path) {
         return std::string(method) + " " + path + " HTTP/1.1\r\n" +
@@ -656,6 +682,8 @@ int main(int argc, char** argv)
         native_response.find("CSeq: 1") != std::string::npos &&
         reverse_response.find("101 Switching Protocols") != std::string::npos &&
         play_response.find("200 OK") != std::string::npos &&
+        unexpected_master_response.find("400 Bad Request") != std::string::npos &&
+        unexpected_media_response.find("400 Bad Request") != std::string::npos &&
         playback_response.find("200 OK") != std::string::npos &&
         playback_response.find("readyToPlay") != std::string::npos &&
         rate_response.find("200 OK") != std::string::npos &&
@@ -727,6 +755,49 @@ int main(int argc, char** argv)
                 state.location.c_str(), state.start_position, state.playback_rate,
                 state.scrub_position, state.stop_count, state.play_count);
 
+    // POST /stop while a reverse fetch is under way cancels it: the sender's
+    // late reply must be rejected and must not start playback.
+    const char* cancelled_url = "blob:https://pwa.example/cancelled-item";
+    plist_t cancelled_root = plist_new_dict();
+    plist_dict_set_item(cancelled_root, "uuid",
+                        plist_new_string("dddddddd-eeee-ffff-0000-111111111111"));
+    plist_dict_set_item(cancelled_root, "Content-Location", plist_new_string(cancelled_url));
+    const std::string cancelled_play_response =
+        binaryPlistExchange(port, "/play", session, cancelled_root);
+    plist_free(cancelled_root);
+    const std::string cancelled_fcup_request = receiveResponse(reverse_fd);
+    const std::string cancelled_stop_response = httpExchange(
+        port, control_request("POST", "/stop"));
+    int plays_before_late_reply = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        plays_before_late_reply = state.play_count;
+    }
+    plist_t late_params = plist_new_dict();
+    plist_dict_set_item(late_params, "FCUP_Response_StatusCode", plist_new_uint(0));
+    plist_dict_set_item(late_params, "FCUP_Response_RequestID", plist_new_uint(1));
+    plist_dict_set_item(late_params, "FCUP_Response_URL", plist_new_string(cancelled_url));
+    plist_dict_set_item(late_params, "FCUP_Response_Data",
+                        plist_new_data(mp4_header, sizeof(mp4_header)));
+    plist_t late_action = plist_new_dict();
+    plist_dict_set_item(late_action, "type", plist_new_string("unhandledURLResponse"));
+    plist_dict_set_item(late_action, "params", late_params);
+    const std::string late_reply_response =
+        binaryPlistExchange(port, "/action", session, late_action);
+    plist_free(late_action);
+    int plays_after_late_reply = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        plays_after_late_reply = state.play_count;
+    }
+    const bool stop_cancels_fetch =
+        cancelled_play_response.find("200 OK") != std::string::npos &&
+        cancelled_fcup_request.find(cancelled_url) != std::string::npos &&
+        cancelled_stop_response.find("200 OK") != std::string::npos &&
+        late_reply_response.find("400 Bad Request") != std::string::npos &&
+        plays_after_late_reply == plays_before_late_reply;
+    std::printf("stop_cancels_reverse_fetch=%s\n", stop_cancels_fetch ? "ok" : "FAILED");
+
     // Closing the last AirPlay video connection without POST /stop must stop
     // URL playback so the output does not keep a stale frame.
     int stops_before_close = 0;
@@ -746,5 +817,5 @@ int main(int argc, char** argv)
     if (reverse_fd >= 0) close(reverse_fd);
     raop_stop_httpd(raop);
     raop_destroy(raop);
-    return passed && close_stops ? 0 : 1;
+    return passed && stop_cancels_fetch && close_stops ? 0 : 1;
 }
