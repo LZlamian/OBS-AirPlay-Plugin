@@ -40,6 +40,7 @@ struct TestState {
     float start_position = -1.0f;
     float scrub_position = -1.0f;
     float playback_rate = -1.0f;
+    int rate_calls = 0;
     int stop_count = 0;
     int playback_info_count = 0;
     int play_count = 0;
@@ -68,6 +69,7 @@ void rate(void* cls, float value)
     auto* state = static_cast<TestState*>(cls);
     std::lock_guard<std::mutex> lock(state->mutex);
     state->playback_rate = value;
+    ++state->rate_calls;
 }
 float playlistRemove(void*) { return 0.0f; }
 
@@ -640,6 +642,58 @@ int main(int argc, char** argv)
     std::printf("playlist_replace=%s inserted_url=%s\n", insert_ok ? "ok" : "FAILED",
                 inserted_location.c_str());
 
+    // Paused item swap (device capture): the sender pauses, removes the
+    // item and inserts the next one. iOS sends no /rate for the new item
+    // because its player's rate did not change, so the receiver must start
+    // the inserted item paused rather than playing.
+    const std::string pause_response = httpExchange(
+        port, control_request("POST", "/rate?value=0.000000"));
+    plist_t paused_remove_item = plist_new_dict();
+    plist_dict_set_item(paused_remove_item, "uuid",
+                        plist_new_string("2669CBEE-7337-4945-8620-5A4FF6263A57"));
+    plist_t paused_remove_params = plist_new_dict();
+    plist_dict_set_item(paused_remove_params, "item", paused_remove_item);
+    plist_t paused_remove = plist_new_dict();
+    plist_dict_set_item(paused_remove, "type", plist_new_string("playlistRemove"));
+    plist_dict_set_item(paused_remove, "params", paused_remove_params);
+    binaryPlistExchange(port, "/action", session, paused_remove);
+    plist_free(paused_remove);
+    int rate_calls_before_insert = 0;
+    int plays_before_insert = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        rate_calls_before_insert = state.rate_calls;
+        plays_before_insert = state.play_count;
+    }
+    plist_t paused_item = plist_new_dict();
+    plist_dict_set_item(paused_item, "uuid",
+                        plist_new_string("770AD279-55D4-48D7-8A02-9B3F54612E27"));
+    plist_dict_set_item(paused_item, "mediaType", plist_new_string("file"));
+    plist_dict_set_item(paused_item, "host",
+                        plist_new_string("[fe80::1492:202d:7134:1f10]:7001"));
+    plist_dict_set_item(paused_item, "path",
+                        plist_new_string("/1/770AD279-55D4-48D7-8A02-9B3F54612E27.mp4"));
+    plist_t paused_params = plist_new_dict();
+    plist_dict_set_item(paused_params, "item", paused_item);
+    plist_t paused_insert = plist_new_dict();
+    plist_dict_set_item(paused_insert, "type", plist_new_string("playlistInsert"));
+    plist_dict_set_item(paused_insert, "params", paused_params);
+    const std::string paused_insert_response =
+        binaryPlistExchange(port, "/action", session, paused_insert);
+    plist_free(paused_insert);
+    bool paused_insert_ok = false;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        paused_insert_ok = pause_response.find("200 OK") != std::string::npos &&
+            paused_insert_response.find("200 OK") != std::string::npos &&
+            state.play_count == plays_before_insert + 1 &&
+            state.rate_calls == rate_calls_before_insert + 1 &&
+            std::fabs(state.playback_rate) < 0.001f;
+    }
+    std::printf("paused_item_swap=%s\n", paused_insert_ok ? "ok" : "FAILED");
+    // Leave the rate as the final assertions expect it.
+    httpExchange(port, control_request("POST", "/rate?value=0.5"));
+
     // Restore valid state, then exercise malformed plist/type/session cleanup
     // paths where type must still be either initialized or safely null.
     plist_t recovery_root = plist_new_dict();
@@ -695,7 +749,7 @@ int main(int argc, char** argv)
         missing_response.find("400 Bad Request") != std::string::npos &&
         missing_response.find("Connection: close") == std::string::npos &&
         after_reject_response.find("200 OK") != std::string::npos &&
-        hosted_ok && insert_ok &&
+        hosted_ok && insert_ok && paused_insert_ok &&
         pending_response.find("200 OK") != std::string::npos &&
         pending_fcup_request.find(pending_blob_url) != std::string::npos &&
         pending_action_response.find("200 OK") != std::string::npos &&
@@ -722,7 +776,7 @@ int main(int argc, char** argv)
         std::fabs(state.playback_rate - 0.5f) < 0.001f &&
         std::fabs(state.scrub_position - 80.5f) < 0.001f &&
         state.stop_count == 6 && state.playback_info_count == 2 &&
-        state.play_count == 10;
+        state.play_count == 11;
     std::printf("sender_hosted=%s hosted_url=%s hosted_start=%.3f reject_keeps_connection=%s\n",
                 hosted_ok ? "ok" : "failed", hosted_location.c_str(), hosted_start,
                 after_reject_response.find("200 OK") != std::string::npos ? "yes" : "no");
