@@ -26,6 +26,9 @@ static std::mutex g_server_mutex;
 static std::shared_ptr<UxPlayIntegration> g_uxplay_integration;
 static std::mutex g_uxplay_mutex;
 static std::string g_server_name = "OBS AirPlay";
+// g_server_name is read by OBS threads (source create/update) and written by
+// the debounce thread.
+static std::mutex g_server_name_mutex;
 
 // Debounce: defer mDNS name updates until the user stops typing for 800ms.
 static std::mutex              g_debounce_mutex;
@@ -82,7 +85,10 @@ static std::string load_or_persist_mac(const std::string& generated_mac)
 // Applies a server name change to the live mDNS advertisement.
 static void apply_server_name(const std::string& name)
 {
-    g_server_name = name;
+    {
+        std::lock_guard<std::mutex> lock(g_server_name_mutex);
+        g_server_name = name;
+    }
     blog(LOG_INFO, "Updating AirPlay server name to: %s", name.c_str());
 
     std::shared_ptr<UxPlayIntegration> uxplay;
@@ -142,8 +148,11 @@ static void name_debounce_thread_func()
 void update_server_name(const std::string& new_name)
 {
     const std::string resolved = new_name.empty() ? "OBS AirPlay" : new_name;
-    if (resolved == g_server_name)
-        return;
+    {
+        std::lock_guard<std::mutex> lock(g_server_name_mutex);
+        if (resolved == g_server_name)
+            return;
+    }
 
     std::lock_guard<std::mutex> lock(g_debounce_mutex);
     g_debounce_pending = resolved;
@@ -193,7 +202,12 @@ bool obs_module_load(void)
         // discovery signal alive for the lifetime of this plugin.
         start_airplay_ble_helper();
         g_uxplay_integration = std::make_shared<UxPlayIntegration>();
-        if (!g_uxplay_integration->start(mac_address, 7000, g_server_name)) {
+        std::string initial_name;
+        {
+            std::lock_guard<std::mutex> lock(g_server_name_mutex);
+            initial_name = g_server_name;
+        }
+        if (!g_uxplay_integration->start(mac_address, 7000, initial_name)) {
             blog(LOG_ERROR,
                  "Failed to start UxPlay integration; the AirPlay source will remain unavailable. "
                  "Check whether port 7000 is in use and review the preceding UxPlay log messages.");

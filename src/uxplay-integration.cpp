@@ -658,17 +658,9 @@ void UxPlayIntegration::updateServerName(const std::string& name)
     const std::string svc_name = name.empty() ? "OBS AirPlay" : name;
     blog(LOG_INFO, "Updating UxPlay dnssd service name to: %s", svc_name.c_str());
 
-    // Unregister the old service FIRST so iOS sees it disappear, which forces
-    // a fresh mDNS discovery when the new name is announced.  If we register
-    // the new name before removing the old one, iOS caches the old entry and
-    // ignores the new advertisement until the next connection.
-    if (old_dnssd) {
-        dnssd_unregister_raop(old_dnssd);
-        dnssd_unregister_airplay(old_dnssd);
-        dnssd_destroy(old_dnssd);
-        old_dnssd = nullptr;
-    }
-
+    // Create the new context before touching the old one: UxPlay's request
+    // handlers keep using the old context (and its advertisement stays up)
+    // if this fails.
     int dnssd_error = 0;
     dnssd_t* new_dnssd = dnssd_init(svc_name.c_str(),
                                     static_cast<int>(svc_name.size()),
@@ -678,6 +670,11 @@ void UxPlayIntegration::updateServerName(const std::string& name)
                                     0);
     if (!new_dnssd || dnssd_error != DNSSD_ERROR_NOERROR) {
         blog(LOG_WARNING, "Failed to reinitialize dnssd for name update (error=%d)", dnssd_error);
+        if (new_dnssd) {
+            dnssd_destroy(new_dnssd);
+        }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_dnssd = old_dnssd;
         return;
     }
 
@@ -685,10 +682,32 @@ void UxPlayIntegration::updateServerName(const std::string& name)
     dnssd_set_airserver_profile(new_dnssd, true);
 #endif
 
+    // Unregister the old service FIRST so iOS sees it disappear, which forces
+    // a fresh mDNS discovery when the new name is announced.  If we register
+    // the new name before removing the old one, iOS caches the old entry and
+    // ignores the new advertisement until the next connection.
+    if (old_dnssd) {
+        dnssd_unregister_raop(old_dnssd);
+        dnssd_unregister_airplay(old_dnssd);
+    }
+
     // raop_set_dnssd must be called before dnssd_register_raop/airplay because
     // it sets dnssd->pk (the public key string) via dnssd_set_pk(). Without it,
     // dnssd->pk is NULL and dnssd_register_raop crashes in strlen(dnssd->pk).
     raop_set_dnssd(raop_ref, new_dnssd);
+
+    // A request handler on UxPlay's HTTP thread may still be reading the old
+    // context, so it is not freed now: it is kept until the next name change
+    // (or stop), long after any such handler has returned.
+    dnssd_t* retired = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        retired = m_retired_dnssd;
+        m_retired_dnssd = old_dnssd;
+    }
+    if (retired) {
+        dnssd_destroy(retired);
+    }
 
     int raop_reg_err = dnssd_register_raop(new_dnssd, m_actual_port);
     if (raop_reg_err != DNSSD_ERROR_NOERROR) {
@@ -728,15 +747,19 @@ void UxPlayIntegration::stop()
     
     blog(LOG_INFO, "Stopping UxPlay integration");
 
-    if (m_media_player) {
-        m_media_player->stop();
-    }
-    
     // raop_destroy/dnssd_destroy are called outside m_mutex to avoid deadlock:
     // UxPlay's audio/video threads may be blocked waiting for m_mutex (in
     // processVideoData/processAudioData), and raop_destroy joins those threads.
+    // The HTTP thread goes first: it is the one that starts and stops URL
+    // playback (POST /play), so the media player is stopped only once no
+    // request can start it again.
     if (m_raop) {
         raop_stop_httpd(m_raop);
+    }
+    if (m_media_player) {
+        m_media_player->stop();
+    }
+    if (m_raop) {
         raop_destroy(m_raop);
         m_raop = nullptr;
     }
@@ -746,6 +769,10 @@ void UxPlayIntegration::stop()
         dnssd_unregister_airplay(m_dnssd);
         dnssd_destroy(m_dnssd);
         m_dnssd = nullptr;
+    }
+    if (m_retired_dnssd) {
+        dnssd_destroy(m_retired_dnssd);
+        m_retired_dnssd = nullptr;
     }
     
     blog(LOG_INFO, "UxPlay integration stopped");

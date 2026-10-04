@@ -9,8 +9,10 @@
 //      every frame must match (luma PSNR) and have the same size.
 //   2. FILE_B appended to the same auto decoder without a flush: a mid-stream
 //      size change, as AirPlay mirroring does.
-//   3. Garbage packets, then FILE_A again: the decoder must survive and
-//      produce pictures again (hardware or software fallback).
+//   3. A few garbage packets, then FILE_A again: the decoder must stay in
+//      hardware and produce pictures again. Then a long run of garbage and
+//      FILE_A: pictures again (hardware or software fallback), and hardware
+//      again after a flush.
 
 #include "h264-decoder.hpp"
 
@@ -94,6 +96,7 @@ struct Picture {
     int width = 0;
     int height = 0;
     bool hardware = false;
+    bool full_range = false;
     std::vector<uint8_t> luma;
 };
 
@@ -103,6 +106,7 @@ Picture copyPicture(const DecodedVideoFrame& frame, bool hardware)
     picture.width = frame.width;
     picture.height = frame.height;
     picture.hardware = hardware;
+    picture.full_range = frame.full_range;
     picture.luma.resize(static_cast<size_t>(frame.width) * frame.height);
     for (int y = 0; y < frame.height; ++y) {
         std::memcpy(picture.luma.data() + static_cast<size_t>(y) * frame.width,
@@ -198,19 +202,25 @@ int main(int argc, char** argv)
     const std::vector<Picture> pictures = decodeAll(automatic, a, &automatic_ms);
     size_t hardware_frames = 0;
     double worst = 99.0;
+    // Both paths must hand over the stream's own range, or the same picture
+    // would look different in software and in hardware.
+    bool same_range = true;
     for (size_t i = 0; i < pictures.size() && i < reference.size(); ++i) {
         if (pictures[i].hardware) ++hardware_frames;
         worst = std::min(worst, psnr(pictures[i], reference[i]));
+        same_range = same_range && pictures[i].full_range == reference[i].full_range;
     }
     const bool same_count = !reference.empty() && pictures.size() == reference.size();
-    const bool same_picture = worst >= 40.0;
+    const bool same_picture = worst >= 40.0 && same_range;
     const bool hardware_ok = !require_hardware || hardware_frames == pictures.size();
     ok = ok && same_count && same_picture && hardware_ok;
     std::printf("match: frames software=%zu auto=%zu hardware_frames=%zu worst_psnr=%.1f dB "
-                "(%dx%d) software=%.2f ms/frame auto=%.2f ms/frame -> %s\n",
+                "(%dx%d, %s range%s) software=%.2f ms/frame auto=%.2f ms/frame -> %s\n",
                 reference.size(), pictures.size(), hardware_frames, worst,
                 pictures.empty() ? 0 : pictures[0].width,
                 pictures.empty() ? 0 : pictures[0].height,
+                !reference.empty() && reference[0].full_range ? "full" : "video",
+                same_range ? "" : ", RANGE MISMATCH",
                 reference.empty() ? 0.0 : software_ms / reference.size(),
                 pictures.empty() ? 0.0 : automatic_ms / pictures.size(),
                 same_count && same_picture && hardware_ok ? "ok" : "FAILED");
@@ -262,7 +272,23 @@ int main(int argc, char** argv)
         }
         garbage[0] = 0; garbage[1] = 0; garbage[2] = 0; garbage[3] = 1;
         garbage[4] = a.codec == AV_CODEC_ID_HEVC ? 0x02 : 0x41; // a non-key slice
+        // A few undecodable packets (a damaged stream) must not cost the
+        // hardware decoder; a long run of them may.
         for (int i = 0; i < 8; ++i) {
+            DecodedVideoFrame frame;
+            automatic.decodeToI420(garbage.data(), garbage.size(), frame);
+        }
+        const std::vector<Picture> glitch = decodeAll(automatic, a, nullptr);
+        const bool glitch_ok = !glitch.empty() && !reference.empty() &&
+            glitch.size() + 2 >= reference.size() &&
+            psnr(glitch.back(), reference.back()) >= 40.0 &&
+            (!require_hardware || glitch.back().hardware);
+        ok = ok && glitch_ok;
+        std::printf("glitch: frames=%zu of %zu mode=%s -> %s\n", glitch.size(),
+                    reference.size(), automatic.usingHardware() ? "hardware" : "software",
+                    glitch_ok ? "ok" : "FAILED");
+
+        for (int i = 0; i < 40; ++i) {
             DecodedVideoFrame frame;
             automatic.decodeToI420(garbage.data(), garbage.size(), frame);
         }

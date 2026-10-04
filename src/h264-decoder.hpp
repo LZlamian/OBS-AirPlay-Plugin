@@ -48,6 +48,8 @@ public:
 
 private:
     bool open(bool allow_hardware);
+    bool reopen();
+    bool noteError(int error);
     void close();
     void releaseLockedBuffer();
     void rememberParameterSets(const uint8_t* data, size_t size);
@@ -67,6 +69,8 @@ private:
     bool m_hardware_preferred;
     bool m_hardware_allowed;
     bool m_hardware_open = false;
+    // Set while decoding when FFmpeg offers no hardware format for the stream.
+    bool m_hardware_refused = false;
     AVCodecContext* m_codec_context;
     AVBufferRef* m_hw_device = nullptr;
     AVFrame* m_frame;
@@ -82,7 +86,12 @@ private:
     // into a freshly opened decoder when falling back to software.
     std::vector<uint8_t> m_parameter_sets;
 
+    // Consecutive errors since the last decoded picture: hardware failures,
+    // "invalid data" (which a damaged stream causes as well), and the count
+    // behind the rate-limited error log line.
     int m_hardware_errors = 0;
+    int m_stream_errors = 0;
+    int m_errors_logged = 0;
     bool m_last_frame_hardware = false;
     bool m_mode_logged = false;
     bool m_logged_hardware = false;

@@ -95,6 +95,8 @@ private:
 
     // UxPlay DNS-SD state used by RAOP handlers (for /info and TXT payloads)
     dnssd_t* m_dnssd;
+    // The context replaced by the last name change (see updateServerName).
+    dnssd_t* m_retired_dnssd = nullptr;
 
     // Hardware address and server name stored so dnssd can be reinitialized on name change
     std::array<char, 6> m_hw_addr;

@@ -1,4 +1,5 @@
 #include "h264-decoder.hpp"
+#include "hardware-decode-option.hpp"
 #include <obs-module.h>
 #include <algorithm>
 #include <cstdlib>
@@ -18,27 +19,14 @@ extern "C" {
 namespace {
 
 // After this many consecutive hardware errors the decoder is reopened in
-// software for the rest of the connection.
+// software for the rest of the stream.
 constexpr int kMaxHardwareErrors = 3;
-
-// Hardware decoding is on by default. OBS_AIRPLAY_HW_DECODE=0, or the file
-// ~/Library/Application Support/obs-studio/obs-airplay-software-decode,
-// forces software decoding (for troubleshooting).
-bool hardware_decode_requested()
-{
-    if (const char* env = std::getenv("OBS_AIRPLAY_HW_DECODE")) {
-        return std::strcmp(env, "0") != 0;
-    }
-    if (const char* home = std::getenv("HOME")) {
-        const std::string flag = std::string(home) +
-            "/Library/Application Support/obs-studio/obs-airplay-software-decode";
-        struct stat st {};
-        if (stat(flag.c_str(), &st) == 0) {
-            return false;
-        }
-    }
-    return true;
-}
+// "Invalid data" is what a damaged or keyframe-less stream produces too, and
+// software decoding cannot show that either: allow about a second of it
+// before trying software.
+constexpr int kMaxStreamErrors = 30;
+// At most one "cannot decode" log line per this many consecutive errors.
+constexpr int kErrorLogInterval = 120;
 
 bool is_parameter_set(AVCodecID codec_id, uint8_t header)
 {
@@ -78,7 +66,7 @@ H264Decoder::H264Decoder(AVCodecID codec_id, Mode mode)
     , m_packet(av_packet_alloc())
     , m_sws_context(nullptr)
 {
-    if (!open(m_hardware_allowed)) {
+    if (!reopen()) {
         return;
     }
     blog(LOG_INFO, "Video decoder initialized for codec id %d (%s)",
@@ -114,7 +102,11 @@ enum AVPixelFormat H264Decoder::chooseFormat(AVCodecContext* context,
         }
     }
     // FFmpeg offers only software formats when the hardware decoder cannot
-    // take this stream; decoding then continues in software in this context.
+    // take this stream. This context has no decoder threads, so decode() then
+    // reopens a proper software decoder for the stream.
+    if (self && self->m_hardware_open) {
+        self->m_hardware_refused = true;
+    }
     return software ? *software : formats[0];
 }
 
@@ -144,6 +136,7 @@ bool H264Decoder::open(bool allow_hardware)
     m_codec_context->opaque = this;
 
     m_hardware_open = false;
+    m_hardware_refused = false;
     if (allow_hardware) {
         // Fails (and leaves software decoding) when the linked FFmpeg was
         // built without VideoToolbox.
@@ -172,6 +165,41 @@ bool H264Decoder::open(bool allow_hardware)
     }
     m_hardware_errors = 0;
     return true;
+}
+
+// Opens a decoder for a new stream: hardware when wanted, software when the
+// hardware decoder cannot be opened.
+bool H264Decoder::reopen()
+{
+    close();
+    m_hardware_allowed = m_hardware_preferred;
+    m_parameter_sets.clear();
+    m_hardware_errors = 0;
+    m_stream_errors = 0;
+    m_errors_logged = 0;
+    if (open(m_hardware_allowed)) {
+        return true;
+    }
+    if (!m_hardware_allowed) {
+        return false;
+    }
+    m_hardware_allowed = false;
+    return open(false);
+}
+
+// Counts a decode error; true when hardware decoding should be given up.
+bool H264Decoder::noteError(int error)
+{
+    if ((m_errors_logged++ % kErrorLogInterval) == 0) {
+        blog(LOG_ERROR, "Error decoding mirror video (%d)", error);
+    }
+    if (!m_hardware_open) {
+        return false;
+    }
+    if (error == AVERROR_INVALIDDATA) {
+        return ++m_stream_errors >= kMaxStreamErrors;
+    }
+    return ++m_hardware_errors >= kMaxHardwareErrors;
 }
 
 void H264Decoder::close()
@@ -205,15 +233,16 @@ void H264Decoder::flush()
     releaseLockedBuffer();
     // A flush marks a stream boundary. A software fallback applies to the
     // stream that caused it; the next stream starts in hardware again.
-    if (m_hardware_preferred && !m_hardware_allowed) {
-        close();
-        m_hardware_allowed = true;
-        m_parameter_sets.clear();
-        if (open(true)) {
+    // The same applies to a decoder that could not be reopened earlier.
+    if (!m_codec_context || (m_hardware_preferred && !m_hardware_allowed)) {
+        if (reopen() && m_hardware_open) {
             blog(LOG_INFO, "[DECODE] new stream: hardware decoding enabled again");
         }
         return;
     }
+    m_hardware_errors = 0;
+    m_stream_errors = 0;
+    m_errors_logged = 0;
     if (m_codec_context)
         avcodec_flush_buffers(m_codec_context);
     if (m_frame)
@@ -251,12 +280,14 @@ void H264Decoder::rememberParameterSets(const uint8_t* data, size_t size)
     while (position < size) {
         const size_t nal_start = position + code_length;
         if (nal_start >= size) break;
-        size_t next_length = 0;
-        const size_t nal_end = next_start(nal_start, &next_length);
         const uint8_t header = data[nal_start];
         if (is_slice(m_codec_id, header)) {
+            // Checked before looking for the unit's end: that search would
+            // read through the whole picture, on every frame.
             break;
         }
+        size_t next_length = 0;
+        const size_t nal_end = next_start(nal_start, &next_length);
         if (is_parameter_set(m_codec_id, header)) {
             static const uint8_t start_code[] = {0, 0, 0, 1};
             found.insert(found.end(), start_code, start_code + sizeof(start_code));
@@ -277,7 +308,11 @@ bool H264Decoder::fallBackToSoftware(const char* reason)
          reason);
     close();
     m_hardware_allowed = false;
+    m_hardware_errors = 0;
+    m_stream_errors = 0;
     if (!open(false)) {
+        blog(LOG_ERROR, "[DECODE] software decoder could not be opened; "
+                        "retrying at the next stream");
         return false;
     }
     if (!m_parameter_sets.empty()) {
@@ -315,7 +350,22 @@ bool H264Decoder::outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_fra
 {
     AVFrame* src = frame;
     const bool nv12 = frame->format == AV_PIX_FMT_NV12;
-    if (frame->format != AV_PIX_FMT_YUV420P && !nv12) {
+    // Mirror streams are full range, which FFmpeg's software decoders report
+    // as YUVJ420P: the same layout as YUV420P. Hand it to OBS as it is,
+    // flagged full range (as the hardware path does), instead of converting
+    // every frame to video range.
+    const bool i420 = frame->format == AV_PIX_FMT_YUV420P ||
+                      frame->format == AV_PIX_FMT_YUVJ420P;
+    bool full_range = frame->color_range == AVCOL_RANGE_JPEG ||
+                      frame->format == AV_PIX_FMT_YUVJ420P;
+    if (!i420 && !nv12) {
+        // swscale converts the other full-range (YUVJ) layouts to video range
+        // and leaves the range of everything else untouched.
+        const AVPixFmtDescriptor* descriptor =
+            av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
+        if (descriptor && std::strncmp(descriptor->name, "yuvj", 4) == 0) {
+            full_range = false;
+        }
         m_sws_context = sws_getCachedContext(
             m_sws_context,
             frame->width,
@@ -358,7 +408,7 @@ bool H264Decoder::outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_fra
     out_frame.width = src->width;
     out_frame.height = src->height;
     out_frame.nv12 = nv12;
-    out_frame.full_range = nv12 && frame->color_range == AVCOL_RANGE_JPEG;
+    out_frame.full_range = full_range;
     out_frame.linesize[0] = src->linesize[0];
     out_frame.linesize[1] = src->linesize[1];
     out_frame.linesize[2] = nv12 ? 0 : src->linesize[2];
@@ -454,27 +504,40 @@ bool H264Decoder::decodeToI420(const uint8_t* data, size_t size, DecodedVideoFra
     };
 
     int ret = send();
-    if (ret < 0 && m_hardware_open && ++m_hardware_errors >= kMaxHardwareErrors) {
-        if (!fallBackToSoftware("repeated errors sending packets")) {
+    if (m_hardware_refused) {
+        m_hardware_refused = false;
+        if (!fallBackToSoftware("stream not supported by the hardware decoder")) {
             return false;
         }
         ret = send();
     }
+    if (ret == AVERROR(EAGAIN)) {
+        // The decoder holds pictures nobody collected (not an error): drop
+        // them, the newest picture is the one a live mirror wants.
+        while (avcodec_receive_frame(m_codec_context, m_frame) >= 0) {
+            av_frame_unref(m_frame);
+        }
+        ret = send();
+    }
     if (ret < 0) {
-        blog(LOG_ERROR, "Error sending packet to decoder (%d)", ret);
-        return false;
+        if (!noteError(ret) || !fallBackToSoftware("repeated errors sending packets")) {
+            return false;
+        }
+        ret = send();
+        if (ret < 0) {
+            return false;
+        }
     }
 
     int error = 0;
     if (receiveFrame(out_frame, &error)) {
         m_hardware_errors = 0;
+        m_stream_errors = 0;
+        m_errors_logged = 0;
         return true;
     }
-    if (error < 0) {
-        blog(LOG_ERROR, "Error decoding frame (%d)", error);
-        if (m_hardware_open && ++m_hardware_errors >= kMaxHardwareErrors) {
-            fallBackToSoftware("repeated decode errors");
-        }
+    if (error < 0 && noteError(error)) {
+        fallBackToSoftware("repeated decode errors");
     }
     return false;
 }
