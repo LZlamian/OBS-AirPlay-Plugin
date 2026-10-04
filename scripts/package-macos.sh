@@ -15,7 +15,7 @@ INSTALL_PATH="${INSTALL_BASE}/${PLUGIN_NAME}"
 
 PACKAGE_ID="com.obsairplay.plugin"
 VERSION="$(sed -nE 's/^project\(obs-airplay VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' "${ROOT_DIR}/CMakeLists.txt" | head -n1)"
-VERSION="${VERSION:-2.2.1}"
+VERSION="${VERSION:-2.3.0}"
 ARCH="${ARCH_OVERRIDE:-$(uname -m)}"
 MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET_OVERRIDE:-12.0}"
 DEPS_PREFIX="${OBS_AIRPLAY_DEPS_PREFIX:-}"

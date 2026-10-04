@@ -102,7 +102,7 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS
 3. Search for "AirPlay"
 4. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 2.2.1)
+   OBS AirPlay Plugin loaded (version 2.3.0)
    UxPlay integration started successfully
    UxPlay integration active on port 7000
    ```
@@ -197,23 +197,22 @@ ps aux | grep mDNSResponder
 
 ### Change Server Name
 
-Edit `src/plugin-main.cpp` line where `start()` is called:
+Open the AirPlay source properties in OBS and edit **Server Name**. The
+advertised name updates shortly after you stop typing; no rebuild is needed.
+
+### Use Different Ports
+
+The plugin listens on port 7000 and falls back to 7001 by itself when 7000 is
+taken (for example by a second OBS on the same Mac). To use another port, change
+the port passed to `g_uxplay_integration->start(...)` in `src/plugin-main.cpp`:
 
 ```cpp
-g_airplay_server->start("My Custom Name", 7000, 5000);
+g_uxplay_integration->start(mac_address, 7100, initial_name)
 ```
 
 Then rebuild:
 ```bash
 ./build.sh
-```
-
-### Use Different Ports
-
-If ports 7000 or 5000 are in use:
-
-```cpp
-g_airplay_server->start("OBS AirPlay", 7100, 5100);
 ```
 
 **Note:** Non-standard ports might cause issues with some iOS versions.

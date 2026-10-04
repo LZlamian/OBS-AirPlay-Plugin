@@ -109,7 +109,7 @@ In OBS:
 2. Search for "AirPlay" (Cmd+F)
 3. You should see:
    ```
-   OBS AirPlay Plugin loaded (version 2.2.1)
+   OBS AirPlay Plugin loaded (version 2.3.0)
    UxPlay integration started successfully
    UxPlay integration active on port 7000
    ```
@@ -239,9 +239,12 @@ advertisement updates automatically after you stop typing.
 
 ### Use Different Ports
 
-If ports 7000/5000 are in use:
+The plugin listens on port 7000 and falls back to 7001 by itself when 7000 is
+taken (for example by a second OBS on the same Mac). To use another port, change
+the port passed to `g_uxplay_integration->start(...)` in `src/plugin-main.cpp`:
+
 ```cpp
-g_airplay_server->start("OBS AirPlay", 7100, 5100);
+g_uxplay_integration->start(mac_address, 7100, initial_name)
 ```
 
 ### Enable Debug Logging

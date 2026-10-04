@@ -2,7 +2,15 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.2.1** — a maintenance release that fixes the Discovery helper showing as "Not Responding" ([release notes](RELEASE_NOTES_v2.2.1.md)).
+Current release: **v2.3.0** — hardware (VideoToolbox) decoding for screen mirroring and AirPlay video, plus stability and security fixes ([release notes](RELEASE_NOTES_v2.3.0.md)).
+
+## What's new in v2.3.0
+
+- Hardware decoding for screen mirroring and AirPlay video, with automatic software fallback (force software with `OBS_AIRPLAY_HW_DECODE=0`)
+- Portrait recordings play upright in AirPlay video
+- OBS no longer goes black when an app cancels AirPlay video while mirroring
+- A malformed request from the local network can no longer crash OBS
+- Safer renaming, shutdown and stream restarts; stale temporary media files are cleaned up
 
 ## What's new in v2.2.0
 
@@ -295,11 +303,12 @@ The name is applied ~800 ms after you stop typing — mDNS re-advertises once, a
 
 ### Changing Ports
 
-If ports 7000 or 5000 are already in use, you can change them:
+The plugin listens on port 7000 and falls back to 7001 by itself when 7000 is
+taken (for example by a second OBS on the same Mac). To use another port, change
+the port passed to `g_uxplay_integration->start(...)` in `src/plugin-main.cpp`:
 
 ```cpp
-// AirPlay port (default 7000), RAOP port (default 5000)
-g_airplay_server->start("OBS AirPlay", 7100, 5100);
+g_uxplay_integration->start(mac_address, 7100, initial_name)
 ```
 
 **Note:** After changing ports, you must rebuild and reinstall the plugin.
