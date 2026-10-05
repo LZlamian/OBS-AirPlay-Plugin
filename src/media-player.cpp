@@ -648,6 +648,8 @@ public:
             preview_pending = true;
             resync_on_resume = false;
             last_seek_target = -1.0;
+            scrub_burst = false;
+            coarse_preview_shown = false;
             clock_initialized = false;
         }
         stop_requested.store(false, std::memory_order_release);
@@ -691,6 +693,14 @@ public:
             std::fabs(position - last_seek_target) < kSamePositionTolerance) {
             return;
         }
+        // Scrubs arriving in quick succession are a drag on the sender's
+        // scrubber: each one may be replaced before its exact frame has been
+        // decoded, so the keyframe is shown first (see takeCoarsePreview).
+        const auto seek_time = std::chrono::steady_clock::now();
+        scrub_burst = seek_generation > 0 &&
+            seek_time - last_seek_at < std::chrono::milliseconds(200);
+        last_seek_at = seek_time;
+        coarse_preview_shown = false;
         last_seek_target = std::max(0.0, position);
         seek_target = std::max(0.0, position);
         seek_pending = true;
@@ -905,6 +915,26 @@ private:
     }
 
     // Frames before a pending start/seek target are decoded but never shown.
+    // During a scrubber drag (paused, scrubs in quick succession) the exact
+    // frame is often never reached before the next scrub arrives: decoding
+    // forward from the keyframe can take longer than the gap between scrubs.
+    // The first frame after such a seek, the keyframe at or before the
+    // target, is shown at once so the output follows the finger; the exact
+    // frame replaces it as soon as the scrubs stop. A single jump is not a
+    // burst and goes straight to the exact frame.
+    bool takeCoarsePreview(double position)
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        constexpr double kWorthwhileGap = 0.15;
+        if (seek_pending || info.rate > 0.0f || !preview_pending || !scrub_burst ||
+            coarse_preview_shown || discard_video_before < 0.0 ||
+            discard_video_before - position < kWorthwhileGap) {
+            return false;
+        }
+        coarse_preview_shown = true;
+        return true;
+    }
+
     bool shouldDiscard(double position, bool is_video)
     {
         std::lock_guard<std::mutex> lock(state_mutex);
@@ -1024,8 +1054,15 @@ private:
         }
 
         const double position = timestamp_seconds(decoded, stream, format_start_seconds);
-        if (position < 0.0 || shouldDiscard(position, true)) {
+        if (position < 0.0) {
             return;
+        }
+        bool coarse_preview = false;
+        if (shouldDiscard(position, true)) {
+            if (!takeCoarsePreview(position)) {
+                return;
+            }
+            coarse_preview = true;
         }
 
         AVFrame* picture = decoded;
@@ -1136,7 +1173,10 @@ private:
         }
 
         uint64_t timestamp_ns = 0;
-        if (!waitForPresentation(position, &timestamp_ns, true)) {
+        if (coarse_preview) {
+            // Shown as it is, now; the reported position stays the target.
+            timestamp_ns = os_gettime_ns();
+        } else if (!waitForPresentation(position, &timestamp_ns, true)) {
             return;
         }
 
@@ -1659,6 +1699,9 @@ private:
     bool seek_pending = false;
     double seek_target = 0.0;
     uint64_t seek_generation = 0;
+    std::chrono::steady_clock::time_point last_seek_at;
+    bool scrub_burst = false;
+    bool coarse_preview_shown = false;
     double last_seek_target = -1.0;
     double discard_video_before = -1.0;
     double discard_audio_before = -1.0;

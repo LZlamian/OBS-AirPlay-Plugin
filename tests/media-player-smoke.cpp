@@ -4,11 +4,13 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
+#include <algorithm>
 #include <atomic>
 #include <cstdarg>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <thread>
 
@@ -242,8 +244,86 @@ int pausedAudio(const char* location)
     return ok ? 0 : 1;
 }
 
+// How quickly a paused scrub puts a picture on screen, and whether a drag
+// (scrubs 50 ms apart, as an AVPlayer relay sends them) shows pictures while
+// it is going or only once it stops.
+//   --scrub-latency URL [min_drag_frames]
+int scrubLatency(const char* location, int min_drag_frames)
+{
+    std::atomic<unsigned int> video_frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0]) ++video_frames;
+    });
+    const auto wait_for = [](int ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    };
+    const auto now = [] { return std::chrono::steady_clock::now(); };
+    const auto ms_since = [&](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration<double, std::milli>(now() - t).count();
+    };
+
+    player.play(location, 5.0);
+    for (int i = 0; i < 300 && video_frames.load() == 0; ++i) wait_for(20);
+    wait_for(300);
+    player.setRate(0.0f);
+    wait_for(400);
+    const double duration = player.getPlaybackInfo().duration;
+
+    // Single scrubs: time until the first picture, and until pictures stop.
+    const double fractions[] = {0.21, 0.47, 0.33, 0.78, 0.52, 0.64};
+    double worst_first = 0.0;
+    double total_first = 0.0;
+    int measured = 0;
+    for (double fraction : fractions) {
+        const unsigned int before = video_frames.load();
+        const auto started = now();
+        player.seek(duration * fraction);
+        double first = -1.0;
+        while (ms_since(started) < 3000.0) {
+            if (first < 0.0 && video_frames.load() != before) first = ms_since(started);
+            if (first >= 0.0 && ms_since(started) > first + 400.0) break;
+            wait_for(2);
+        }
+        std::printf("scrub to %7.2fs: first picture after %6.1f ms, pictures shown %u\n",
+                    duration * fraction, first, video_frames.load() - before);
+        if (first >= 0.0) {
+            worst_first = std::max(worst_first, first);
+            total_first += first;
+            ++measured;
+        }
+    }
+
+    // A drag: 30 scrubs, 50 ms apart, sweeping forward.
+    const unsigned int before_drag = video_frames.load();
+    const auto drag_started = now();
+    for (int i = 0; i < 30; ++i) {
+        player.seek(duration * (0.20 + 0.015 * i));
+        wait_for(50);
+    }
+    const double drag_ms = ms_since(drag_started);
+    const unsigned int during_drag = video_frames.load() - before_drag;
+    wait_for(1500);
+    const unsigned int after_drag = video_frames.load() - before_drag - during_drag;
+    const double final_position = player.getPlaybackInfo().position;
+    const double final_target = duration * (0.20 + 0.015 * 29);
+    player.stop();
+
+    const bool settled = std::fabs(final_position - final_target) < 0.2;
+    const bool ok = measured == 6 && settled && static_cast<int>(during_drag) >= min_drag_frames;
+    std::printf("scrub-latency: single scrub first picture avg %.1f ms worst %.1f ms; "
+                "drag of 30 scrubs in %.0f ms showed %u pictures during, %u after; "
+                "settled at %.3fs (target %.3fs) -> %s\n",
+                measured ? total_first / measured : -1.0, worst_first, drag_ms, during_drag,
+                after_drag, final_position, final_target, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--scrub-latency") == 0) {
+        return scrubLatency(argv[2], argc == 4 ? std::atoi(argv[3]) : 0);
+    }
     if (std::getenv("MEDIA_SMOKE_FFMPEG_VERBOSE")) {
         av_log_set_level(AV_LOG_VERBOSE);
     }
