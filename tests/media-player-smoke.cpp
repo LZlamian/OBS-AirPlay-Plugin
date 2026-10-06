@@ -247,8 +247,8 @@ int pausedAudio(const char* location)
 // How quickly a paused scrub puts a picture on screen, and whether a drag
 // (scrubs 50 ms apart, as an AVPlayer relay sends them) shows pictures while
 // it is going or only once it stops.
-//   --scrub-latency URL [min_drag_frames]
-int scrubLatency(const char* location, int min_drag_frames)
+//   --scrub-latency URL [min_drag_frames [drag_gap_ms]]
+int scrubLatency(const char* location, int min_drag_frames, int drag_gap_ms)
 {
     std::atomic<unsigned int> video_frames{0};
     MediaPlayer player;
@@ -294,12 +294,12 @@ int scrubLatency(const char* location, int min_drag_frames)
         }
     }
 
-    // A drag: 30 scrubs, 50 ms apart, sweeping forward.
+    // A drag: 30 scrubs, drag_gap_ms apart, sweeping forward.
     const unsigned int before_drag = video_frames.load();
     const auto drag_started = now();
     for (int i = 0; i < 30; ++i) {
         player.seek(duration * (0.20 + 0.015 * i));
-        wait_for(50);
+        wait_for(drag_gap_ms);
     }
     const double drag_ms = ms_since(drag_started);
     const unsigned int during_drag = video_frames.load() - before_drag;
@@ -321,8 +321,9 @@ int scrubLatency(const char* location, int min_drag_frames)
 
 int main(int argc, char** argv)
 {
-    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--scrub-latency") == 0) {
-        return scrubLatency(argv[2], argc == 4 ? std::atoi(argv[3]) : 0);
+    if (argc >= 3 && argc <= 5 && std::strcmp(argv[1], "--scrub-latency") == 0) {
+        return scrubLatency(argv[2], argc >= 4 ? std::atoi(argv[3]) : 0,
+                            argc == 5 ? std::atoi(argv[4]) : 50);
     }
     if (std::getenv("MEDIA_SMOKE_FFMPEG_VERBOSE")) {
         av_log_set_level(AV_LOG_VERBOSE);

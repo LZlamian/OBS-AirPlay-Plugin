@@ -695,10 +695,17 @@ public:
         }
         // Scrubs arriving in quick succession are a drag on the sender's
         // scrubber: each one may be replaced before its exact frame has been
-        // decoded, so the keyframe is shown first (see takeCoarsePreview).
+        // decoded, so an earlier frame is shown when the exact one is late
+        // (see takeCoarsePreview). The exact frame gets half the gap between
+        // scrubs, at most 60 ms, to arrive first.
         const auto seek_time = std::chrono::steady_clock::now();
-        scrub_burst = seek_generation > 0 &&
-            seek_time - last_seek_at < std::chrono::milliseconds(200);
+        const auto scrub_gap = seek_time - last_seek_at;
+        scrub_burst = seek_generation > 0 && scrub_gap < std::chrono::milliseconds(200);
+        if (scrub_burst) {
+            coarse_preview_after = seek_time +
+                std::min<std::chrono::steady_clock::duration>(
+                    scrub_gap / 2, std::chrono::milliseconds(60));
+        }
         last_seek_at = seek_time;
         coarse_preview_shown = false;
         last_seek_target = std::max(0.0, position);
@@ -918,17 +925,20 @@ private:
     // During a scrubber drag (paused, scrubs in quick succession) the exact
     // frame is often never reached before the next scrub arrives: decoding
     // forward from the keyframe can take longer than the gap between scrubs.
-    // The first frame after such a seek, the keyframe at or before the
-    // target, is shown at once so the output follows the finger; the exact
-    // frame replaces it as soon as the scrubs stop. A single jump is not a
-    // burst and goes straight to the exact frame.
+    // When the exact frame is late, the frame the decoder has reached by
+    // then (the keyframe at or before the target, or one after it) is shown
+    // so the output follows the finger; the exact frame replaces it if no
+    // newer scrub arrives first. An exact frame that is in time is shown
+    // alone, so the picture does not step back and forward on every scrub.
+    // A single jump is not a burst and goes straight to the exact frame.
     bool takeCoarsePreview(double position)
     {
         std::lock_guard<std::mutex> lock(state_mutex);
         constexpr double kWorthwhileGap = 0.15;
         if (seek_pending || info.rate > 0.0f || !preview_pending || !scrub_burst ||
             coarse_preview_shown || discard_video_before < 0.0 ||
-            discard_video_before - position < kWorthwhileGap) {
+            discard_video_before - position < kWorthwhileGap ||
+            std::chrono::steady_clock::now() < coarse_preview_after) {
             return false;
         }
         coarse_preview_shown = true;
@@ -1700,6 +1710,7 @@ private:
     double seek_target = 0.0;
     uint64_t seek_generation = 0;
     std::chrono::steady_clock::time_point last_seek_at;
+    std::chrono::steady_clock::time_point coarse_preview_after;
     bool scrub_burst = false;
     bool coarse_preview_shown = false;
     double last_seek_target = -1.0;
