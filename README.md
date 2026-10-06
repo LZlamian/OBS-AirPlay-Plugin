@@ -9,6 +9,7 @@ Current release: **v2.3.0** — hardware (VideoToolbox) decoding for screen mirr
 - Hardware decoding for screen mirroring and AirPlay video, with automatic software fallback (force software with `OBS_AIRPLAY_HW_DECODE=0`)
 - Portrait recordings play upright in AirPlay video
 - OBS no longer goes black when an app cancels AirPlay video while mirroring
+- AirPlay video items swapped in while paused stay paused, and OBS follows scrubber drags while paused
 - A malformed request from the local network can no longer crash OBS
 - Safer renaming, shutdown and stream restarts; stale temporary media files are cleaned up
 

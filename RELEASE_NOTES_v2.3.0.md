@@ -21,6 +21,8 @@ To force software decoding for troubleshooting, start OBS with `OBS_AIRPLAY_HW_D
 - **A few bad packets no longer cost hardware decoding.** Only a sustained run of undecodable packets, or real hardware failures, switches a stream to software.
 - **A decoder that could not be reopened recovers** at the next stream, not only after restarting OBS.
 - **Renaming the receiver is safe while a device connects.** The previous advertisement was freed while request handlers could still read it; a failed rename now leaves the old name working.
+- **An item swapped in while paused stays paused.** When a sender replaced the current AirPlay video item while paused, the new item started playing in OBS. It now takes the sender's last playback rate: OBS shows its first frame and waits.
+- **OBS follows a scrubber drag.** While paused, each scrub decoded forward to the exact position and a newer scrub cancelled it, so a drag showed only a few pictures until the finger slowed down. During a drag OBS now shows the keyframe at or before each position at once, and the exact frame when the drag stops. A single jump still goes straight to the exact frame.
 - **An audio-only item that starts paused waits** for playback to start; it used to be decoded straight to its end.
 - Each mirror stream starts with fresh decoder state.
 - Shutdown stops the network thread before the media player, so a late `/play` cannot race it.
