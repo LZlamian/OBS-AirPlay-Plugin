@@ -27,10 +27,27 @@ bool parentIsAlive(pid_t parentPID)
 // The plugin this helper belongs to, when it can be updated in place.
 NSURL *gPluginURL = nil;
 
+// The helper has no icon of its own, so its alerts would show the blank
+// generic application icon. They are about OBS: they carry OBS's icon.
+NSImage *gAlertIcon = nil;
+
+NSImage *alertIcon(pid_t parentPID)
+{
+    NSImage *icon = [NSRunningApplication
+        runningApplicationWithProcessIdentifier:parentPID].icon;
+    if (!icon) {
+        icon = [NSImage imageWithSystemSymbolName:@"arrow.down.circle"
+                         accessibilityDescription:@"Update"];
+    }
+    return icon;
+}
+
 void showUpdateResult(NSString *message, NSString *detail, bool offerReleasePage)
 {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.alertStyle = NSAlertStyleInformational;
+    if (gAlertIcon)
+        alert.icon = gAlertIcon;
     alert.messageText = message;
     alert.informativeText = detail;
     [alert addButtonWithTitle:@"OK"];
@@ -80,6 +97,8 @@ void showUpdatePrompt(NSString *latestVersion, NSString *currentVersion,
 {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.alertStyle = NSAlertStyleInformational;
+    if (gAlertIcon)
+        alert.icon = gAlertIcon;
     alert.messageText = [NSString stringWithFormat:
         @"OBS AirPlay %@ is available", latestVersion];
     if (asset) {
@@ -273,6 +292,7 @@ int main(int argc, const char *argv[])
         if (pluginURL && OBSAirPlayCanReplacePlugin(pluginURL))
             gPluginURL = pluginURL;
         tidyStagedUpdate();
+        gAlertIcon = alertIcon(parentPID);
 
         __strong AirPlayBLEDelegate *delegate = [[AirPlayBLEDelegate alloc] init];
         (void)delegate;
