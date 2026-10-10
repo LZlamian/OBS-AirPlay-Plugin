@@ -338,10 +338,12 @@ if(APPLE)
 
     add_executable(obs-airplay-ble-discovery MACOSX_BUNDLE
         src/airplay-ble-discovery.mm
+        src/plugin-updater.mm
     )
     target_compile_definitions(obs-airplay-ble-discovery PRIVATE
         PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
     )
+    target_compile_options(obs-airplay-ble-discovery PRIVATE -fobjc-arc)
     target_link_libraries(obs-airplay-ble-discovery PRIVATE
         ${COCOA_LIBRARY}
         ${CORE_BLUETOOTH_LIBRARY}
@@ -402,6 +404,16 @@ if(APPLE)
         COMMENT "Creating plugin bundle structure"
     )
     
+    # The plugin's POST_BUILD step only runs when the plugin itself is linked
+    # again; a change to the helper alone must reach the bundle too.
+    add_custom_command(TARGET obs-airplay-ble-discovery POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PLUGIN_BUNDLE_DIR}/Contents/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<TARGET_BUNDLE_DIR:obs-airplay-ble-discovery>"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/OBS AirPlay Discovery.app"
+        COMMENT "Copying the discovery helper into the plugin bundle"
+    )
+
     # Install data files if they exist
     if(EXISTS "${CMAKE_SOURCE_DIR}/data")
         add_custom_command(TARGET obs-airplay POST_BUILD
@@ -458,6 +470,19 @@ if(BUILD_TESTING)
     )
     if(APPLE)
         target_link_libraries(obs-airplay-decoder-smoke PRIVATE "-framework CoreVideo")
+    endif()
+
+    if(APPLE)
+        # Update download checks, staging and the swap, on scratch bundles.
+        add_executable(obs-airplay-updater-smoke
+            tests/updater-smoke.mm
+            src/plugin-updater.mm
+        )
+        target_include_directories(obs-airplay-updater-smoke PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+        )
+        target_compile_options(obs-airplay-updater-smoke PRIVATE -fobjc-arc)
+        target_link_libraries(obs-airplay-updater-smoke PRIVATE "-framework Foundation")
     endif()
 
     add_executable(obs-airplay-protocol-smoke

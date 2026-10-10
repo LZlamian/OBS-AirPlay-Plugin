@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 
+#import "plugin-updater.h"
+
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
@@ -22,66 +24,120 @@ bool parentIsAlive(pid_t parentPID)
     return kill(parentPID, 0) == 0 || errno != ESRCH;
 }
 
-NSArray<NSNumber *> *parseVersion(NSString *version)
+// The plugin this helper belongs to, when it can be updated in place.
+NSURL *gPluginURL = nil;
+
+void showUpdateResult(NSString *message, NSString *detail, bool offerReleasePage)
 {
-    if (![version isKindOfClass:[NSString class]])
-        return nil;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = message;
+    alert.informativeText = detail;
+    [alert addButtonWithTitle:@"OK"];
+    if (offerReleasePage)
+        [alert addButtonWithTitle:@"View Release"];
 
-    NSString *normalized = [version stringByTrimmingCharactersInSet:
-        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if ([normalized hasPrefix:@"v"] || [normalized hasPrefix:@"V"])
-        normalized = [normalized substringFromIndex:1];
-
-    NSArray<NSString *> *parts = [normalized componentsSeparatedByString:@"."];
-    if (parts.count != 3)
-        return nil;
-
-    NSMutableArray<NSNumber *> *numbers = [NSMutableArray arrayWithCapacity:3];
-    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
-    for (NSString *part in parts) {
-        if (part.length == 0 || [part rangeOfCharacterFromSet:nonDigits].location != NSNotFound)
-            return nil;
-        [numbers addObject:@(part.integerValue)];
-    }
-    return numbers;
+    [NSApp activateIgnoringOtherApps:YES];
+    if ([alert runModal] == NSAlertSecondButtonReturn)
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kLatestReleasePage]];
 }
 
-bool isNewerVersion(NSString *candidate, NSString *current)
+// Downloads the release zip and stages it beside the plugin. The swap itself
+// happens when OBS has quit (see installStagedUpdateAfterOBS).
+void downloadUpdate(OBSAirPlayReleaseAsset *asset, pid_t parentPID)
 {
-    NSArray<NSNumber *> *candidateParts = parseVersion(candidate);
-    NSArray<NSNumber *> *currentParts = parseVersion(current);
-    if (!candidateParts || !currentParts)
-        return false;
+    NSString *userAgent = [NSString stringWithFormat:
+        @"OBS-AirPlay-Update-Checker/%s", PLUGIN_VERSION];
+    OBSAirPlayDownloadAndStageUpdate(asset, gPluginURL, userAgent, ^(NSError *failure) {
+        if (failure)
+            NSLog(@"[OBS AirPlay Update] %@ not staged: %@", asset.version,
+                  failure.localizedDescription);
+        else
+            NSLog(@"[OBS AirPlay Update] %@ staged; installs when OBS quits", asset.version);
 
-    for (NSUInteger index = 0; index < 3; ++index) {
-        const NSInteger candidatePart = candidateParts[index].integerValue;
-        const NSInteger currentPart = currentParts[index].integerValue;
-        if (candidatePart != currentPart)
-            return candidatePart > currentPart;
-    }
-    return false;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!parentIsAlive(parentPID))
+                return;
+            if (failure) {
+                showUpdateResult(
+                    [NSString stringWithFormat:@"OBS AirPlay %@ could not be installed",
+                                               asset.version],
+                    [NSString stringWithFormat:
+                        @"%@ Nothing was changed. You can install it from the release page.",
+                        failure.localizedDescription],
+                    true);
+            } else {
+                showUpdateResult(
+                    [NSString stringWithFormat:@"OBS AirPlay %@ is ready", asset.version],
+                    @"It will be installed when you quit OBS.", false);
+            }
+        });
+    });
 }
 
-void showUpdatePrompt(NSString *latestVersion, NSString *currentVersion)
+void showUpdatePrompt(NSString *latestVersion, NSString *currentVersion,
+                      OBSAirPlayReleaseAsset *asset, pid_t parentPID)
 {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.alertStyle = NSAlertStyleInformational;
     alert.messageText = [NSString stringWithFormat:
         @"OBS AirPlay %@ is available", latestVersion];
-    alert.informativeText = [NSString stringWithFormat:
-        @"You are using %@. Close OBS before installing the update.", currentVersion];
+    if (asset) {
+        alert.informativeText = [NSString stringWithFormat:
+            @"You are using %@. The update is downloaded now and installed when you quit OBS.",
+            currentVersion];
+        [alert addButtonWithTitle:@"Install Update"];
+    } else {
+        alert.informativeText = [NSString stringWithFormat:
+            @"You are using %@. Close OBS before installing the update.", currentVersion];
+    }
     [alert addButtonWithTitle:@"View Release"];
     [alert addButtonWithTitle:@"Later"];
     [alert addButtonWithTitle:@"Skip This Version"];
 
     [NSApp activateIgnoringOtherApps:YES];
-    const NSModalResponse response = [alert runModal];
-    if (response == NSAlertFirstButtonReturn) {
+    // Buttons are numbered from NSAlertFirstButtonReturn in the order added.
+    NSInteger choice = [alert runModal] - NSAlertFirstButtonReturn;
+    if (!asset)
+        ++choice;
+    if (choice == 0) {
+        downloadUpdate(asset, parentPID);
+    } else if (choice == 1) {
         [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kLatestReleasePage]];
-    } else if (response == NSAlertThirdButtonReturn) {
+    } else if (choice == 3) {
         [[NSUserDefaults standardUserDefaults] setObject:latestVersion
                                                   forKey:kSkippedVersionKey];
     }
+}
+
+NSString *currentVersion()
+{
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+}
+
+// An update staged earlier is kept only while it is newer than this plugin
+// (it is not, once installed another way); a download cut short is removed.
+void tidyStagedUpdate()
+{
+    if (gPluginURL &&
+        !OBSAirPlayIsNewerVersion(OBSAirPlayStagedUpdateVersion(gPluginURL), currentVersion()))
+        OBSAirPlayDiscardStagedUpdate(gPluginURL);
+}
+
+// Called once OBS has gone: nothing is using the plugin any more.
+void installStagedUpdateAfterOBS()
+{
+    if (!gPluginURL)
+        return;
+    NSString *staged = OBSAirPlayStagedUpdateVersion(gPluginURL);
+    if (!OBSAirPlayIsNewerVersion(staged, currentVersion()))
+        return;
+
+    NSError *error = nil;
+    if (OBSAirPlayInstallStagedUpdate(gPluginURL, &error))
+        NSLog(@"[OBS AirPlay Update] installed %@", staged);
+    else
+        NSLog(@"[OBS AirPlay Update] %@ not installed: %@", staged, error.localizedDescription);
 }
 
 void checkForUpdates(pid_t parentPID)
@@ -129,18 +185,27 @@ void checkForUpdates(pid_t parentPID)
                                                                     error:&jsonError];
         NSString *latestVersion = [release isKindOfClass:[NSDictionary class]]
             ? release[@"tag_name"] : nil;
-        NSString *currentVersion = [[NSBundle mainBundle]
-            objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-        if (jsonError || !isNewerVersion(latestVersion, currentVersion))
+        NSString *installedVersion = currentVersion();
+        if (jsonError || !OBSAirPlayIsNewerVersion(latestVersion, installedVersion))
             return;
 
         NSString *skippedVersion = [defaults stringForKey:kSkippedVersionKey];
         if ([skippedVersion isEqualToString:latestVersion])
             return;
 
+        // Without a plugin this user can replace, or a release zip with a
+        // published digest, the prompt only offers the release page.
+        OBSAirPlayReleaseAsset *asset = nil;
+        if (gPluginURL) {
+            asset = OBSAirPlayInstallableAsset(release, OBSAirPlayUpdaterArchitecture());
+            // Already downloaded and waiting for OBS to quit.
+            if (asset && [OBSAirPlayStagedUpdateVersion(gPluginURL) isEqualToString:asset.version])
+                return;
+        }
+
         dispatch_async(dispatch_get_main_queue(), ^{
             if (parentIsAlive(parentPID))
-                showUpdatePrompt(latestVersion, currentVersion);
+                showUpdatePrompt(latestVersion, installedVersion, asset, parentPID);
         });
     }];
     [task resume];
@@ -204,6 +269,11 @@ int main(int argc, const char *argv[])
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
+        NSURL *pluginURL = OBSAirPlayPluginURLForHelper([NSBundle mainBundle].bundleURL);
+        if (pluginURL && OBSAirPlayCanReplacePlugin(pluginURL))
+            gPluginURL = pluginURL;
+        tidyStagedUpdate();
+
         __strong AirPlayBLEDelegate *delegate = [[AirPlayBLEDelegate alloc] init];
         (void)delegate;
 
@@ -212,8 +282,10 @@ int main(int argc, const char *argv[])
         NSTimer *parentWatch = [NSTimer timerWithTimeInterval:1.0
                                                       repeats:YES
                                                         block:^(__unused NSTimer *timer) {
-            if (kill(parentPID, 0) != 0 && errno == ESRCH)
+            if (kill(parentPID, 0) != 0 && errno == ESRCH) {
+                installStagedUpdateAfterOBS();
                 exit(0);
+            }
         }];
         [[NSRunLoop mainRunLoop] addTimer:parentWatch forMode:NSRunLoopCommonModes];
 
