@@ -2,7 +2,7 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.4.0** — one-click updates: the plugin downloads a new release and installs it when you quit OBS ([release notes](RELEASE_NOTES_v2.4.0.md)).
+Current release: **v2.4.1** — the first release delivered through one-click updates; no other changes since v2.4.0 ([release notes](RELEASE_NOTES_v2.4.1.md), [v2.4.0 notes](RELEASE_NOTES_v2.4.0.md)).
 
 ## What's new in v2.4.0
 
