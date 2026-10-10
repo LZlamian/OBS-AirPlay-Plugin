@@ -2,7 +2,13 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.3.0** — hardware (VideoToolbox) decoding for screen mirroring and AirPlay video, plus stability and security fixes ([release notes](RELEASE_NOTES_v2.3.0.md)).
+Current release: **v2.4.0** — one-click updates: the plugin downloads a new release and installs it when you quit OBS ([release notes](RELEASE_NOTES_v2.4.0.md)).
+
+## What's new in v2.4.0
+
+- **Install Update** in the update prompt: the new release is downloaded in the background and installed when you quit OBS, with no administrator password
+- Downloads are checked against the SHA-256 digest GitHub publishes, and the plugin's code seal is verified before anything is replaced
+- Nothing is downloaded or installed unless you click **Install Update**
 
 ## What's new in v2.3.0
 
@@ -24,7 +30,7 @@ Current release: **v2.3.0** — hardware (VideoToolbox) decoding for screen mirr
 - A rejected `/play` no longer drops the AirPlay connection
 - Optional `[MEDIA-TRACE]` protocol trace for diagnosing AirPlay video senders
 
-See the [v2.2.0 release notes](RELEASE_NOTES_v2.2.0.md) for the complete summary, and the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for Safari Media AirPlay.
+See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) release notes for the complete summaries, and the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for Safari Media AirPlay.
 
 ## Features
 
@@ -46,7 +52,7 @@ See the [v2.2.0 release notes](RELEASE_NOTES_v2.2.0.md) for the complete summary
 - ✅ **Persistent receiver identity** — keeps Bonjour and AirPlay key identity stable across OBS restarts
 - ✅ **Sub-second initial connection** — an optimized receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
 - ✅ **Fast first frame** — optimized TCP negotiation and detailed connection telemetry bring a typical tap-to-OBS-frame time below one second
-- ✅ **Update notifications** — checks for a newer stable GitHub release at most once per day and lets you view, defer, or skip it
+- ✅ **One-click updates** — checks for a newer stable GitHub release at most once per day; one click downloads it and installs it when you quit OBS, with no administrator password
 
 ## Requirements
 
@@ -87,15 +93,30 @@ Download the latest `.pkg` installer from the [Releases page](https://github.com
 The release package contains its runtime dependencies; Homebrew is not required
 to install it.
 
-### Update notifications
+### Updates
 
 OBS AirPlay checks GitHub's stable-release endpoint at most once every 24 hours.
-When a newer version is available, **OBS AirPlay Discovery** prompts you to view
-the release, try again later, or skip that version. It never downloads or
-installs an update silently; close OBS before running the downloaded installer.
+When a newer version is available, **OBS AirPlay Discovery** offers to install
+it, show the release page, ask again later, or skip that version.
+
+**Install Update** downloads the release zip in the background while OBS keeps
+running, and replaces the plugin when you quit OBS. The next time OBS starts it
+runs the new version. No administrator password is needed, because only the
+copy in your own `~/Library/Application Support/obs-studio/plugins` is replaced.
+
+- Nothing is downloaded or installed unless you click **Install Update**.
+- The download must match the SHA-256 digest GitHub publishes for the release
+  file, must be this plugin at the announced version, and must be intact
+  (its code seal is checked after download and again before installing).
+  Anything else is discarded and the installed plugin is left as it is.
+- If the plugin is somewhere you cannot write to, or a release has no zip for
+  your Mac, the prompt offers only the release page, as before.
+- An update that is waiting can be cancelled by deleting the hidden folder
+  `.obs-airplay.update` next to the plugin.
 
 The check sends a standard HTTPS request to `api.github.com`. It contains the
 installed plugin version in its User-Agent and no OBS settings or AirPlay data.
+The download comes from `github.com`.
 
 ### Build from source
 
