@@ -2,7 +2,12 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.5.0** — an option to keep AirPlay video in step with a sending app that plays the video itself ([release notes](RELEASE_NOTES_v2.5.0.md)).
+Current release: **v2.5.1** — the source goes empty when a device disconnects, instead of keeping its last frame ([release notes](RELEASE_NOTES_v2.5.1.md)).
+
+## What's new in v2.5.1
+
+- When a device ends its AirPlay session or its connection closes, the source is cleared about half a second later; the last frame no longer stays frozen in OBS
+- A device that reconnects or switches items straight away still replaces the picture without an empty source in between
 
 ## What's new in v2.5.0
 
@@ -57,6 +62,7 @@ See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) 
 - ✅ **Persistent receiver identity** — keeps Bonjour and AirPlay key identity stable across OBS restarts
 - ✅ **Sub-second initial connection** — an optimized receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
 - ✅ **Fast first frame** — optimized TCP negotiation and detailed connection telemetry bring a typical tap-to-OBS-frame time below one second
+- ✅ **Clean disconnects** — the source goes empty when a device stops AirPlay, rather than holding its last frame
 - ✅ **In step with the sending app** — optional: AirPlay video is timed from the sender's commands, for apps that also play the video on the device
 - ✅ **One-click updates** — checks for a newer stable GitHub release at most once per day; one click downloads it and installs it when you quit OBS, with no administrator password
 
@@ -238,6 +244,9 @@ You should now see your device mirrored through AirPlay as an OBS source 🎉
 3. **Start Streaming**
    - Your iOS screen should now appear in OBS
    - The source will automatically adjust to the device resolution
+
+4. **Stop**
+   - When the device stops AirPlay, the source goes empty about half a second later
 
 ### Troubleshooting
 
