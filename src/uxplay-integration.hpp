@@ -120,7 +120,17 @@ private:
     std::atomic<bool> m_clear_pending{false};  // written under m_clear_mutex
     bool m_clear_exit = false;
     std::chrono::steady_clock::time_point m_clear_deadline;
-    void scheduleDeferredClear();
+    const char* m_clear_reason = "";            // under m_clear_mutex
+    // Open AirPlay connections of any kind. When the last one closes, or the
+    // device ends its session (a TEARDOWN of everything), no device is
+    // sending: the frame it left behind must not stay on screen.
+    std::atomic<int> m_open_connections{0};
+    // A picture from a device has been shown since the output was last
+    // cleared. Devices that only look at the receiver (GET /info while the
+    // AirPlay menu is open) connect and leave without one.
+    std::atomic<bool> m_frame_shown{false};
+    // `reason` (a string literal) goes to the log when the clear happens.
+    void scheduleDeferredClear(const char* reason = "no new AirPlay video item followed /stop");
     void cancelDeferredClear();
     void deferredClearLoop();
 };

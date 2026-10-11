@@ -96,12 +96,13 @@ UxPlayIntegration::~UxPlayIntegration()
     }
 }
 
-void UxPlayIntegration::scheduleDeferredClear()
+void UxPlayIntegration::scheduleDeferredClear(const char* reason)
 {
     constexpr auto kGracePeriod = std::chrono::milliseconds(450);
     {
         std::lock_guard<std::mutex> lock(m_clear_mutex);
         m_clear_pending = true;
+        m_clear_reason = reason;
         m_clear_deadline = std::chrono::steady_clock::now() + kGracePeriod;
     }
     m_clear_cv.notify_all();
@@ -109,6 +110,7 @@ void UxPlayIntegration::scheduleDeferredClear()
 
 void UxPlayIntegration::onMirrorFrameOutput()
 {
+    m_frame_shown.store(true, std::memory_order_relaxed);
     // Only a decoded picture counts; codec headers alone do not replace the
     // held frame (seen after iOS resumes an idle mirror stream).
     if (m_clear_pending) {
@@ -135,10 +137,21 @@ void UxPlayIntegration::deferredClearLoop()
             continue;
         }
         m_clear_pending = false;
+        const char* reason = m_clear_reason;
         lock.unlock();
-        blog(LOG_INFO, "[MEDIA] no new AirPlay video item followed /stop; clearing output");
-        // The mirror stream may still be running; only the picture is cleared.
-        processConnReset(true, false);
+        blog(LOG_INFO, "[MEDIA] %s; clearing output", reason);
+        m_frame_shown.store(false);
+        if (m_open_connections.load() <= 0) {
+            // No device is connected any more: nothing may keep playing, and
+            // the next stream starts with fresh decoders.
+            if (m_media_active.exchange(false) && m_media_player) {
+                m_media_player->stop();
+            }
+            processConnReset(true, true);
+        } else {
+            // The mirror stream may still be running; only the picture is cleared.
+            processConnReset(true, false);
+        }
         lock.lock();
     }
 }
@@ -209,12 +222,46 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // Timing: fires when iOS first TCP-connects (before handshake).
         callbacks.conn_init = [](void* cls) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (self) {
+                self->m_open_connections.fetch_add(1);
+            }
             const uint64_t now = os_gettime_ns();
             bool expected = false;
             if (self && self->m_connection_timing_active.compare_exchange_strong(expected, true)) {
                 self->m_first_video_logged.store(false, std::memory_order_relaxed);
                 self->m_connection_started_ns.store(now);
                 blog(LOG_INFO, "[CONNECT] +0.00ms TCP accepted — AirPlay negotiation starting");
+            }
+        };
+        // A device that goes away leaves its last frame behind unless the
+        // output is cleared: after a short grace period, so that a new
+        // connection that shows something at once (an item switch, a
+        // reconnect) replaces the frame without an empty source in between.
+        callbacks.conn_destroy = [](void* cls) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (!self) {
+                return;
+            }
+            if (self->m_open_connections.fetch_sub(1) <= 1) {
+                self->m_open_connections.store(0);
+                self->m_connection_timing_active.store(false);
+                if (self->m_frame_shown.load()) {
+                    self->scheduleDeferredClear("the last AirPlay connection closed");
+                }
+            }
+        };
+        // A TEARDOWN that names no stream ends the device's whole mirroring
+        // session (UxPlay reports a video reset only for a single stream).
+        callbacks.conn_teardown = [](void* cls, bool* teardown_96, bool* teardown_110) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            if (!self || (teardown_96 && *teardown_96) || (teardown_110 && *teardown_110)) {
+                return;
+            }
+            self->processConnReset(false, true);
+            // iOS also ends its mirroring session while AirPlay video goes
+            // on over other connections; that item stays.
+            if (!self->m_media_active.load() && self->m_frame_shown.load()) {
+                self->scheduleDeferredClear("the device ended its AirPlay session");
             }
         };
         callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) {
@@ -332,6 +379,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             // mirroring without a new keyframe, so leave the mirror decoder.
             self->processConnReset(false, false);
             self->m_media_active.store(true);
+            self->m_frame_shown.store(true);
             self->m_media_player->play(location, start_position);
         };
         callbacks.on_video_scrub = [](void* cls, const float position) {
