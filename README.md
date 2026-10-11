@@ -2,7 +2,12 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.4.2** — update alerts show OBS's icon; one-click updates arrived in v2.4.0 ([release notes](RELEASE_NOTES_v2.4.2.md), [v2.4.0 notes](RELEASE_NOTES_v2.4.0.md)).
+Current release: **v2.5.0** — an option to keep AirPlay video in step with a sending app that plays the video itself ([release notes](RELEASE_NOTES_v2.5.0.md)).
+
+## What's new in v2.5.0
+
+- New source option **Keep AirPlay video in step with the sending app** (off by default): playback is timed from the sender's play, seek or resume command, so OBS no longer runs behind by the time a file took to open
+- A `[MEDIA] in step with the sender` log line reports how closely each start matched
 
 ## What's new in v2.4.0
 
@@ -52,6 +57,7 @@ See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) 
 - ✅ **Persistent receiver identity** — keeps Bonjour and AirPlay key identity stable across OBS restarts
 - ✅ **Sub-second initial connection** — an optimized receiver profile and Bluetooth discovery signal eliminate the multi-second delay before iOS opens its first connection
 - ✅ **Fast first frame** — optimized TCP negotiation and detailed connection telemetry bring a typical tap-to-OBS-frame time below one second
+- ✅ **In step with the sending app** — optional: AirPlay video is timed from the sender's commands, for apps that also play the video on the device
 - ✅ **One-click updates** — checks for a newer stable GitHub release at most once per day; one click downloads it and installs it when you quit OBS, with no administrator password
 
 ## Requirements
