@@ -1,6 +1,7 @@
 #include "airplay-source.hpp"
 #include "airplay-server.hpp"
 #include "uxplay-integration.hpp"
+#include "media-player.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <atomic>
@@ -60,6 +61,8 @@ void* airplay_source_create(obs_data_t* settings, obs_source_t* source)
         update_server_name(saved_name);
     }
 
+    MediaPlayer::setFollowSenderClock(obs_data_get_bool(settings, "follow_sender_clock"));
+
     blog(LOG_INFO, "AirPlay source created");
     return airplay_source;
 }
@@ -75,6 +78,7 @@ void airplay_source_get_defaults(obs_data_t* settings)
 {
     obs_data_set_default_string(settings, "server_name", "OBS AirPlay");
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
+    obs_data_set_default_bool(settings, "follow_sender_clock", false);
 }
 
 static bool reset_server_name_clicked(obs_properties_t* props, obs_property_t* property,
@@ -124,6 +128,14 @@ obs_properties_t* airplay_source_get_properties(void* data)
             "Status: Server not running", OBS_TEXT_INFO);
     }
 
+    obs_property_t* follow = obs_properties_add_bool(props, "follow_sender_clock",
+        "Keep AirPlay video in step with the sending app");
+    obs_property_set_long_description(follow,
+        "For apps that also play the video on the device, such as Shelf. "
+        "A video starts where the app has got to by the time its first picture is ready, "
+        "skipping the moment it took to open, so OBS does not run behind the device. "
+        "Leave off for Safari and other apps that wait for the receiver.");
+
     obs_properties_add_bool(props, "log_latency_telemetry",
         "Log latency telemetry (decode/output ms, every 120 video / 240 audio frames)");
 
@@ -147,6 +159,7 @@ void airplay_source_update(void* data, obs_data_t* settings)
     g_latency_telemetry_enabled.store(
         obs_data_get_bool(settings, "log_latency_telemetry"),
         std::memory_order_relaxed);
+    MediaPlayer::setFollowSenderClock(obs_data_get_bool(settings, "follow_sender_clock"));
 }
 
 void airplay_source_show(void* data)

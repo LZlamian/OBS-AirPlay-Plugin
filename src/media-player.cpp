@@ -610,6 +610,10 @@ private:
 
 } // namespace
 
+namespace {
+std::atomic<bool> g_follow_sender_clock{false};
+}
+
 class MediaPlayer::Impl {
 public:
     ~Impl()
@@ -637,6 +641,9 @@ public:
             info = {};
             info.position = std::max(0.0, start_position);
             info.rate = 1.0f;
+            anchor_valid = true;
+            anchor_position = info.position;
+            anchor_wall_time = std::chrono::steady_clock::now();
             seek_pending = false;
             seek_target = info.position;
             // The demuxer lands on the keyframe before the start position;
@@ -670,6 +677,7 @@ public:
         info.playback_buffer_full = false;
         info.playback_likely_to_keep_up = false;
         clock_initialized = false;
+        anchor_valid = false;
     }
 
     void seek(double position)
@@ -713,6 +721,10 @@ public:
         seek_pending = true;
         ++seek_generation;
         info.position = seek_target;
+        // The sender is at this position now (if it is playing).
+        anchor_valid = info.rate > 0.0f;
+        anchor_position = seek_target;
+        anchor_wall_time = seek_time;
         discard_video_before = discard_audio_before = seek_target;
         resync_on_resume = false;
         // While paused, show the frame at the new position once so the
@@ -727,7 +739,23 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex);
         // Safari normally sends only 0 (pause) and 1 (play). Positive values
         // are still accepted so protocol diagnostics remain honest.
+        const float previous_rate = info.rate;
         info.rate = rate > 0.0f ? rate : 0.0f;
+        const auto rate_time = std::chrono::steady_clock::now();
+        if (info.rate <= 0.0f) {
+            anchor_valid = false;
+        } else if (previous_rate <= 0.0f) {
+            // The sender starts playing now, from where the output stands.
+            anchor_valid = true;
+            anchor_position = seek_pending ? seek_target : info.position;
+            anchor_wall_time = rate_time;
+        } else if (anchor_valid && !clock_initialized && previous_rate != info.rate) {
+            // A new speed before the first picture: the sender has moved on
+            // at the old one since its last command.
+            anchor_position += std::chrono::duration<double>(
+                rate_time - anchor_wall_time).count() * previous_rate;
+            anchor_wall_time = rate_time;
+        }
         if (clock_initialized) {
             // Continue from the last presented frame at the new rate.
             clock_media_position = info.position;
@@ -753,6 +781,7 @@ public:
         std::lock_guard<std::mutex> lock(state_mutex);
         info.rate = 0.0f;
         clock_initialized = false;
+        anchor_valid = false;
         state_cv.notify_all();
         return static_cast<float>(info.position);
     }
@@ -950,9 +979,17 @@ private:
         std::lock_guard<std::mutex> lock(state_mutex);
         // Frames still in the decoder from before a pending seek are stale.
         if (seek_pending) return true;
+        constexpr double kFrameTolerance = 0.020;
+        // Following the sender's clock: until the first frame after a start,
+        // seek or resume has been presented, frames the sender has already
+        // passed (while the file was opened, or the frame was found from its
+        // keyframe) are skipped, so the output starts in step with it.
+        if (followsSenderClock() && !clock_initialized &&
+            position + kFrameTolerance < senderPositionLocked()) {
+            return true;
+        }
         double& discard_before = is_video ? discard_video_before : discard_audio_before;
         if (discard_before < 0.0) return false;
-        constexpr double kFrameTolerance = 0.020;
         if (position + kFrameTolerance < discard_before) return true;
         discard_before = -1.0;
         return false;
@@ -994,8 +1031,14 @@ private:
             const auto now = std::chrono::steady_clock::now();
             if (!clock_initialized) {
                 clock_initialized = true;
-                clock_media_position = position;
-                clock_wall_time = now;
+                if (followsSenderClock()) {
+                    // Timed from the sender's command, not from this frame.
+                    clock_media_position = anchor_position;
+                    clock_wall_time = anchor_wall_time;
+                } else {
+                    clock_media_position = position;
+                    clock_wall_time = now;
+                }
             }
             // Recomputed on every wake-up: setRate() re-anchors the clock at
             // the last presented frame, so rate changes apply immediately
@@ -1718,6 +1761,24 @@ private:
     double discard_audio_before = -1.0;
     bool preview_pending = false;
     bool resync_on_resume = false;
+    // Where the sender said playback is, and when it said so (a play, seek
+    // or resume command while playing). See setFollowSenderClock().
+    bool anchor_valid = false;
+    double anchor_position = 0.0;
+    std::chrono::steady_clock::time_point anchor_wall_time;
+
+    // Both need state_mutex held.
+    bool followsSenderClock() const
+    {
+        return anchor_valid && info.rate > 0.0f &&
+               g_follow_sender_clock.load(std::memory_order_relaxed);
+    }
+    double senderPositionLocked() const
+    {
+        return anchor_position + std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - anchor_wall_time).count() * info.rate;
+    }
+
     bool clock_initialized = false;
     double clock_media_position = 0.0;
     std::chrono::steady_clock::time_point clock_wall_time;
@@ -1773,6 +1834,11 @@ void MediaPlayer::setRate(float rate)
 float MediaPlayer::pauseForPlaylistRemoval()
 {
     return m_impl->pauseForPlaylistRemoval();
+}
+
+void MediaPlayer::setFollowSenderClock(bool follow)
+{
+    g_follow_sender_clock.store(follow, std::memory_order_relaxed);
 }
 
 MediaPlaybackInfo MediaPlayer::getPlaybackInfo() const

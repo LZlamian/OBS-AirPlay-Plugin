@@ -319,8 +319,87 @@ int scrubLatency(const char* location, int min_drag_frames, int drag_gap_ms)
     return ok ? 0 : 1;
 }
 
+// Following the sender's clock (MediaPlayer::setFollowSenderClock): the
+// output is where a sender that started at the command, and has played on
+// since, would be: after a start mid-file, a jump while playing, and a
+// resume. Needs a file of 90 s or more.
+int followClock(const char* location)
+{
+    using clock = std::chrono::steady_clock;
+    std::atomic<unsigned int> video_frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0] && frame.width > 0) ++video_frames;
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    const auto wait_for = [](int ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    };
+    const auto since = [](clock::time_point from) {
+        return std::chrono::duration<double>(clock::now() - from).count();
+    };
+    // The output may be a frame or two off the sender's clock.
+    constexpr double kTolerance = 0.12;
+    bool ok = true;
+    const auto check = [&](const char* what, double position, double expected) {
+        const bool good = std::fabs(position - expected) <= kTolerance;
+        std::fprintf(stderr, "media-smoke: follow-clock %s: output %.3fs, sender %.3fs (%+.3fs) %s\n",
+                     what, position, expected, position - expected, good ? "ok" : "FAILED");
+        ok = ok && good;
+    };
+
+    MediaPlayer::setFollowSenderClock(true);
+    auto anchor = clock::now();
+    player.play(location, 21.0);
+    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) wait_for(10);
+    const double first_wait = since(anchor);
+    wait_for(1500);
+    check("start", player.getPlaybackInfo().position, 21.0 + since(anchor));
+
+    anchor = clock::now();
+    player.seek(61.0);
+    wait_for(1200);
+    check("jump while playing", player.getPlaybackInfo().position, 61.0 + since(anchor));
+
+    player.setRate(0.0f);
+    wait_for(600);
+    const double paused_at = player.getPlaybackInfo().position;
+    anchor = clock::now();
+    player.setRate(1.0f);
+    wait_for(1200);
+    check("resume", player.getPlaybackInfo().position, paused_at + since(anchor));
+
+    // A jump while paused shows that frame; playing then starts from it.
+    player.setRate(0.0f);
+    player.seek(41.0);
+    wait_for(800);
+    check("jump while paused", player.getPlaybackInfo().position, 41.0);
+    anchor = clock::now();
+    player.setRate(1.0f);
+    wait_for(1200);
+    check("resume after a paused jump", player.getPlaybackInfo().position, 41.0 + since(anchor));
+    player.stop();
+
+    // Off: the start waits for the first picture and begins at the position named.
+    MediaPlayer::setFollowSenderClock(false);
+    video_frames.store(0);
+    player.play(location, 21.0);
+    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) wait_for(10);
+    const auto first_frame = clock::now();
+    wait_for(1000);
+    check("off, start", player.getPlaybackInfo().position, 21.0 + since(first_frame));
+    player.stop();
+
+    std::fprintf(stderr, "media-smoke: follow-clock first picture %.0f ms after the start; %s\n",
+                 first_wait * 1000.0, ok ? "passed" : "FAILED");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc == 3 && std::strcmp(argv[1], "--follow-clock") == 0) {
+        return followClock(argv[2]);
+    }
     if (argc >= 3 && argc <= 5 && std::strcmp(argv[1], "--scrub-latency") == 0) {
         return scrubLatency(argv[2], argc >= 4 ? std::atoi(argv[3]) : 0,
                             argc == 5 ? std::atoi(argv[4]) : 50);

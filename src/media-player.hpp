@@ -65,6 +65,15 @@ public:
     float pauseForPlaylistRemoval();
     MediaPlaybackInfo getPlaybackInfo() const;
 
+    // For a sender that also plays the video on the device (and so runs on
+    // its own clock): playback is timed from the moment a play, seek or
+    // resume command arrived and the position it named, and the pictures
+    // that became late while the file was opened or the frame was found are
+    // skipped. Off (the default), playback starts at the position named
+    // whenever the first picture is ready, which suits a sender that follows
+    // the receiver. Applies to every player.
+    static void setFollowSenderClock(bool follow);
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
