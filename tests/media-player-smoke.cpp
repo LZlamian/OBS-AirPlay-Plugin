@@ -423,8 +423,11 @@ int followClock(const char* location)
 
 // Following the sender's clock, an item shorter than the time it took to
 // open (a 2 s still clip over a slow network): by then the sender is past
-// its end, and it must still show a picture. CLIP is 3 s or shorter.
-int followClockShortItem(const char* location)
+// its end, and it must still show a picture: also a still of one frame a
+// second, or of a single frame, whose last frame starts long before the end.
+// CLIP is 3 s or shorter. With "quick", the file opens at once: the frame at
+// the start is the one on screen and must be shown without waiting for the next.
+int followClockShortItem(const char* location, bool quick = false)
 {
     std::atomic<unsigned int> video_frames{0};
     MediaPlayer player;
@@ -433,18 +436,19 @@ int followClockShortItem(const char* location)
     });
     player.setAudioCallback([](const MediaAudioFrame&) {});
     MediaPlayer::setFollowSenderClock(true);
-    MediaPlayer::setOpenDelayForTesting(3500);
+    MediaPlayer::setOpenDelayForTesting(quick ? 300 : 3500);
     player.play(location, 0.0);
-    for (int i = 0; i < 120 && video_frames.load() == 0; ++i) {
+    // (quick: within 0.7 s, before a second frame a second in could arrive)
+    for (int i = 0; i < (quick ? 14 : 120) && video_frames.load() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    if (!quick) std::this_thread::sleep_for(std::chrono::milliseconds(300));
     const unsigned int shown = video_frames.load();
     player.stop();
     MediaPlayer::setOpenDelayForTesting(0);
     MediaPlayer::setFollowSenderClock(false);
-    std::fprintf(stderr, "media-smoke: follow-clock short item opened late: %u picture(s) -> %s\n",
-                 shown, shown > 0 ? "ok" : "FAILED");
+    std::fprintf(stderr, "media-smoke: follow-clock short item opened %s: %u picture(s) -> %s\n",
+                 quick ? "in 0.3 s" : "late", shown, shown > 0 ? "ok" : "FAILED");
     return shown > 0 ? 0 : 1;
 }
 
@@ -455,6 +459,9 @@ int main(int argc, char** argv)
     }
     if (argc == 3 && std::strcmp(argv[1], "--follow-clock-short") == 0) {
         return followClockShortItem(argv[2]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--follow-clock-short-quick") == 0) {
+        return followClockShortItem(argv[2], true);
     }
     if (argc >= 3 && argc <= 5 && std::strcmp(argv[1], "--scrub-latency") == 0) {
         return scrubLatency(argv[2], argc >= 4 ? std::atoi(argv[3]) : 0,

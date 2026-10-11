@@ -978,7 +978,9 @@ private:
         return true;
     }
 
-    bool shouldDiscard(double position, bool is_video)
+    // `shown_for`: how long the frame is on screen (a video frame's
+    // duration; 0 when unknown, and for audio).
+    bool shouldDiscard(double position, bool is_video, double shown_for = 0.0)
     {
         std::lock_guard<std::mutex> lock(state_mutex);
         // Frames still in the decoder from before a pending seek are stale.
@@ -987,12 +989,16 @@ private:
         // Following the sender's clock: after a start, seek or resume, the
         // frames the sender has already passed (while the file was opened,
         // or the frame was found from its keyframe) are skipped, so the
-        // output starts in step with it. Each stream catches up by itself:
-        // audio reaching the sender's position first must not let the video
-        // frames it skipped be shown in a burst.
+        // output starts in step with it. A frame is late only once it has
+        // ended: the picture the sender shows at a position is the last frame
+        // that starts at or before it, however long ago that was (a still
+        // clip of one frame a second, or of a single frame). Each stream
+        // catches up by itself: audio reaching the sender's position first
+        // must not let the video frames it skipped be shown in a burst.
         bool& catching_up = is_video ? catching_up_video : catching_up_audio;
         if (catching_up) {
-            if (followsSenderClock() && position + kFrameTolerance < catchUpPositionLocked()) {
+            if (followsSenderClock() &&
+                position + std::max(0.0, shown_for) + kFrameTolerance < catchUpPositionLocked()) {
                 return true;
             }
             catching_up = false;
@@ -1104,6 +1110,18 @@ private:
         return true;
     }
 
+    // How long a decoded video frame is shown: its own duration, or the
+    // stream's frame interval when the frame carries none; 0 if neither is known.
+    static double frameSeconds(const AVFrame* decoded, const AVStream* stream)
+    {
+        if (decoded->duration > 0) {
+            return decoded->duration * av_q2d(stream->time_base);
+        }
+        const AVRational rate = stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0
+            ? stream->avg_frame_rate : stream->r_frame_rate;
+        return rate.num > 0 && rate.den > 0 ? av_q2d(av_inv_q(rate)) : 0.0;
+    }
+
     void emitVideo(AVFrame* decoded, AVStream* stream, double format_start_seconds,
                    VideoOutput* out)
     {
@@ -1120,7 +1138,7 @@ private:
             return;
         }
         bool coarse_preview = false;
-        if (shouldDiscard(position, true)) {
+        if (shouldDiscard(position, true, frameSeconds(decoded, stream))) {
             if (!takeCoarsePreview(position)) {
                 return;
             }
@@ -1792,10 +1810,11 @@ private:
         return anchor_position + std::chrono::duration<double>(
             std::chrono::steady_clock::now() - anchor_wall_time).count() * info.rate;
     }
-    // Frames before this are skipped while a stream catches up. Never past
-    // the end of the item: one that is shorter than the time it took to open
-    // (a still clip on a slow network, a start close to the end) still shows
-    // its last frames. With no known duration nothing is skipped.
+    // Frames that ended before this are skipped while a stream catches up.
+    // Never past the end of the item: one that is shorter than the time it
+    // took to open (a still clip on a slow network, a start close to the end)
+    // still shows its last frame, also when that frame's own length isn't
+    // known. With no known duration nothing is skipped.
     double catchUpPositionLocked() const
     {
         if (!info.duration_known || info.duration <= 0.0) {
