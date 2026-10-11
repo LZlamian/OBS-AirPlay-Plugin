@@ -646,6 +646,7 @@ public:
             anchor_position = info.position;
             anchor_wall_time = std::chrono::steady_clock::now();
             catching_up_video = catching_up_audio = true;
+            skipped_video_frames = 0;
             seek_pending = false;
             seek_target = info.position;
             // The demuxer lands on the keyframe before the start position;
@@ -728,6 +729,7 @@ public:
         anchor_position = seek_target;
         anchor_wall_time = seek_time;
         catching_up_video = catching_up_audio = true;
+        skipped_video_frames = 0;
         discard_video_before = discard_audio_before = seek_target;
         resync_on_resume = false;
         // While paused, show the frame at the new position once so the
@@ -753,6 +755,7 @@ public:
             anchor_position = seek_pending ? seek_target : info.position;
             anchor_wall_time = rate_time;
             catching_up_video = catching_up_audio = true;
+            skipped_video_frames = 0;
         } else if (anchor_valid && previous_rate != info.rate) {
             // A new speed: the sender has moved on at the old one since its
             // last command.
@@ -999,7 +1002,17 @@ private:
         if (catching_up) {
             if (followsSenderClock() &&
                 position + std::max(0.0, shown_for) + kFrameTolerance < catchUpPositionLocked()) {
+                if (is_video) ++skipped_video_frames;
                 return true;
+            }
+            if (is_video && followsSenderClock()) {
+                // How well the output starts in step, for the log.
+                blog(LOG_INFO, "[MEDIA] in step with the sender: picture at %.3fs, sender at "
+                     "%.3fs, %.0f ms after its command (%u frames skipped)",
+                     position, senderPositionLocked(),
+                     std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - anchor_wall_time).count(),
+                     skipped_video_frames);
             }
             catching_up = false;
         }
@@ -1827,6 +1840,7 @@ private:
     // A stream is still skipping to the sender's position (see shouldDiscard).
     bool catching_up_video = false;
     bool catching_up_audio = false;
+    unsigned int skipped_video_frames = 0;
 
     bool clock_initialized = false;
     double clock_media_position = 0.0;
