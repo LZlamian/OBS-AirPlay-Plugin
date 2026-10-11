@@ -612,6 +612,7 @@ private:
 
 namespace {
 std::atomic<bool> g_follow_sender_clock{false};
+std::atomic<int> g_open_delay_for_testing_ms{0};
 }
 
 class MediaPlayer::Impl {
@@ -644,6 +645,7 @@ public:
             anchor_valid = true;
             anchor_position = info.position;
             anchor_wall_time = std::chrono::steady_clock::now();
+            catching_up_video = catching_up_audio = true;
             seek_pending = false;
             seek_target = info.position;
             // The demuxer lands on the keyframe before the start position;
@@ -725,6 +727,7 @@ public:
         anchor_valid = info.rate > 0.0f;
         anchor_position = seek_target;
         anchor_wall_time = seek_time;
+        catching_up_video = catching_up_audio = true;
         discard_video_before = discard_audio_before = seek_target;
         resync_on_resume = false;
         // While paused, show the frame at the new position once so the
@@ -749,9 +752,10 @@ public:
             anchor_valid = true;
             anchor_position = seek_pending ? seek_target : info.position;
             anchor_wall_time = rate_time;
-        } else if (anchor_valid && !clock_initialized && previous_rate != info.rate) {
-            // A new speed before the first picture: the sender has moved on
-            // at the old one since its last command.
+            catching_up_video = catching_up_audio = true;
+        } else if (anchor_valid && previous_rate != info.rate) {
+            // A new speed: the sender has moved on at the old one since its
+            // last command.
             anchor_position += std::chrono::duration<double>(
                 rate_time - anchor_wall_time).count() * previous_rate;
             anchor_wall_time = rate_time;
@@ -980,13 +984,18 @@ private:
         // Frames still in the decoder from before a pending seek are stale.
         if (seek_pending) return true;
         constexpr double kFrameTolerance = 0.020;
-        // Following the sender's clock: until the first frame after a start,
-        // seek or resume has been presented, frames the sender has already
-        // passed (while the file was opened, or the frame was found from its
-        // keyframe) are skipped, so the output starts in step with it.
-        if (followsSenderClock() && !clock_initialized &&
-            position + kFrameTolerance < senderPositionLocked()) {
-            return true;
+        // Following the sender's clock: after a start, seek or resume, the
+        // frames the sender has already passed (while the file was opened,
+        // or the frame was found from its keyframe) are skipped, so the
+        // output starts in step with it. Each stream catches up by itself:
+        // audio reaching the sender's position first must not let the video
+        // frames it skipped be shown in a burst.
+        bool& catching_up = is_video ? catching_up_video : catching_up_audio;
+        if (catching_up) {
+            if (followsSenderClock() && position + kFrameTolerance < catchUpPositionLocked()) {
+                return true;
+            }
+            catching_up = false;
         }
         double& discard_before = is_video ? discard_video_before : discard_audio_before;
         if (discard_before < 0.0) return false;
@@ -1400,6 +1409,9 @@ private:
         if (stop_requested.load(std::memory_order_acquire)) {
             return;
         }
+        if (const int delay = g_open_delay_for_testing_ms.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        }
         const auto open_started = std::chrono::steady_clock::now();
         AVFormatContext* format = avformat_alloc_context();
         if (!format) {
@@ -1770,7 +1782,9 @@ private:
     // Both need state_mutex held.
     bool followsSenderClock() const
     {
-        return anchor_valid && info.rate > 0.0f &&
+        // (An item of unknown length is left as it was: there is no telling
+        // how much of it may be skipped.)
+        return anchor_valid && info.rate > 0.0f && info.duration_known && info.duration > 0.0 &&
                g_follow_sender_clock.load(std::memory_order_relaxed);
     }
     double senderPositionLocked() const
@@ -1778,6 +1792,22 @@ private:
         return anchor_position + std::chrono::duration<double>(
             std::chrono::steady_clock::now() - anchor_wall_time).count() * info.rate;
     }
+    // Frames before this are skipped while a stream catches up. Never past
+    // the end of the item: one that is shorter than the time it took to open
+    // (a still clip on a slow network, a start close to the end) still shows
+    // its last frames. With no known duration nothing is skipped.
+    double catchUpPositionLocked() const
+    {
+        if (!info.duration_known || info.duration <= 0.0) {
+            return anchor_position;
+        }
+        constexpr double kKeptAtEnd = 0.25;
+        return std::min(senderPositionLocked(),
+                        std::max(anchor_position, info.duration - kKeptAtEnd));
+    }
+    // A stream is still skipping to the sender's position (see shouldDiscard).
+    bool catching_up_video = false;
+    bool catching_up_audio = false;
 
     bool clock_initialized = false;
     double clock_media_position = 0.0;
@@ -1839,6 +1869,11 @@ float MediaPlayer::pauseForPlaylistRemoval()
 void MediaPlayer::setFollowSenderClock(bool follow)
 {
     g_follow_sender_clock.store(follow, std::memory_order_relaxed);
+}
+
+void MediaPlayer::setOpenDelayForTesting(int milliseconds)
+{
+    g_open_delay_for_testing_ms.store(std::max(0, milliseconds), std::memory_order_relaxed);
 }
 
 MediaPlaybackInfo MediaPlayer::getPlaybackInfo() const

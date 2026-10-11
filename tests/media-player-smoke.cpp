@@ -380,6 +380,32 @@ int followClock(const char* location)
     check("resume after a paused jump", player.getPlaybackInfo().position, 41.0 + since(anchor));
     player.stop();
 
+    // A slow open (0.6 s here), as over a network: still in step, and the
+    // frames the sender has passed are skipped, not shown in a burst. With a
+    // sound track too, where the audio reaches the sender's position first.
+    MediaPlayer::setOpenDelayForTesting(600);
+    video_frames.store(0);
+    anchor = clock::now();
+    player.play(location, 21.0);
+    for (int i = 0; i < 400 && video_frames.load() == 0; ++i) wait_for(5);
+    wait_for(300);
+    const unsigned int after_start = video_frames.load();
+    wait_for(900);
+    check("slow open, start", player.getPlaybackInfo().position, 21.0 + since(anchor));
+    MediaPlayer::setOpenDelayForTesting(0);
+    video_frames.store(0);
+    anchor = clock::now();
+    player.seek(61.0);
+    for (int i = 0; i < 400 && video_frames.load() == 0; ++i) wait_for(5);
+    wait_for(300);
+    const unsigned int after_jump = video_frames.load();
+    player.stop();
+    // 0.3 s of a 30 fps video is 9 or 10 pictures.
+    const bool no_burst = after_start >= 1 && after_start <= 14 && after_jump >= 1 && after_jump <= 14;
+    std::fprintf(stderr, "media-smoke: follow-clock pictures in the first 0.3 s: %u after a slow start, %u after a jump %s\n",
+                 after_start, after_jump, no_burst ? "ok" : "FAILED");
+    ok = ok && no_burst;
+
     // Off: the start waits for the first picture and begins at the position named.
     MediaPlayer::setFollowSenderClock(false);
     video_frames.store(0);
@@ -395,10 +421,40 @@ int followClock(const char* location)
     return ok ? 0 : 1;
 }
 
+// Following the sender's clock, an item shorter than the time it took to
+// open (a 2 s still clip over a slow network): by then the sender is past
+// its end, and it must still show a picture. CLIP is 3 s or shorter.
+int followClockShortItem(const char* location)
+{
+    std::atomic<unsigned int> video_frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0] && frame.width > 0) ++video_frames;
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    MediaPlayer::setFollowSenderClock(true);
+    MediaPlayer::setOpenDelayForTesting(3500);
+    player.play(location, 0.0);
+    for (int i = 0; i < 120 && video_frames.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const unsigned int shown = video_frames.load();
+    player.stop();
+    MediaPlayer::setOpenDelayForTesting(0);
+    MediaPlayer::setFollowSenderClock(false);
+    std::fprintf(stderr, "media-smoke: follow-clock short item opened late: %u picture(s) -> %s\n",
+                 shown, shown > 0 ? "ok" : "FAILED");
+    return shown > 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     if (argc == 3 && std::strcmp(argv[1], "--follow-clock") == 0) {
         return followClock(argv[2]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--follow-clock-short") == 0) {
+        return followClockShortItem(argv[2]);
     }
     if (argc >= 3 && argc <= 5 && std::strcmp(argv[1], "--scrub-latency") == 0) {
         return scrubLatency(argv[2], argc >= 4 ? std::atoi(argv[3]) : 0,

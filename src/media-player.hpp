@@ -74,6 +74,10 @@ public:
     // the receiver. Applies to every player.
     static void setFollowSenderClock(bool follow);
 
+    // Tests only: waits this long before opening a file, as a slow network
+    // would make it.
+    static void setOpenDelayForTesting(int milliseconds);
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
