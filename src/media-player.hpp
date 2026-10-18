@@ -95,6 +95,10 @@ public:
     // Tests only: waits this long before opening a file, as a slow network
     // would make it.
     static void setOpenDelayForTesting(int milliseconds);
+    // Tests only: the worker waits this long after taking a seek, and the
+    // presenter this long before checking each frame against it, as a slow
+    // or loaded machine would (see the media-ts-seek-race test).
+    static void setSeekDelaysForTesting(int worker_milliseconds, int presenter_milliseconds);
 
 private:
     class Impl;

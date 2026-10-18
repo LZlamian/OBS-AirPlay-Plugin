@@ -27,7 +27,7 @@ git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git
 brew install cmake pkg-config ffmpeg libplist openssl@3   # and OBS in /Applications
 cmake --preset release            # also: debug, asan, tsan
 cmake --build --preset release
-ctest --preset release            # 28 tests, about 40 s; generates its media first
+ctest --preset release            # 29 tests, about 40 s; generates its media first
 ```
 
 The plugin bundle is `build-release/obs-airplay.plugin`; copy it into

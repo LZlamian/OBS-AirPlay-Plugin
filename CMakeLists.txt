@@ -585,6 +585,7 @@ if(BUILD_TESTING)
             "media-follow-clock-quick|--follow-clock-short-quick^${F}/still2.mp4"
             "media-stop-race|--stop-race^${F}/clip.mp4"
             "media-ts-seek|--ts-seek^${F}/clip-ts.ts"
+            "media-ts-seek-race|--ts-seek-race^${F}/clip-ts.ts"
             "media-after-end|--after-end^${F}/clip8.mp4")
         foreach(entry ${OBS_AIRPLAY_MEDIA_TESTS})
             # name|arg^arg (';' would split the list itself)

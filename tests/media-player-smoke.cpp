@@ -703,7 +703,12 @@ int tlsVerify(const char* location)
 // A stream that does not start at 0 (MPEG-TS with -output_ts_offset 10):
 // a paused seek must land on its target without decoding from a point
 // start_time too early.
-int tsSeek(const char* location)
+// `race`: the worker and presenter are slowed around each seek (as on a
+// loaded CI runner), so the presenter checks frames queued before the seek
+// while the worker carries it out. None of them may be shown, or clear the
+// discard for the new target (which then showed the pre-roll keyframe
+// before it). Only the position is checked: the delays make previews slow.
+int tsSeek(const char* location, bool race = false)
 {
     std::atomic<unsigned int> frames{0};
     std::atomic<int64_t> last_frame_ns{0};
@@ -721,6 +726,7 @@ int tsSeek(const char* location)
     }
     player.setRate(0.0f);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    if (race) MediaPlayer::setSeekDelaysForTesting(30, 15);
     double worst_ms = 0.0;
     double worst_error = 0.0;
     bool all_shown = true;
@@ -743,9 +749,11 @@ int tsSeek(const char* location)
                      target, position, ms);
     }
     player.stop();
+    MediaPlayer::setSeekDelaysForTesting(0, 0);
     // One frame at 30 fps; a seek that starts 10 s early decodes 300 frames
     // of 720p before the preview and takes several times longer.
-    const bool ok = all_shown && worst_error <= 1.0 / 30.0 + 1e-6 && worst_ms < 400.0;
+    const bool ok = all_shown && worst_error <= 1.0 / 30.0 + 1e-6 &&
+                    (race || worst_ms < 400.0);
     std::fprintf(stderr, "media-smoke: ts-seek worst_error=%.4f worst_preview_ms=%.1f -> %s\n",
                  worst_error, worst_ms, ok ? "ok" : "FAILED");
     return ok ? 0 : 1;
@@ -813,6 +821,9 @@ int main(int argc, char** argv)
     if (argc == 3 && std::strcmp(argv[1], "--ts-seek") == 0) {
         return tsSeek(argv[2]);
     }
+    if (argc == 3 && std::strcmp(argv[1], "--ts-seek-race") == 0) {
+        return tsSeek(argv[2], true);
+    }
     if (argc == 3 && std::strcmp(argv[1], "--after-end") == 0) {
         return afterEnd(argv[2]);
     }
@@ -866,7 +877,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --ts-seek TS_URL | --after-end SHORT_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --ts-seek TS_URL | --ts-seek-race TS_URL | --after-end SHORT_URL\n", argv[0]);
         return 2;
     }
 

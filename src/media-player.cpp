@@ -569,6 +569,8 @@ private:
 namespace {
 std::atomic<bool> g_follow_sender_clock{false};
 std::atomic<int> g_open_delay_for_testing_ms{0};
+std::atomic<int> g_seek_worker_delay_for_testing_ms{0};
+std::atomic<int> g_seek_presenter_delay_for_testing_ms{0};
 }
 
 // Runs a cleanup when the scope ends (early returns included).
@@ -1101,8 +1103,8 @@ private:
     std::deque<QueuedFrame> video_queue;      // under queue_mutex
     bool presenter_busy = false;              // under queue_mutex
     bool presenter_quit = false;              // under queue_mutex
-    // Advanced by the worker at every seek it carries out; queued frames
-    // from an older epoch are dropped.
+    // Advanced by the worker at every seek it carries out, under state_mutex
+    // as it clears seek_pending; queued frames from an older epoch are dropped.
     std::atomic<uint64_t> queue_epoch{0};
     // The epoch of the frame the presenter is showing (presenter thread only):
     // a seek carried out while it waits makes it stale.
@@ -1251,7 +1253,8 @@ private:
     {
         std::lock_guard<std::mutex> lock(state_mutex);
         constexpr double kWorthwhileGap = 0.15;
-        if (seek_pending || info.rate > 0.0f || !preview_pending || !scrub_burst ||
+        if (seek_pending || presenting_epoch != queue_epoch.load() ||
+            info.rate > 0.0f || !preview_pending || !scrub_burst ||
             coarse_preview_shown || discard_video_before < 0.0 ||
             discard_video_before - position < kWorthwhileGap ||
             std::chrono::steady_clock::now() < coarse_preview_after) {
@@ -1266,8 +1269,13 @@ private:
     bool shouldDiscard(double position, bool is_video, double shown_for = 0.0)
     {
         std::lock_guard<std::mutex> lock(state_mutex);
-        // Frames still in the decoder from before a pending seek are stale.
-        if (seek_pending) return true;
+        // Frames still in the decoder from before a pending seek are stale,
+        // and so is a frame the presenter took from the queue before the
+        // worker carried the seek out: checked here, under state_mutex, it
+        // must not clear discard_video_before for the new target.
+        if (seek_pending || (is_video && presenting_epoch != queue_epoch.load())) {
+            return true;
+        }
         constexpr double kFrameTolerance = 0.020;
         // Following the sender's clock: after a start, seek or resume, the
         // frames the sender has already passed (while the file was opened,
@@ -1425,13 +1433,15 @@ private:
             target = seek_target;
             seek_pending = false;
             clock_initialized = false;
-        }
-        // Frames decoded before the seek are not shown, including one the
-        // presenter is waiting with.
-        queue_epoch.fetch_add(1);
-        {
-            std::lock_guard<std::mutex> lock(state_mutex);
+            // Frames decoded before the seek are not shown, including one the
+            // presenter is waiting with. Advanced together with clearing
+            // seek_pending, so the presenter's checks under state_mutex
+            // (shouldDiscard, waitForPresentation) see one or the other.
+            queue_epoch.fetch_add(1);
             state_cv.notify_all();
+        }
+        if (const int delay = g_seek_worker_delay_for_testing_ms.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
         clearVideoQueue();
 
@@ -1563,6 +1573,9 @@ private:
             return;
         }
         bool coarse_preview = false;
+        if (const int delay = g_seek_presenter_delay_for_testing_ms.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        }
         if (shouldDiscard(position, true, frameSeconds(decoded, stream))) {
             if (!takeCoarsePreview(position)) {
                 return;
@@ -2429,6 +2442,14 @@ void MediaPlayer::setFollowSenderClock(bool follow)
 void MediaPlayer::setOpenDelayForTesting(int milliseconds)
 {
     g_open_delay_for_testing_ms.store(std::max(0, milliseconds), std::memory_order_relaxed);
+}
+
+void MediaPlayer::setSeekDelaysForTesting(int worker_milliseconds, int presenter_milliseconds)
+{
+    g_seek_worker_delay_for_testing_ms.store(std::max(0, worker_milliseconds),
+                                             std::memory_order_relaxed);
+    g_seek_presenter_delay_for_testing_ms.store(std::max(0, presenter_milliseconds),
+                                                std::memory_order_relaxed);
 }
 
 MediaPlaybackInfo MediaPlayer::getPlaybackInfo() const
