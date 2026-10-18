@@ -266,6 +266,7 @@ set(obs-airplay_SOURCES
     src/h264-decoder.cpp
     src/audio-decoder.cpp
     src/media-player.cpp
+    src/media-url-policy.cpp
 )
 
 set(obs-airplay_HEADERS
@@ -436,6 +437,7 @@ if(BUILD_TESTING)
     add_executable(obs-airplay-media-smoke
         tests/media-player-smoke.cpp
         src/media-player.cpp
+        src/media-url-policy.cpp
     )
     target_include_directories(obs-airplay-media-smoke PRIVATE
         ${CMAKE_SOURCE_DIR}/src

@@ -1,4 +1,5 @@
 #include "uxplay-integration.hpp"
+#include "media-url-policy.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <algorithm>
@@ -536,6 +537,24 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }, this);
         
         blog(LOG_INFO, "RAOP initialized successfully");
+
+        // Web ports AirPlay video may fetch from on hosts other than the
+        // sender; OBS_AIRPLAY_MEDIA_PORTS="80,443,..." overrides them.
+        if (const char* env = std::getenv("OBS_AIRPLAY_MEDIA_PORTS")) {
+            const auto ports = media_url_policy::parsePortList(env);
+            if (ports.empty()) {
+                blog(LOG_WARNING, "Ignoring invalid OBS_AIRPLAY_MEDIA_PORTS=%s", env);
+            } else {
+                media_url_policy::setAllowedPorts(ports);
+            }
+        }
+        {
+            const auto ports = media_url_policy::allowedPorts();
+            raop_set_media_ports(m_raop, ports.data(), static_cast<int>(ports.size()));
+            std::string list;
+            for (unsigned short port : ports) list += (list.empty() ? "" : ",") + std::to_string(port);
+            blog(LOG_INFO, "AirPlay video may fetch from other hosts on ports %s", list.c_str());
+        }
 
         if (media_trace_requested()) {
             // Raise UxPlay's logger (default LOGGER_WARNING) so the [MEDIA]

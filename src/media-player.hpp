@@ -73,6 +73,9 @@ public:
     // whenever the first picture is ready, which suits a sender that follows
     // the receiver. Applies to every player.
     static void setFollowSenderClock(bool follow);
+    // Accept HTTPS media servers whose certificate does not verify
+    // (self-signed or private CA). Off by default.
+    static void setAllowInsecureTls(bool allow);
 
     // Tests only: waits this long before opening a file, as a slow network
     // would make it.

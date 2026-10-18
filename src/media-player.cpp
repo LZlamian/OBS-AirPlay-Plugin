@@ -1,5 +1,6 @@
 #include "media-player.hpp"
 #include "hardware-decode-option.hpp"
+#include "media-url-policy.hpp"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -34,11 +36,46 @@ extern "C" {
 
 namespace {
 
+std::atomic<bool> g_allow_insecure_tls{false};
+
 std::string ffmpeg_error(int error)
 {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
     av_strerror(error, buffer, sizeof(buffer));
     return buffer;
+}
+
+// Options for every HTTP(S) fetch: web protocols only, bounded redirects,
+// and certificate verification unless the user allowed self-signed servers.
+void set_tls_options(AVDictionary** options)
+{
+    if (g_allow_insecure_tls.load(std::memory_order_relaxed)) {
+        av_dict_set(options, "tls_verify", "0", 0);
+        return;
+    }
+    av_dict_set(options, "tls_verify", "1", 0);
+    // The release build's OpenSSL has no default trust store of its own.
+    static const bool system_bundle = access("/etc/ssl/cert.pem", R_OK) == 0;
+    if (system_bundle) av_dict_set(options, "ca_file", "/etc/ssl/cert.pem", 0);
+}
+
+void set_network_options(AVDictionary** options)
+{
+    av_dict_set(options, "protocol_whitelist", "http,https,tcp,tls,crypto", 0);
+    av_dict_set(options, "max_redirects", "8", 0);
+    set_tls_options(options);
+}
+
+// The URL an opened HTTP context ended up at after redirects, or empty.
+std::string effective_location(void* av_object)
+{
+    uint8_t* location = nullptr;
+    std::string result;
+    if (av_opt_get(av_object, "location", AV_OPT_SEARCH_CHILDREN, &location) >= 0 && location) {
+        result = reinterpret_cast<char*>(location);
+    }
+    av_free(location);
+    return result;
 }
 
 std::string safe_location_for_log(std::string location)
@@ -519,8 +556,7 @@ private:
         AVDictionary* options = nullptr;
         av_dict_set(&options, "rw_timeout", "10000000", 0);
         av_dict_set(&options, "user_agent", "AppleCoreMedia/1.0 OBS-AirPlay/" PLUGIN_VERSION, 0);
-        av_dict_set(&options, "protocol_whitelist", "http,https,tcp,tls,crypto", 0);
-        av_dict_set(&options, "max_redirects", "8", 0);
+        set_network_options(&options);
         av_dict_set_int(&options, "offset", offset, 0);
         AVIOInterruptCB interrupt = m_interrupt;
         const int result = avio_open2(&m_inner, m_url.c_str(), AVIO_FLAG_READ, &interrupt, &options);
@@ -528,6 +564,16 @@ private:
         if (result < 0) {
             m_inner = nullptr;
             return false;
+        }
+        const std::string redirected = effective_location(m_inner);
+        if (!redirected.empty() && redirected != m_url) {
+            const std::string refused = media_url_policy::checkNested(redirected, m_url);
+            if (!refused.empty()) {
+                blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
+                     safe_location_for_log(redirected).c_str(), refused.c_str());
+                avio_closep(&m_inner);
+                return false;
+            }
         }
         if (m_size <= 0) {
             const int64_t reported = avio_size(m_inner);
@@ -821,6 +867,45 @@ private:
         return self && self->stop_requested.load(std::memory_order_acquire) ? 1 : 0;
     }
 
+    static int policyIoOpen(AVFormatContext* format, AVIOContext** pb, const char* url,
+                            int flags, AVDictionary** options)
+    {
+        auto* self = static_cast<Impl*>(format->opaque);
+        std::string target = url ? url : "";
+        // The HLS demuxer opens AES-128 segments as "crypto+<url>".
+        if (starts_with_case_insensitive(target, "crypto+") ||
+            starts_with_case_insensitive(target, "crypto:")) {
+            target.erase(0, 7);
+        }
+        std::string refused = is_http_url(target)
+            ? media_url_policy::checkNested(target, self->policy_item_url)
+            : std::string("not an HTTP(S) URL");
+        if (!refused.empty()) {
+            blog(LOG_WARNING, "[MEDIA] refused to fetch %s: %s",
+                 safe_location_for_log(target).c_str(), refused.c_str());
+            return AVERROR(EPERM);
+        }
+        // Nested opens do not inherit the item's TLS options.
+        AVDictionary* local_options = nullptr;
+        AVDictionary** used_options = options ? options : &local_options;
+        set_tls_options(used_options);
+        const int result = self->default_io_open(format, pb, url, flags, used_options);
+        av_dict_free(&local_options);
+        if (result < 0 || !*pb) return result;
+        const std::string redirected = effective_location(*pb);
+        if (!redirected.empty() && redirected != target) {
+            refused = media_url_policy::checkNested(redirected, self->policy_item_url);
+            if (!refused.empty()) {
+                blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
+                     safe_location_for_log(redirected).c_str(), refused.c_str());
+                format->io_close2(format, *pb);
+                *pb = nullptr;
+                return AVERROR(EPERM);
+            }
+        }
+        return result;
+    }
+
     std::string resolveHlsVariant(const std::string& location)
     {
         if (!is_http_url(location) || !looks_like_hls_url(location)) {
@@ -832,8 +917,7 @@ private:
         AVIOInterruptCB interrupt = {&Impl::interruptCallback, this};
         AVDictionary* options = nullptr;
         av_dict_set(&options, "rw_timeout", "7000000", 0);
-        av_dict_set(&options, "max_redirects", "8", 0);
-        av_dict_set(&options, "protocol_whitelist", "http,https,tcp,tls,crypto", 0);
+        set_network_options(&options);
         av_dict_set(&options, "user_agent", "AppleCoreMedia/1.0 OBS-AirPlay/" PLUGIN_VERSION, 0);
         const int open_result = avio_open2(&io, location.c_str(), AVIO_FLAG_READ,
                                            &interrupt, &options);
@@ -848,14 +932,20 @@ private:
         }
 
         std::string final_location = location;
-        uint8_t* redirected_location = nullptr;
-        if (av_opt_get(io, "location", AV_OPT_SEARCH_CHILDREN,
-                       &redirected_location) >= 0 && redirected_location) {
-            const std::string candidate(reinterpret_cast<char*>(redirected_location));
-            if (is_http_url(candidate)) {
-                final_location = candidate;
+        const std::string candidate = effective_location(io);
+        if (is_http_url(candidate)) {
+            final_location = candidate;
+        }
+        if (final_location != location) {
+            const std::string refused = media_url_policy::checkNested(final_location, location);
+            if (!refused.empty()) {
+                // The demuxer's own open follows the same redirect and is
+                // refused by policyIoOpen.
+                blog(LOG_WARNING, "[MEDIA] refused HLS manifest redirect to %s: %s",
+                     safe_location_for_log(final_location).c_str(), refused.c_str());
+                avio_closep(&io);
+                return location;
             }
-            av_free(redirected_location);
         }
 
         constexpr size_t kMaximumManifestBytes = 1024 * 1024;
@@ -1454,9 +1544,25 @@ private:
 
         const std::string log_location = safe_location_for_log(location);
         blog(LOG_INFO, "[MEDIA] opening Safari media URL: %s", log_location.c_str());
+        const bool http_item = is_http_url(location);
+        const std::string refused = http_item ? media_url_policy::checkItem(location)
+                                              : media_url_policy::checkLocalFile(location);
+        if (!refused.empty()) {
+            markOpenFailure(("media URL refused: " + refused).c_str());
+            return;
+        }
+        policy_item_url = location;
         const std::string playback_location = resolveHlsVariant(location);
         if (stop_requested.load(std::memory_order_acquire)) {
             return;
+        }
+        if (playback_location != location) {
+            const std::string variant_refused =
+                media_url_policy::checkNested(playback_location, location);
+            if (!variant_refused.empty()) {
+                markOpenFailure(("HLS rendition URL refused: " + variant_refused).c_str());
+                return;
+            }
         }
         if (const int delay = g_open_delay_for_testing_ms.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
@@ -1469,6 +1575,13 @@ private:
         }
         format->interrupt_callback.callback = &Impl::interruptCallback;
         format->interrupt_callback.opaque = this;
+        if (http_item) {
+            // Every URL the demuxer opens (the item, HLS playlists, segments,
+            // keys) goes through the URL policy.
+            format->opaque = this;
+            default_io_open = format->io_open;
+            format->io_open = &Impl::policyIoOpen;
+        }
         if (looks_like_hls_url(playback_location)) {
             // These limits are consulted while the HLS demuxer opens its
             // first transport-stream segment, not only by find_stream_info().
@@ -1498,9 +1611,13 @@ private:
         av_dict_set(&options, "reconnect_streamed", "1", 0);
         av_dict_set(&options, "reconnect_delay_max", "2", 0);
         av_dict_set(&options, "user_agent", "AppleCoreMedia/1.0 OBS-AirPlay/" PLUGIN_VERSION, 0);
-        if (is_http_url(playback_location)) {
-            av_dict_set(&options, "max_redirects", "8", 0);
-            av_dict_set(&options, "protocol_whitelist", "http,https,tcp,tls,crypto", 0);
+        if (http_item) {
+            set_network_options(&options);
+        } else {
+            // The receiver's spool file: no nested protocols, no references
+            // to other files from inside the container.
+            av_dict_set(&options, "protocol_whitelist", "file", 0);
+            av_dict_set(&options, "enable_drefs", "0", 0);
         }
         int result = avformat_open_input(&format, playback_location.c_str(), nullptr, &options);
         av_dict_free(&options);
@@ -1874,6 +1991,10 @@ private:
     std::atomic<bool> pause_before_first_frame_logged{false};
     std::mutex control_mutex;
     std::thread worker;
+    // The current item's URL, for policyIoOpen (worker thread only).
+    std::string policy_item_url;
+    int (*default_io_open)(AVFormatContext*, AVIOContext**, const char*, int,
+                           AVDictionary**) = nullptr;
 };
 
 MediaPlayer::MediaPlayer()
@@ -1916,6 +2037,11 @@ void MediaPlayer::setRate(float rate)
 float MediaPlayer::pauseForPlaylistRemoval()
 {
     return m_impl->pauseForPlaylistRemoval();
+}
+
+void MediaPlayer::setAllowInsecureTls(bool allow)
+{
+    g_allow_insecure_tls.store(allow, std::memory_order_relaxed);
 }
 
 void MediaPlayer::setFollowSenderClock(bool follow)

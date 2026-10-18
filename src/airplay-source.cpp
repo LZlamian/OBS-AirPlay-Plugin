@@ -62,6 +62,7 @@ void* airplay_source_create(obs_data_t* settings, obs_source_t* source)
     }
 
     MediaPlayer::setFollowSenderClock(obs_data_get_bool(settings, "follow_sender_clock"));
+    MediaPlayer::setAllowInsecureTls(obs_data_get_bool(settings, "allow_self_signed_media"));
 
     blog(LOG_INFO, "AirPlay source created");
     return airplay_source;
@@ -79,6 +80,7 @@ void airplay_source_get_defaults(obs_data_t* settings)
     obs_data_set_default_string(settings, "server_name", "OBS AirPlay");
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
     obs_data_set_default_bool(settings, "follow_sender_clock", false);
+    obs_data_set_default_bool(settings, "allow_self_signed_media", false);
 }
 
 static bool reset_server_name_clicked(obs_properties_t* props, obs_property_t* property,
@@ -136,6 +138,13 @@ obs_properties_t* airplay_source_get_properties(void* data)
         "skipping the moment it took to open, so OBS does not run behind the device. "
         "Leave off for Safari and other apps that wait for the receiver.");
 
+    obs_property_t* self_signed = obs_properties_add_bool(props, "allow_self_signed_media",
+        "Allow self-signed media servers");
+    obs_property_set_long_description(self_signed,
+        "AirPlay video from an HTTPS server whose certificate cannot be verified "
+        "(self-signed, or from a private certificate authority) is refused unless this is on. "
+        "Turning it on lets anyone on the network between OBS and that server see or change the video.");
+
     obs_properties_add_bool(props, "log_latency_telemetry",
         "Log latency telemetry (decode/output ms, every 120 video / 240 audio frames)");
 
@@ -160,6 +169,7 @@ void airplay_source_update(void* data, obs_data_t* settings)
         obs_data_get_bool(settings, "log_latency_telemetry"),
         std::memory_order_relaxed);
     MediaPlayer::setFollowSenderClock(obs_data_get_bool(settings, "follow_sender_clock"));
+    MediaPlayer::setAllowInsecureTls(obs_data_get_bool(settings, "allow_self_signed_media"));
 }
 
 void airplay_source_show(void* data)

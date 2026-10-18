@@ -270,7 +270,7 @@ int main(int argc, char** argv)
     plist_t root = plist_new_dict();
     plist_dict_set_item(root, "uuid", plist_new_string("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
     plist_dict_set_item(root, "Content-Location",
-                        plist_new_string("http://127.0.0.1:18765/sample.mp4"));
+                        plist_new_string("http://media.example.test/sample.mp4"));
     plist_dict_set_item(root, "Start-Position-Seconds", plist_new_real(1.25));
     char* body = nullptr;
     uint32_t body_size = 0;
@@ -307,9 +307,9 @@ int main(int argc, char** argv)
         return response;
     };
     const std::string unexpected_master_response =
-        unexpected_reply("http://127.0.0.1:18765/master.m3u8");
+        unexpected_reply("http://media.example.test/master.m3u8");
     const std::string unexpected_media_response =
-        unexpected_reply("http://127.0.0.1:18765/media.m3u8");
+        unexpected_reply("http://media.example.test/media.m3u8");
 
     const auto control_request = [&](const char* method, const char* path) {
         return std::string(method) + " " + path + " HTTP/1.1\r\n" +
@@ -784,7 +784,7 @@ int main(int argc, char** argv)
         action_missing_type_2.find("400 Bad Request") != std::string::npos &&
         action_wrong_session.find("400 Bad Request") != std::string::npos &&
         invalid_action_response.find("400 Bad Request") != std::string::npos &&
-        state.first_location == "http://127.0.0.1:18765/sample.mp4" &&
+        state.first_location == "http://media.example.test/sample.mp4" &&
         state.location == "https://example.test/recovery.mp4" &&
         std::fabs(state.start_position) < 0.001f &&
         std::fabs(state.playback_rate - 0.5f) < 0.001f &&
@@ -929,8 +929,54 @@ int main(int argc, char** argv)
     std::printf("one_byte_stall=%s info_ms=%lld\n", stall_ok ? "not-blocking" : "FAILED",
                 static_cast<long long>(info_ms));
 
+    // POST /play may not point the receiver at loopback, link-local,
+    // multicast or unspecified addresses, or at unusual ports on hosts
+    // other than the sender.
+    const auto play_status = [&](const char* url) {
+        plist_t root = plist_new_dict();
+        plist_dict_set_item(root, "Content-Location", plist_new_string(url));
+        const std::string response = binaryPlistExchange(port, "/play", session, root);
+        plist_free(root);
+        return response.find("200 OK") != std::string::npos ? "200"
+            : response.find("400 Bad Request") != std::string::npos ? "400" : "other";
+    };
+    struct PolicyCase { const char* url; const char* expected; };
+    const PolicyCase policy_cases[] = {
+        {"http://127.0.0.1/x.mp4", "400"},
+        {"http://127.0.0.1:631/x.mp4", "400"},
+        {"http://localhost/x.mp4", "400"},
+        {"http://169.254.169.254/latest/meta-data", "400"},
+        {"http://[::1]/x.mp4", "400"},
+        {"http://[::ffff:127.0.0.1]/x.mp4", "400"},
+        {"http://2130706433/x.mp4", "400"},
+        {"http://224.0.0.251/x.mp4", "400"},
+        {"http://10.1.2.3:22/x.mp4", "400"},
+        {"http://10.1.2.3/x.mp4", "200"},
+        {"https://media.example.test:8443/x.mp4", "200"},
+    };
+    bool policy_ok = true;
+    for (const PolicyCase& c : policy_cases) {
+        const char* status = play_status(c.url);
+        if (std::strcmp(status, c.expected) != 0) {
+            std::fprintf(stderr, "url policy: %s -> %s (expected %s)\n", c.url, status, c.expected);
+            policy_ok = false;
+        }
+    }
+    const std::string refused_body = "Content-Location: http://192.168.1.1:23/x\r\n\r\n";
+    const std::string classic_refused = httpExchange(
+        port,
+        std::string("POST /play HTTP/1.1\r\n") +
+            "Host: 127.0.0.1\r\n" +
+            "X-Apple-Session-ID: " + session + "\r\n" +
+            "Content-Type: text/parameters\r\n" +
+            "Content-Length: " + std::to_string(refused_body.size()) + "\r\n\r\n" +
+            refused_body);
+    policy_ok = policy_ok && classic_refused.find("400 Bad Request") != std::string::npos;
+    std::printf("url_policy=%s\n", policy_ok ? "enforced" : "FAILED");
+
     raop_stop_httpd(raop);
     raop_destroy(raop);
     dnssd_destroy(dnssd);
-    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok ? 0 : 1;
+    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok
+        ? 0 : 1;
 }

@@ -1,4 +1,5 @@
 #include "media-player.hpp"
+#include "media-url-policy.hpp"
 
 extern "C" {
 #include <libavutil/log.h>
@@ -514,8 +515,123 @@ int stopRace(const char* location, int iterations)
     return 0;
 }
 
+// Frames delivered within timeout_ms of play(), then stop().
+unsigned int framesWithin(const char* location, int timeout_ms)
+{
+    std::atomic<unsigned int> frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0] && frame.width > 0) ++frames;
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play(location, 0.0);
+    for (int waited = 0; waited < timeout_ms && frames.load() == 0; waited += 50) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    player.stop();
+    return frames.load();
+}
+
+// URL policy decisions for the resolved/nested checks (no network needed).
+int urlPolicy()
+{
+    using namespace media_url_policy;
+    setLoopbackAllowedForTesting(false);
+    setLocalFilesAllowedForTesting(false);
+    const char* item = "https://cdn.example.test/master.m3u8";
+    struct Case { const char* url; bool allowed; };
+    const Case nested[] = {
+        {"https://cdn.example.test/seg1.ts", true},
+        {"https://cdn.example.test:443/key", true},
+        {"http://cdn.example.test:8080/seg.ts", true},
+        {"http://127.0.0.1/seg.ts", false},
+        {"http://127.0.0.1:631/", false},
+        {"http://localhost:8080/x", false},
+        {"http://foo.localhost/x", false},
+        {"http://169.254.169.254/latest/meta-data", false},
+        {"http://[::1]/x", false},
+        {"http://[::ffff:127.0.0.1]/x", false},
+        {"http://[fe80::1%25en0]/x", false},
+        {"http://2130706433/x", false},
+        {"http://0x7f.1/x", false},
+        {"http://224.0.0.251/x", false},
+        {"http://0.0.0.0/x", false},
+        {"http://10.0.0.1:22/x", false},
+        {"http://10.0.0.1/x", true},
+        {"http://user@10.0.0.1:8443/x", true},
+        {"file:///etc/passwd", false},
+    };
+    int failures = 0;
+    for (const Case& c : nested) {
+        const std::string refused = checkNested(c.url, item);
+        if (refused.empty() != c.allowed) {
+            std::fprintf(stderr, "media-smoke: url-policy nested %s -> %s (expected %s)\n", c.url,
+                         refused.empty() ? "allowed" : refused.c_str(),
+                         c.allowed ? "allowed" : "refused");
+            ++failures;
+        }
+    }
+    // The receiver vetted literal item URLs with the sender's address;
+    // "localhost" is only its own HLS proxy.
+    if (!checkItem("http://10.0.0.5:7001/1/x.mp4").empty()) ++failures;
+    if (!checkItem("http://localhost:7000/master.m3u8").empty()) ++failures;
+    if (checkItem("http://foo.localhost/x.mp4").empty()) ++failures;
+    if (checkItem("ftp://example.test/x").empty()) ++failures;
+    if (checkLocalFile("/etc/passwd").empty()) ++failures;
+    if (checkLocalFile("/tmp/../etc/obs-airplay-fcup-x").empty()) ++failures;
+    if (checkLocalFile("/tmp/obs-airplay-fcup-missing").empty()) ++failures;
+    const auto ports = parsePortList("80, 443,8080");
+    if (ports.size() != 3 || ports[2] != 8080 || !parsePortList("80,http").empty()) ++failures;
+    std::fprintf(stderr, "media-smoke: url-policy failures=%d -> %s\n", failures,
+                 failures ? "FAILED" : "ok");
+    return failures ? 1 : 0;
+}
+
+// HLS resources go through the policy: a playlist whose segments are on its
+// own host and port plays; one whose segments point at another loopback port
+// is refused (loopback is only allowed as the item's own address here).
+int nestedPolicy(const char* same_origin, const char* cross_origin)
+{
+    media_url_policy::setLoopbackAllowedForTesting(false);
+    const unsigned int good = framesWithin(same_origin, 8000);
+    const unsigned int bad = framesWithin(cross_origin, 4000);
+    media_url_policy::setLoopbackAllowedForTesting(true);
+    const bool ok = good > 0 && bad == 0;
+    std::fprintf(stderr, "media-smoke: nested-policy same_origin_frames=%u cross_origin_frames=%u -> %s\n",
+                 good, bad, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+// An HTTPS server with a self-signed certificate is refused unless the user
+// allowed it.
+int tlsVerify(const char* location)
+{
+    MediaPlayer::setAllowInsecureTls(false);
+    const unsigned int verified = framesWithin(location, 4000);
+    MediaPlayer::setAllowInsecureTls(true);
+    const unsigned int insecure = framesWithin(location, 8000);
+    MediaPlayer::setAllowInsecureTls(false);
+    const bool ok = verified == 0 && insecure > 0;
+    std::fprintf(stderr, "media-smoke: tls-verify verified_frames=%u allowed_frames=%u -> %s\n",
+                 verified, insecure, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
+    // The smokes play local files and loopback servers; the policy itself is
+    // exercised by --url-policy and --nested-policy.
+    media_url_policy::setLocalFilesAllowedForTesting(true);
+    media_url_policy::setLoopbackAllowedForTesting(true);
+    if (argc == 2 && std::strcmp(argv[1], "--url-policy") == 0) {
+        return urlPolicy();
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--nested-policy") == 0) {
+        return nestedPolicy(argv[2], argv[3]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--tls-verify") == 0) {
+        return tlsVerify(argv[2]);
+    }
     if (argc == 3 && std::strcmp(argv[1], "--follow-clock") == 0) {
         return followClock(argv[2]);
     }
@@ -566,7 +682,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL\n", argv[0]);
         return 2;
     }
 
