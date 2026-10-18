@@ -47,7 +47,7 @@ jobs:
         include:
           - runner: macos-14   # Apple silicon
             arch: arm64
-          - runner: macos-13   # Intel
+          - runner: macos-15-intel   # Intel (macos-13 is retired)
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -134,6 +134,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A release published by hand (scripts/package-macos.sh locally)
+          # is left alone.
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "release ${{ github.ref_name }} exists; not drafting another"
+            exit 0
+          fi
           notes="docs/releases/RELEASE_NOTES_${{ github.ref_name }}.md"
           [ -f "$notes" ] || notes=/dev/null
           gh release create "${{ github.ref_name }}" --draft --verify-tag \
