@@ -68,6 +68,8 @@ void airplay_source_get_defaults(obs_data_t* settings)
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
     obs_data_set_default_bool(settings, "follow_sender_clock", false);
     obs_data_set_default_bool(settings, "allow_self_signed_media", false);
+    obs_data_set_default_bool(settings, "accept_airplay_video", true);
+    obs_data_set_default_bool(settings, "media_sender_only", false);
     obs_data_set_default_bool(settings, "check_for_updates", true);
 }
 
@@ -124,15 +126,29 @@ obs_properties_t* airplay_source_get_properties(void* data)
     }
     const std::string name_error = get_server_name_error();
     if (!name_error.empty()) server_info += "\n" + name_error;
+    const std::string refusal = uxplay ? uxplay->lastRefusal() : std::string();
+    if (!refusal.empty()) {
+        char line[512];
+        snprintf(line, sizeof(line), obs_module_text("AirPlay.Status.Refused"), refusal.c_str());
+        server_info += std::string("\n") + line;
+    }
     obs_property_t* status = obs_properties_add_text(props, "server_info", server_info.c_str(),
                                                      OBS_TEXT_INFO);
-    if (!error.empty() || !name_error.empty()) {
+    if (!error.empty() || !name_error.empty() || !refusal.empty()) {
         obs_property_text_set_info_type(status, OBS_TEXT_INFO_WARNING);
     }
 
     obs_property_t* follow = obs_properties_add_bool(props, "follow_sender_clock",
         obs_module_text("AirPlay.FollowSenderClock"));
     obs_property_set_long_description(follow, obs_module_text("AirPlay.FollowSenderClock.Tooltip"));
+
+    obs_property_t* accept_video = obs_properties_add_bool(props, "accept_airplay_video",
+        obs_module_text("AirPlay.AcceptVideo"));
+    obs_property_set_long_description(accept_video, obs_module_text("AirPlay.AcceptVideo.Tooltip"));
+
+    obs_property_t* sender_only = obs_properties_add_bool(props, "media_sender_only",
+        obs_module_text("AirPlay.SenderOnly"));
+    obs_property_set_long_description(sender_only, obs_module_text("AirPlay.SenderOnly.Tooltip"));
 
     obs_property_t* self_signed = obs_properties_add_bool(props, "allow_self_signed_media",
         obs_module_text("AirPlay.AllowSelfSigned"));

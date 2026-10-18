@@ -597,6 +597,40 @@ int urlPolicy()
     if (checkLocalFile("/etc/passwd").empty()) ++failures;
     if (checkLocalFile("/tmp/../etc/obs-airplay-fcup-x").empty()) ++failures;
     if (checkLocalFile("/tmp/obs-airplay-fcup-missing").empty()) ++failures;
+    // "Only fetch AirPlay video from the sending device": everything an item
+    // fetches must be on the item's (the sender's) address, any port; a
+    // named item host is refused. The HLS proxy's playlists stay allowed,
+    // but not the hosts they point at.
+    setSenderOnly(true);
+    const char* sender_item = "http://192.168.1.20:7001/1/x.m3u8";
+    const Case sender_nested[] = {
+        {"http://192.168.1.20:7001/1/seg1.ts", true},
+        {"http://192.168.1.20:8080/seg.ts", true},
+        {"https://192.168.1.20/key", true},
+        {"http://[::ffff:192.168.1.20]:7001/seg.ts", true},
+        {"http://192.168.1.21/seg.ts", false},
+        {"https://cdn.example.test/seg1.ts", false},
+        {"http://10.0.0.1/x", false},
+        {"http://127.0.0.1/x", false},
+    };
+    for (const Case& c : sender_nested) {
+        const std::string refused = checkNested(c.url, sender_item);
+        if (refused.empty() != c.allowed) {
+            std::fprintf(stderr, "media-smoke: url-policy sender-only %s -> %s (expected %s)\n",
+                         c.url, refused.empty() ? "allowed" : refused.c_str(),
+                         c.allowed ? "allowed" : "refused");
+            ++failures;
+        }
+    }
+    if (checkNested("http://localhost:7000/media.m3u8", "http://localhost:7000/master.m3u8") != "") ++failures;
+    if (checkNested("https://cdn.example.test/seg.ts", "http://localhost:7000/master.m3u8").empty()) ++failures;
+    if (checkNested("http://cdn.example.test:8080/seg2.ts", item).empty()) ++failures;
+    if (!checkItem("http://192.168.1.20:7001/1/x.mp4").empty()) ++failures;
+    if (!checkItem("http://localhost:7000/master.m3u8").empty()) ++failures;
+    if (checkItem("https://cdn.example.test/x.mp4").find("sending device") == std::string::npos) ++failures;
+    setSenderOnly(false);
+    if (!checkNested("http://cdn.example.test:8080/seg2.ts", item).empty()) ++failures;
+
     const auto ports = parsePortList("80, 443,8080");
     if (ports.size() != 3 || ports[2] != 8080 || !parsePortList("80,http").empty()) ++failures;
     std::fprintf(stderr, "media-smoke: url-policy failures=%d -> %s\n", failures,

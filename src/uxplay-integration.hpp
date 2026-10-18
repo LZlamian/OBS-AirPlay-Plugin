@@ -75,6 +75,14 @@ public:
     // Called, from any thread, when connectionState() has changed.
     void setStateChangedCallback(std::function<void()> callback);
 
+    // "Accept AirPlay video" and "Only fetch AirPlay video from the sending
+    // device"; apply to the next POST /play (and, for sender_only, to what
+    // the current item fetches next). Callable before start().
+    void setVideoPolicy(bool accept_video, bool sender_only);
+    // The latest refused AirPlay video request, "HH:MM:SS: reason", or empty.
+    // Cleared when an item is accepted.
+    std::string lastRefusal() const;
+
     // Update the advertised server name in the UxPlay dnssd context (live, no restart)
     void updateServerName(const std::string& name);
     
@@ -158,6 +166,12 @@ private:
     std::string m_last_error;            // under m_status_mutex
     std::string m_last_state;            // under m_status_mutex
     std::function<void()> m_state_changed;  // under m_status_mutex
+    std::string m_last_refusal;          // under m_status_mutex
+    std::atomic<bool> m_accept_video{true};
+    std::atomic<bool> m_sender_only{false};
+    // Logs nothing (the refusing code has); records it for the panel.
+    void recordRefusal(const std::string& reason);
+    void clearRefusal();
     void setLastError(std::string error);
     void notifyStateChanged();
 };

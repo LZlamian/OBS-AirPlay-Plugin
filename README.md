@@ -147,7 +147,20 @@ All AirPlay sources share these settings (there is one receiver per OBS):
   typing; at most 63 bytes. Give each Mac a different name if several run the
   plugin. **Reset to Default** restores "OBS AirPlay".
 - **Status**: what the receiver is doing, and why it is not working when it is
-  not (for example, both ports in use).
+  not (for example, both ports in use), and the last AirPlay video it refused
+  and why.
+- **Accept AirPlay video** (on by default): AirPlay video (the AirPlay button
+  in Safari, YouTube and other apps) hands OBS a link that this Mac then
+  fetches. Turn off to refuse every such request; the device then plays the
+  video itself or shows an error. Screen mirroring is not affected.
+- **Only fetch AirPlay video from the sending device** (off by default): only
+  video the device serves from its own address plays (its own files, video
+  local to the page). Links to other hosts, redirects to them and HLS
+  playlists that point at them are refused, so apps that stream from a website
+  (YouTube, most video sites) will not play. Without it, private LAN addresses
+  and internet hosts on web ports are allowed. Any device on the network can
+  send AirPlay video without a password either way; refusals are logged with
+  their reason.
 - **Keep AirPlay video in step with the sending app**: for apps that also play
   the video on the device; leave off for Safari.
 - **Allow self-signed media servers**: AirPlay video from HTTPS servers whose

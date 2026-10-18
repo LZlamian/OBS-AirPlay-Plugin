@@ -6,6 +6,7 @@
 #include "airplay-ble-helper.hpp"
 #include "media-player.hpp"
 #include "module-settings.hpp"
+#include "media-url-policy.hpp"
 #include "hardware-decode-option.hpp"
 #include "h264-decoder.hpp"
 #include <cctype>
@@ -268,11 +269,17 @@ void update_server_name(const std::string& new_name)
     g_debounce_cv.notify_one();
 }
 
+std::shared_ptr<UxPlayIntegration> get_uxplay_integration();
+
 static void apply_module_runtime(const ModuleSettings& settings)
 {
     g_latency_telemetry_enabled.store(settings.log_latency_telemetry, std::memory_order_relaxed);
     MediaPlayer::setFollowSenderClock(settings.follow_sender_clock);
     MediaPlayer::setAllowInsecureTls(settings.allow_self_signed_media);
+    media_url_policy::setSenderOnly(settings.media_sender_only);
+    if (auto uxplay = get_uxplay_integration()) {
+        uxplay->setVideoPolicy(settings.accept_airplay_video, settings.media_sender_only);
+    }
     set_helper_update_checks_enabled(settings.check_for_updates);
 }
 
@@ -282,6 +289,8 @@ static void write_module_settings(obs_data_t* data, const ModuleSettings& settin
     obs_data_set_bool(data, "follow_sender_clock", settings.follow_sender_clock);
     obs_data_set_bool(data, "log_latency_telemetry", settings.log_latency_telemetry);
     obs_data_set_bool(data, "allow_self_signed_media", settings.allow_self_signed_media);
+    obs_data_set_bool(data, "accept_airplay_video", settings.accept_airplay_video);
+    obs_data_set_bool(data, "media_sender_only", settings.media_sender_only);
     obs_data_set_bool(data, "check_for_updates", settings.check_for_updates);
 }
 
@@ -293,6 +302,8 @@ ModuleSettings read_source_settings(obs_data_t* data)
     settings.follow_sender_clock = obs_data_get_bool(data, "follow_sender_clock");
     settings.log_latency_telemetry = obs_data_get_bool(data, "log_latency_telemetry");
     settings.allow_self_signed_media = obs_data_get_bool(data, "allow_self_signed_media");
+    settings.accept_airplay_video = obs_data_get_bool(data, "accept_airplay_video");
+    settings.media_sender_only = obs_data_get_bool(data, "media_sender_only");
     settings.check_for_updates = obs_data_get_bool(data, "check_for_updates");
     return settings;
 }
@@ -446,6 +457,11 @@ bool obs_module_load(void)
         blog(LOG_INFO, "Starting UxPlay integration with MAC: %s", mac_address.c_str());
         g_uxplay_integration = std::make_shared<UxPlayIntegration>();
         g_uxplay_integration->setStateChangedCallback([] { g_status_dirty.store(true); });
+        {
+            const ModuleSettings settings = get_module_settings();
+            g_uxplay_integration->setVideoPolicy(settings.accept_airplay_video,
+                                                 settings.media_sender_only);
+        }
         g_status_thread = std::thread(status_thread_func);
         std::string initial_name;
         {

@@ -54,6 +54,9 @@ struct MediaPlaybackInfo {
 // under the caller's locks. See the frame lifetime note above.
 using MediaVideoCallback = std::function<void(const MediaVideoFrame&)>;
 using MediaAudioCallback = std::function<void(const MediaAudioFrame&)>;
+// Called (on a player thread) with the reason when the URL policy refuses
+// something an item would fetch; the refusal is already logged.
+using MediaRefusalCallback = std::function<void(const std::string&)>;
 
 // Demuxes and decodes the URL-based AirPlay media mode used by Safari.
 // Screen mirroring remains on UxPlay's RTP path and does not pass through here.
@@ -86,6 +89,8 @@ public:
     // Accept HTTPS media servers whose certificate does not verify
     // (self-signed or private CA). Off by default.
     static void setAllowInsecureTls(bool allow);
+    // For every player; set once by the receiver.
+    static void setRefusalCallback(MediaRefusalCallback callback);
 
     // Tests only: waits this long before opening a file, as a slow network
     // would make it.

@@ -51,6 +51,8 @@ struct TestState {
     int stop_count = 0;
     int playback_info_count = 0;
     int play_count = 0;
+    int refused_count = 0;
+    std::string refused_reason;
 };
 
 void audioProcess(void*, raop_ntp_t*, audio_decode_struct*) {}
@@ -62,6 +64,14 @@ void stop(void* cls)
     auto* state = static_cast<TestState*>(cls);
     std::lock_guard<std::mutex> lock(state->mutex);
     ++state->stop_count;
+}
+
+void refused(void* cls, const char* reason)
+{
+    auto* state = static_cast<TestState*>(cls);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ++state->refused_count;
+    state->refused_reason = reason ? reason : "";
 }
 
 void scrub(void* cls, float position)
@@ -246,6 +256,7 @@ int main(int argc, char** argv)
     callbacks.on_video_rate = rate;
     callbacks.on_video_playlist_remove = playlistRemove;
     callbacks.on_video_acquire_playback_info = playbackInfo;
+    callbacks.on_video_refused = refused;
 
     raop_t* raop = raop_init(&callbacks);
     if (!raop || raop_init2(raop, 1, "02:00:00:00:00:01", "") != 0) {
@@ -1052,6 +1063,78 @@ int main(int argc, char** argv)
     policy_ok = policy_ok && classic_refused.find("400 Bad Request") != std::string::npos;
     std::printf("url_policy=%s\n", policy_ok ? "enforced" : "FAILED");
 
+    // Receiver settings: "Only fetch AirPlay video from the sending device"
+    // refuses other hosts but not the sender's own media server; "Accept
+    // AirPlay video" off refuses every item, however it arrives. Each
+    // refusal reaches the host with its reason.
+    const auto refusal = [&]() {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        return std::make_pair(state.refused_count, state.refused_reason);
+    };
+    const auto classic_play = [&](const char* url) {
+        const std::string body = std::string("Content-Location: ") + url + "\r\n\r\n";
+        return httpExchange(
+            port,
+            std::string("POST /play HTTP/1.1\r\n") +
+                "Host: 127.0.0.1\r\n" +
+                "X-Apple-Session-ID: " + session + "\r\n" +
+                "Content-Type: text/parameters\r\n" +
+                "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body);
+    };
+    const auto is_400 = [](const std::string& response) {
+        return response.find("400 Bad Request") != std::string::npos;
+    };
+    bool video_settings_ok = true;
+    const auto expect = [&](bool ok, const char* what) {
+        if (!ok) {
+            std::fprintf(stderr, "video settings: %s failed\n", what);
+            video_settings_ok = false;
+        }
+    };
+    {
+        const int before = refusal().first;
+        raop_set_media_policy(raop, true, true);
+        expect(std::strcmp(play_status("http://10.1.2.3/x.mp4"), "400") == 0,
+               "sender-only refuses another host");
+        const auto after_other = refusal();
+        expect(after_other.first == before + 1 &&
+                   after_other.second.find("not the sending device") != std::string::npos,
+               "sender-only reports its reason");
+        expect(std::strcmp(play_status("https://media.example.test/x.mp4"), "400") == 0,
+               "sender-only refuses a host name");
+        expect(is_400(classic_play("http://10.1.2.3/x.mp4")), "sender-only refuses classic /play");
+        expect(hosted_play(1.0).find("200 OK") != std::string::npos,
+               "sender-only accepts the sender's own media server");
+
+        raop_set_media_policy(raop, false, false);
+        const int off_before = refusal().first;
+        expect(std::strcmp(play_status("http://10.1.2.3/x.mp4"), "400") == 0,
+               "video off refuses binary /play");
+        expect(is_400(hosted_play(1.0)), "video off refuses sender-hosted /play");
+        expect(is_400(classic_play("http://10.1.2.3/x.mp4")), "video off refuses classic /play");
+        plist_t off_item = plist_new_dict();
+        plist_dict_set_item(off_item, "uuid", plist_new_string("0FF0FF0F-0000-4000-8000-000000000001"));
+        plist_dict_set_item(off_item, "Content-Location",
+                            plist_new_string("http://10.1.2.3/inserted.mp4"));
+        plist_t off_params = plist_new_dict();
+        plist_dict_set_item(off_params, "item", off_item);
+        plist_t off_action = plist_new_dict();
+        plist_dict_set_item(off_action, "type", plist_new_string("playlistInsert"));
+        plist_dict_set_item(off_action, "params", off_params);
+        expect(is_400(binaryPlistExchange(port, "/action", session, off_action)),
+               "video off refuses playlistInsert");
+        plist_free(off_action);
+        const auto after_off = refusal();
+        expect(after_off.first == off_before + 4 &&
+                   after_off.second.find("turned off") != std::string::npos,
+               "video off reports every refusal");
+
+        raop_set_media_policy(raop, true, false);
+        expect(std::strcmp(play_status("http://10.1.2.3/x.mp4"), "200") == 0,
+               "defaults accept another host again");
+    }
+    std::printf("video_settings=%s\n", video_settings_ok ? "enforced" : "FAILED");
+
     // The session belongs to the peer whose /play started it: another peer
     // (here ::1) cannot stop, pause, scrub or edit it.
     const auto exchange6 = [&](const std::string& request) {
@@ -1258,5 +1341,6 @@ int main(int argc, char** argv)
     raop_destroy(raop);
     dnssd_destroy(dnssd);
     return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok &&
+        video_settings_ok &&
         oversized_ok && budget_ok && nonreader_ok && binding_ok && features_ok && large_transfer_ok ? 0 : 1;
 }

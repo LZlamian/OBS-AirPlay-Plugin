@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <utility>
@@ -112,12 +113,14 @@ UxPlayIntegration::UxPlayIntegration()
     , m_actual_port(0)
 {
     m_clear_thread = std::thread(&UxPlayIntegration::deferredClearLoop, this);
+    MediaPlayer::setRefusalCallback([this](const std::string& reason) { recordRefusal(reason); });
 }
 
 UxPlayIntegration::~UxPlayIntegration()
 {
     stop();
     stopDeferredClearThread();
+    MediaPlayer::setRefusalCallback(nullptr);
 }
 
 void UxPlayIntegration::stopDeferredClearThread()
@@ -353,8 +356,17 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             blog(LOG_ERROR, "[MEDIA] POST /play did not provide a usable media URL");
             return;
         }
+        if (!self->m_accept_video.load()) {
+            // Turned off after the receiver accepted the item (an HLS item
+            // starts once its playlists have come over the reverse channel).
+            static const char reason[] = "AirPlay video is turned off on this receiver";
+            blog(LOG_WARNING, "[MEDIA] AirPlay video item refused: %s", reason);
+            self->recordRefusal(reason);
+            return;
+        }
         blog(LOG_INFO, "[MEDIA] POST /play supplied a media URL (start=%.3fs)",
              start_position);
+        self->clearRefusal();
         // Stop a previous URL worker before resetting shared decoder
         // state. The previous frame stays on screen until the new item's
         // first frame replaces it, so switches never flash an empty source.
@@ -367,6 +379,10 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         self->notifyStateChanged();
         self->m_frame_shown.store(true);
         self->m_media_player->play(location, start_position);
+    };
+    callbacks.on_video_refused = [](void* cls, const char* reason) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (self) self->recordRefusal(reason ? reason : "refused");
     };
     callbacks.on_video_scrub = [](void* cls, const float position) {
         auto* self = static_cast<UxPlayIntegration*>(cls);
@@ -601,6 +617,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             for (unsigned short port : ports) list += (list.empty() ? "" : ",") + std::to_string(port);
             blog(LOG_INFO, "AirPlay video may fetch from other hosts on ports %s", list.c_str());
         }
+        raop_set_media_policy(m_raop, m_accept_video.load(), m_sender_only.load());
 
         if (media_trace_requested()) {
             // Raise UxPlay's logger (default LOGGER_WARNING) so the [MEDIA]
@@ -884,6 +901,52 @@ std::string UxPlayIntegration::lastError() const
 {
     std::lock_guard<std::mutex> lock(m_status_mutex);
     return m_last_error;
+}
+
+void UxPlayIntegration::setVideoPolicy(bool accept_video, bool sender_only)
+{
+    std::lock_guard<std::mutex> lifecycle(m_lifecycle_mutex);
+    const bool accept_changed = m_accept_video.exchange(accept_video) != accept_video;
+    const bool sender_only_changed = m_sender_only.exchange(sender_only) != sender_only;
+    const bool changed = accept_changed || sender_only_changed;
+    if (m_raop) raop_set_media_policy(m_raop, accept_video, sender_only);
+    if (changed) {
+        blog(LOG_INFO, "[AirPlay] AirPlay video %s%s", accept_video ? "accepted" : "turned off",
+             accept_video && sender_only ? ", only from the sending device" : "");
+    }
+}
+
+void UxPlayIntegration::recordRefusal(const std::string& reason)
+{
+    char when[16] = "";
+    const time_t now = time(nullptr);
+    struct tm local = {};
+    if (localtime_r(&now, &local)) strftime(when, sizeof(when), "%H:%M:%S", &local);
+    std::function<void()> callback;
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        m_last_refusal = std::string(when) + ": " + reason;
+        callback = m_state_changed;
+    }
+    if (callback) callback();
+}
+
+void UxPlayIntegration::clearRefusal()
+{
+    std::function<void()> callback;
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        if (m_last_refusal.empty()) return;
+        m_last_refusal.clear();
+        callback = m_state_changed;
+    }
+    if (callback) callback();
+}
+
+std::string UxPlayIntegration::lastRefusal() const
+{
+    std::lock_guard<std::mutex> lock(m_status_mutex);
+    return m_last_refusal;
 }
 
 std::string UxPlayIntegration::connectionState() const

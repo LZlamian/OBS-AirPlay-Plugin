@@ -46,6 +46,19 @@ extern "C" {
 namespace {
 
 std::atomic<bool> g_allow_insecure_tls{false};
+std::mutex g_refusal_mutex; // leaf
+MediaRefusalCallback g_refusal_callback;
+
+// A URL the policy refused: already logged by the caller.
+void report_refusal(const std::string& reason)
+{
+    MediaRefusalCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(g_refusal_mutex);
+        callback = g_refusal_callback;
+    }
+    if (callback) callback(reason);
+}
 
 std::string ffmpeg_error(int error)
 {
@@ -467,6 +480,7 @@ private:
             if (!refused.empty()) {
                 blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
                      safe_location_for_log(redirected).c_str(), refused.c_str());
+                report_refusal(refused);
                 avio_closep(&m_inner);
                 return false;
             }
@@ -939,6 +953,7 @@ private:
         if (!refused.empty()) {
             blog(LOG_WARNING, "[MEDIA] refused to fetch %s: %s",
                  safe_location_for_log(target).c_str(), refused.c_str());
+            report_refusal(refused);
             return AVERROR(EPERM);
         }
         // Nested opens do not inherit the item's TLS options.
@@ -954,6 +969,7 @@ private:
             if (!refused.empty()) {
                 blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
                      safe_location_for_log(redirected).c_str(), refused.c_str());
+                report_refusal(refused);
                 format->io_close2(format, *pb);
                 *pb = nullptr;
                 return AVERROR(EPERM);
@@ -999,6 +1015,7 @@ private:
                 // refused by policyIoOpen.
                 blog(LOG_WARNING, "[MEDIA] refused HLS manifest redirect to %s: %s",
                      safe_location_for_log(final_location).c_str(), refused.c_str());
+                report_refusal(refused);
                 avio_closep(&io);
                 return location;
             }
@@ -2231,6 +2248,7 @@ private:
                                               : media_url_policy::checkLocalFile(location);
         if (!refused.empty()) {
             markOpenFailure(("media URL refused: " + refused).c_str());
+            report_refusal(refused);
             return;
         }
         policy_item_url = location;
@@ -2243,6 +2261,7 @@ private:
                 media_url_policy::checkNested(playback_location, location);
             if (!variant_refused.empty()) {
                 markOpenFailure(("HLS rendition URL refused: " + variant_refused).c_str());
+                report_refusal(variant_refused);
                 return;
             }
         }
@@ -2394,6 +2413,12 @@ float MediaPlayer::pauseForPlaylistRemoval()
 void MediaPlayer::setAllowInsecureTls(bool allow)
 {
     g_allow_insecure_tls.store(allow, std::memory_order_relaxed);
+}
+
+void MediaPlayer::setRefusalCallback(MediaRefusalCallback callback)
+{
+    std::lock_guard<std::mutex> lock(g_refusal_mutex);
+    g_refusal_callback = std::move(callback);
 }
 
 void MediaPlayer::setFollowSenderClock(bool follow)

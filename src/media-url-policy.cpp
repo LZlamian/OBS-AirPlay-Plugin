@@ -21,6 +21,9 @@ std::mutex g_ports_mutex;
 std::vector<unsigned short> g_ports{80, 443, 8080, 8443};
 std::atomic<bool> g_loopback_for_testing{false};
 std::atomic<bool> g_local_files_for_testing{false};
+std::atomic<bool> g_sender_only{false};
+
+constexpr const char* kNotSender = "host is not the sending device (only the sending device is allowed)";
 
 struct UrlParts {
     std::string host; // lower case, no brackets or IPv6 zone
@@ -166,6 +169,24 @@ std::string checkHost(const std::string& host)
     return refused.empty() ? "" : "host resolves to a " + refused;
 }
 
+// A literal address as 16 bytes (IPv4 as IPv4-mapped IPv6).
+bool literalAddress(const std::string& host, unsigned char out[16])
+{
+    in6_addr v6 = {};
+    in_addr v4 = {};
+    if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) {
+        std::memcpy(out, v6.s6_addr, 16);
+        return true;
+    }
+    if (inet_aton(host.c_str(), &v4) == 1) {
+        static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+        std::memcpy(out, mapped, 12);
+        std::memcpy(out + 12, &v4.s_addr, 4);
+        return true;
+    }
+    return false;
+}
+
 bool portAllowed(int port)
 {
     std::lock_guard<std::mutex> lock(g_ports_mutex);
@@ -208,6 +229,16 @@ std::vector<unsigned short> parsePortList(const std::string& text)
     return ports;
 }
 
+void setSenderOnly(bool sender_only)
+{
+    g_sender_only.store(sender_only);
+}
+
+bool senderOnly()
+{
+    return g_sender_only.load();
+}
+
 void setLoopbackAllowedForTesting(bool allowed)
 {
     g_loopback_for_testing.store(allowed);
@@ -229,6 +260,7 @@ std::string checkItem(const std::string& url)
         return "";
     }
     if (parts.host == "localhost") return "";
+    if (g_sender_only) return kNotSender;
     return checkHost(parts.host);
 }
 
@@ -239,6 +271,16 @@ std::string checkNested(const std::string& url, const std::string& item_url)
     UrlParts item;
     if (split(item_url, item) && item.host == parts.host && item.port == parts.port) {
         return "";
+    }
+    if (g_sender_only) {
+        // The item's address is the sender's (the receiver checked it); its
+        // other ports are the sender's too.
+        unsigned char wanted[16];
+        unsigned char got[16];
+        const bool same_address = !item.host.empty() && item.host != "localhost" &&
+            literalAddress(item.host, wanted) && literalAddress(parts.host, got) &&
+            std::memcmp(wanted, got, 16) == 0;
+        return same_address ? "" : kNotSender;
     }
     if (!portAllowed(parts.port) && !g_loopback_for_testing) {
         return "port " + std::to_string(parts.port) + " not allowed";

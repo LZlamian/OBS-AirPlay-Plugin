@@ -2,6 +2,18 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
+## Unreleased
+
+Receiver settings for AirPlay video:
+- **Accept AirPlay video** (on by default): when off, POST /play (and an
+  item swapped in with playlistInsert) is answered 400, so the device falls
+  back or gives up; screen mirroring is unaffected.
+- **Only fetch AirPlay video from the sending device** (off by default): the
+  item URL must be the sender's own address, and redirects and HLS
+  sub-resources must stay on it; other hosts are refused.
+- Every refusal is logged with its reason, and the latest one is shown on the
+  source's Status line.
+
 ## 2.6.0 (2026-10-18)
 
 Security and network hardening:
