@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "airplay-server.hpp"
+#include <algorithm>
+#include <ctime>
 #include "airplay-source.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
@@ -38,6 +40,25 @@ void AirPlayServer::stopVideoThread()
 }
 
 namespace {
+// CPU time used so far by the calling thread.
+uint64_t thread_cpu_ns()
+{
+    struct timespec ts = {};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * UINT64_C(1000000000) +
+           static_cast<uint64_t>(ts.tv_nsec);
+}
+
+// p-th percentile (0..1) of the samples, in milliseconds (sorts them).
+double percentile_ms(std::vector<uint64_t>& samples, double p)
+{
+    if (samples.empty()) return 0.0;
+    std::sort(samples.begin(), samples.end());
+    const size_t index = std::min(samples.size() - 1,
+                                  static_cast<size_t>(p * (samples.size() - 1) + 0.5));
+    return samples[index] / 1e6;
+}
+
 // A payload a decoder can start from: one with a sequence parameter set or
 // an IDR/IRAP picture.
 bool starts_decodable_stream(const uint8_t* data, size_t size, bool is_h265)
@@ -70,7 +91,7 @@ void AirPlayServer::videoDecodeLoop()
         m_video_queue.pop_front();
         lock.unlock();
         decodeAndOutputVideo(pending.data.data(), pending.data.size(), pending.pts,
-                             pending.is_h265);
+                             pending.is_h265, pending.arrived_ns);
         lock.lock();
         // The buffer is used again for a later payload.
         if (m_spare_video_buffers.size() < 4) {
@@ -113,6 +134,8 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
         pending.data.assign(data, data + size);
         pending.pts = pts;
         pending.is_h265 = is_h265;
+        pending.arrived_ns = g_latency_telemetry_enabled.load(std::memory_order_relaxed)
+            ? os_gettime_ns() : 0;
         m_video_queue.push_back(std::move(pending));
     }
     m_video_queue_cv.notify_one();
@@ -257,7 +280,7 @@ void AirPlayServer::unregisterSource(obs_source_t* source)
 }
 
 void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint64_t pts,
-                                         bool is_h265)
+                                         bool is_h265, uint64_t arrived_ns)
 {
     H264Decoder* decoder = is_h265 ? m_h265_decoder.get() : m_h264_decoder.get();
     if (!decoder) {
@@ -419,6 +442,33 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
         }
         m_v_last_output_ns = t_output_end;
         ++m_v_window_count;
+        if (arrived_ns && t_output_end > arrived_ns) {
+            m_v_latency_samples.push_back(t_output_end - arrived_ns);
+        }
+        m_v_decode_samples.push_back(decode_ns);
+        if (!m_v_window_started_ns) {
+            m_v_window_started_ns = t_output_end;
+            m_v_window_cpu_ns = thread_cpu_ns();
+        } else if (t_output_end - m_v_window_started_ns >= UINT64_C(10000000000)) {
+            // Percentiles say more than an average: one slow frame in a
+            // window is a stutter, a slow median is a slow decoder.
+            const double seconds = (t_output_end - m_v_window_started_ns) / 1e9;
+            const uint64_t cpu_now = thread_cpu_ns();
+            blog(LOG_INFO,
+                 "[latency] mirror %.1fs: arrival-to-OBS p50=%.2fms p95=%.2fms max=%.2fms  "
+                 "decode p50=%.2fms p95=%.2fms  decode thread CPU %.1f%% (%s)",
+                 seconds, percentile_ms(m_v_latency_samples, 0.50),
+                 percentile_ms(m_v_latency_samples, 0.95),
+                 percentile_ms(m_v_latency_samples, 1.0),
+                 percentile_ms(m_v_decode_samples, 0.50),
+                 percentile_ms(m_v_decode_samples, 0.95),
+                 100.0 * (cpu_now - m_v_window_cpu_ns) / 1e9 / seconds,
+                 decoder->usingHardware() ? "hardware" : "software");
+            m_v_latency_samples.clear();
+            m_v_decode_samples.clear();
+            m_v_window_started_ns = t_output_end;
+            m_v_window_cpu_ns = cpu_now;
+        }
         if (m_v_window_count >= 120) {
             const double n = static_cast<double>(m_v_window_count);
             const double intervals_n = n > 1.0 ? n - 1.0 : 1.0;
@@ -439,6 +489,9 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
             m_v_window_count = 0;
         }
     } else if (m_v_window_count != 0) {
+        m_v_latency_samples.clear();
+        m_v_decode_samples.clear();
+        m_v_window_started_ns = 0;
         m_v_decode_ns_sum = m_v_decode_ns_max = 0;
         m_v_output_ns_sum = m_v_output_ns_max = 0;
         m_v_interval_ns_sum = m_v_interval_ns_max = 0;

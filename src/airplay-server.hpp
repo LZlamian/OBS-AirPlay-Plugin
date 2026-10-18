@@ -63,7 +63,8 @@ public:
     void outputMediaAudioFrame(const MediaAudioFrame& decoded);
     
 private:
-    void decodeAndOutputVideo(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
+    void decodeAndOutputVideo(const uint8_t* data, size_t size, uint64_t pts, bool is_h265,
+                              uint64_t arrived_ns);
     void videoDecodeLoop();
     void stopVideoThread();
 
@@ -75,6 +76,7 @@ private:
         std::vector<uint8_t> data;
         uint64_t pts = 0;
         bool is_h265 = false;
+        uint64_t arrived_ns = 0;  // when UxPlay handed it over
     };
     static constexpr size_t kMaxQueuedVideo = 60;
     std::mutex m_video_queue_mutex;
@@ -124,6 +126,12 @@ private:
     uint64_t m_v_last_output_ns = 0;
     uint64_t m_v_interval_ns_sum = 0, m_v_interval_ns_max = 0;
     uint32_t m_v_window_count = 0;
+    // Telemetry windows of ~10 s: per-frame arrival-to-OBS latency and
+    // decode time, for p50/p95, and the decode thread's CPU time.
+    std::vector<uint64_t> m_v_latency_samples;
+    std::vector<uint64_t> m_v_decode_samples;
+    uint64_t m_v_window_started_ns = 0;
+    uint64_t m_v_window_cpu_ns = 0;
 
     uint64_t m_a_decode_ns_sum = 0, m_a_decode_ns_max = 0;
     uint64_t m_a_output_ns_sum = 0, m_a_output_ns_max = 0;

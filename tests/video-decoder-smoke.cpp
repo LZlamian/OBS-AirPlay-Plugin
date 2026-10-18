@@ -146,19 +146,33 @@ double cpuPerFrame(H264Decoder& decoder, const Stream& stream)
     return frames ? (processCpuMs() - before) / frames : 0.0;
 }
 
-std::vector<Picture> decodeAll(H264Decoder& decoder, const Stream& stream, double* milliseconds)
+// `milliseconds`: wall time per picture in steady state, from the first
+// picture on: the first packet also creates the decoder session (tens of
+// ms in hardware), which once made hardware look several times slower than
+// software at small sizes.
+std::vector<Picture> decodeAll(H264Decoder& decoder, const Stream& stream, double* milliseconds,
+                               double* first_ms = nullptr)
 {
     std::vector<Picture> pictures;
     const auto started = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point first_picture;
     for (const auto& packet : stream.packets) {
         DecodedVideoFrame frame;
         if (decoder.decodeToI420(packet.data(), packet.size(), frame)) {
+            if (pictures.empty()) first_picture = std::chrono::steady_clock::now();
             pictures.push_back(copyPicture(frame, decoder.usingHardware()));
         }
     }
+    const auto ended = std::chrono::steady_clock::now();
+    if (first_ms) {
+        *first_ms = pictures.empty() ? 0.0
+            : std::chrono::duration<double, std::milli>(first_picture - started).count();
+    }
     if (milliseconds) {
-        *milliseconds = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - started).count();
+        *milliseconds = pictures.size() > 1
+            ? std::chrono::duration<double, std::milli>(ended - first_picture).count() *
+                  pictures.size() / (pictures.size() - 1)
+            : std::chrono::duration<double, std::milli>(ended - started).count();
     }
     return pictures;
 }
@@ -333,8 +347,12 @@ int main(int argc, char** argv)
     H264Decoder automatic(a.codec, H264Decoder::Mode::Auto);
     double software_ms = 0.0;
     double automatic_ms = 0.0;
-    const std::vector<Picture> reference = decodeAll(software, a, &software_ms);
-    const std::vector<Picture> pictures = decodeAll(automatic, a, &automatic_ms);
+    double software_first_ms = 0.0;
+    double automatic_first_ms = 0.0;
+    const std::vector<Picture> reference = decodeAll(software, a, &software_ms, &software_first_ms);
+    const std::vector<Picture> pictures = decodeAll(automatic, a, &automatic_ms, &automatic_first_ms);
+    std::printf("first-picture: software=%.1f ms auto=%.1f ms (session creation, not in the "
+                "per-frame figures)\n", software_first_ms, automatic_first_ms);
     size_t hardware_frames = 0;
     double worst = 99.0;
     // Both paths must hand over the stream's own range, or the same picture
