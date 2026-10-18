@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -594,6 +595,17 @@ private:
         return m_interrupt.callback && m_interrupt.callback(m_interrupt.opaque);
     }
 
+    // Waits before another attempt (50 ms more each time) in 10 ms steps,
+    // so stop() does not wait for the backoff. False when interrupted.
+    bool backOff(int attempt) const
+    {
+        for (int waited = 0; waited < 50 * (attempt + 1); waited += 10) {
+            if (interrupted()) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return !interrupted();
+    }
+
     bool reopen(int64_t offset)
     {
         if (m_inner) avio_closep(&m_inner);
@@ -646,8 +658,8 @@ private:
             if (self->m_size <= 0 || self->m_position >= self->m_size) return last;
             // Stopped short of the known size: continue on a fresh request.
             ++self->m_reopens;
-            if (!self->reopen(self->m_position)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50 * (attempt + 1)));
+            if (!self->reopen(self->m_position) && !self->backOff(attempt)) {
+                return AVERROR_EXIT;
             }
         }
         return last == AVERROR_EOF ? AVERROR(EIO) : last;
@@ -684,7 +696,7 @@ private:
         for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
             if (self->interrupted()) return AVERROR_EXIT;
             if (self->reopen(target)) return target;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50 * (attempt + 1)));
+            if (!self->backOff(attempt)) return AVERROR_EXIT;
         }
         return AVERROR(EIO);
     }
@@ -873,6 +885,10 @@ public:
             stop_requested.store(true, std::memory_order_release);
         }
         state_cv.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            queue_cv.notify_all();
+        }
         if (worker.joinable()) {
             worker.join();
         }
@@ -953,6 +969,8 @@ public:
         seek_target = std::max(0.0, position);
         seek_pending = true;
         ++seek_generation;
+        // A worker waiting for room in the video queue takes the seek now.
+        queue_cv.notify_all();
         info.position = seek_target;
         // The sender is at this position now (if it is playing).
         anchor_valid = info.rate > 0.0f;
@@ -1183,9 +1201,111 @@ private:
         int turns = 0;                // clockwise quarter turns to apply
         bool hardware = false;        // the decoder was opened for hardware
         int hardware_errors = 0;      // consecutive, since the last picture
-        bool reopen_in_software = false;
+        // Set by the presenter, taken by the worker (which first waits for
+        // the presenter to go idle before it changes the fields above).
+        std::atomic<bool> reopen_in_software{false};
         bool mode_logged = false;
     };
+
+    // Decoded video frames waiting for the presenter thread: decoding runs up
+    // to kVideoQueueFrames ahead of what is on screen, instead of stopping
+    // while each frame waits for its presentation time.
+    struct QueuedFrame {
+        AVFrame* frame = nullptr;
+        AVStream* stream = nullptr;
+        double format_start_seconds = 0.0;
+        uint64_t epoch = 0;
+    };
+    static constexpr size_t kVideoQueueFrames = 3;
+    std::mutex queue_mutex;
+    std::condition_variable queue_cv;
+    std::deque<QueuedFrame> video_queue;      // under queue_mutex
+    bool presenter_busy = false;              // under queue_mutex
+    bool presenter_quit = false;              // under queue_mutex
+    // Advanced by the worker at every seek it carries out; queued frames
+    // from an older epoch are dropped.
+    std::atomic<uint64_t> queue_epoch{0};
+    // The epoch of the frame the presenter is showing (presenter thread only):
+    // a seek carried out while it waits makes it stale.
+    uint64_t presenting_epoch = 0;
+
+    void clearVideoQueue()
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        for (QueuedFrame& queued : video_queue) av_frame_free(&queued.frame);
+        video_queue.clear();
+        queue_cv.notify_all();
+    }
+
+    // Worker: hands a decoded frame to the presenter, waiting while the
+    // queue is full. Gives up (dropping the frame) on stop or a new seek.
+    void queueVideoFrame(AVFrame* decoded, AVStream* stream, double format_start_seconds)
+    {
+        AVFrame* copy = av_frame_clone(decoded);
+        if (!copy) return;
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        // (Rechecked every 50 ms: seek() notifies without queue_mutex.)
+        while (!(video_queue.size() < kVideoQueueFrames || stopOrSeekPending())) {
+            queue_cv.wait_for(lock, std::chrono::milliseconds(50));
+        }
+        if (stopOrSeekPending()) {
+            av_frame_free(&copy);
+            return;
+        }
+        video_queue.push_back({copy, stream, format_start_seconds, queue_epoch.load()});
+        queue_cv.notify_all();
+    }
+
+    bool stopOrSeekPending()
+    {
+        if (stop_requested.load(std::memory_order_acquire)) return true;
+        std::lock_guard<std::mutex> lock(state_mutex);
+        return seek_pending;
+    }
+
+    // Worker: waits until every queued frame has been presented (end of
+    // stream, or before the worker changes what the presenter uses).
+    void waitForPresenterIdle()
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        while (!(video_queue.empty() && !presenter_busy) &&
+               !stop_requested.load(std::memory_order_acquire)) {
+            queue_cv.wait_for(lock, std::chrono::milliseconds(50));
+        }
+    }
+
+    void presenterLoop(VideoOutput* out)
+    {
+        for (;;) {
+            QueuedFrame queued;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_cv.wait(lock, [&] {
+                    return presenter_quit || !video_queue.empty() ||
+                           stop_requested.load(std::memory_order_acquire);
+                });
+                if (stop_requested.load(std::memory_order_acquire) ||
+                    (presenter_quit && video_queue.empty())) {
+                    break;
+                }
+                queued = video_queue.front();
+                video_queue.pop_front();
+                presenter_busy = true;
+                queue_cv.notify_all();
+            }
+            presenting_epoch = queued.epoch;
+            if (queued.epoch == queue_epoch.load()) {
+                emitVideo(queued.frame, queued.stream, queued.format_start_seconds, out);
+            }
+            av_frame_free(&queued.frame);
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            presenter_busy = false;
+            queue_cv.notify_all();
+        }
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        presenter_busy = false;
+        queue_cv.notify_all();
+    }
 
     bool openDecoder(AVFormatContext* format, int stream_index, AVCodecContext** decoder,
                      bool allow_hardware = false, bool* hardware = nullptr)
@@ -1304,12 +1424,17 @@ private:
         return false;
     }
 
+    // Audio is handed to OBS this much before it is due, stamped with its
+    // own time: OBS buffers it, and the worker is free to decode video.
+    static constexpr double kAudioLeadSeconds = 0.150;
+
     bool waitForPresentation(double position, uint64_t* timestamp_ns, bool is_video)
     {
         std::unique_lock<std::mutex> lock(state_mutex);
         std::chrono::steady_clock::time_point target;
         for (;;) {
-            if (stop_requested.load(std::memory_order_acquire) || seek_pending) {
+            if (stop_requested.load(std::memory_order_acquire) || seek_pending ||
+                (is_video && presenting_epoch != queue_epoch.load())) {
                 return false;
             }
             if (info.rate <= 0.0f) {
@@ -1335,7 +1460,8 @@ private:
                 // shown at its proper time after resume, not dropped.
                 state_cv.wait_for(lock, std::chrono::milliseconds(250), [&] {
                     return stop_requested.load(std::memory_order_acquire) || seek_pending ||
-                           info.rate > 0.0f || (preview_pending && info.has_video);
+                           info.rate > 0.0f || (preview_pending && info.has_video) ||
+                           (is_video && presenting_epoch != queue_epoch.load());
                 });
                 continue;
             }
@@ -1360,13 +1486,25 @@ private:
             target = clock_wall_time +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(delta));
-            if (now >= target) {
+            const auto wake = is_video ? target
+                : target - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                      std::chrono::duration<double>(kAudioLeadSeconds));
+            if (now >= wake) {
                 break;
             }
-            state_cv.wait_until(lock, target);
+            state_cv.wait_until(lock, wake);
         }
 
-        info.position = std::max(info.position, position);
+        // The output's position follows the picture (audio, sent ahead,
+        // only for an audio-only item, and then by what is audible).
+        if (is_video) {
+            info.position = std::max(info.position, position);
+        } else if (!info.has_video) {
+            const double audible = position -
+                std::max(0.0, std::chrono::duration<double>(
+                    target - std::chrono::steady_clock::now()).count() * info.rate);
+            info.position = std::max(info.position, audible);
+        }
         const auto target_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             target.time_since_epoch()).count();
         // steady_clock and OBS use the host monotonic clock on macOS. If an
@@ -1409,6 +1547,14 @@ private:
             seek_pending = false;
             clock_initialized = false;
         }
+        // Frames decoded before the seek are not shown, including one the
+        // presenter is waiting with.
+        queue_epoch.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            state_cv.notify_all();
+        }
+        clearVideoQueue();
 
         const int64_t timestamp = static_cast<int64_t>(
             (std::max(0.0, target - preroll) + stream_start_seconds(format)) * AV_TIME_BASE);
@@ -1448,7 +1594,7 @@ private:
         }
 
         const double position = timestamp_seconds(decoded, stream, format_start_seconds);
-        if (position < 0.0) {
+        if (position < 0.0 || presenting_epoch != queue_epoch.load()) {
             return;
         }
         bool coarse_preview = false;
@@ -1748,7 +1894,8 @@ private:
                 break;
             }
             if (video) {
-                emitVideo(decoded, stream, format_start_seconds, video_output);
+                (void)video_output;
+                queueVideoFrame(decoded, stream, format_start_seconds);
             } else {
                 emitAudio(decoded, stream, decoder, format_start_seconds,
                           resampler, input_layout, input_rate, input_format);
@@ -1947,6 +2094,15 @@ private:
         video_output.i420 = av_frame_alloc();
         video_output.transfer = av_frame_alloc();
         video_output.rotated = av_frame_alloc();
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            presenter_quit = false;
+            presenter_busy = false;
+        }
+        std::thread presenter;
+        if (video_decoder) {
+            presenter = std::thread(&Impl::presenterLoop, this, &video_output);
+        }
         SwrContext* resampler = nullptr;
         AVChannelLayout input_layout = {};
         int input_rate = 0;
@@ -2075,10 +2231,11 @@ private:
             }
             av_packet_unref(packet);
 
-            if (video_output.reopen_in_software) {
+            if (video_output.reopen_in_software.load()) {
                 // Hardware decoding failed or does not take this stream:
                 // decode the rest of the item in software, continuing from
                 // the picture on screen.
+                waitForPresenterIdle();
                 video_output.reopen_in_software = false;
                 video_output.hardware = false;
                 video_output.hardware_errors = 0;
@@ -2110,6 +2267,8 @@ private:
                              format_start_seconds, &video_output, &resampler,
                              &input_layout, &input_rate, &input_format, decoded);
             }
+            // The end is reached once the last queued picture is on screen.
+            waitForPresenterIdle();
             std::lock_guard<std::mutex> lock(state_mutex);
             info.ended = true;
             info.rate = 0.0f;
@@ -2117,6 +2276,14 @@ private:
             info.playback_buffer_full = false;
             blog(LOG_INFO, "[MEDIA] playback reached end of stream at %.3fs", info.position);
         }
+
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            presenter_quit = true;
+            queue_cv.notify_all();
+        }
+        if (presenter.joinable()) presenter.join();
+        clearVideoQueue();
 
         av_channel_layout_uninit(&input_layout);
         swr_free(&resampler);
