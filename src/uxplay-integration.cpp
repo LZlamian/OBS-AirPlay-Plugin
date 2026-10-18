@@ -730,19 +730,22 @@ void UxPlayIntegration::updateServerName(const std::string& name)
     dnssd_set_airserver_profile(new_dnssd, true);
 #endif
 
-    // Unregister the old service FIRST so iOS sees it disappear, which forces
-    // a fresh mDNS discovery when the new name is announced.  If we register
-    // the new name before removing the old one, iOS caches the old entry and
-    // ignores the new advertisement until the next connection.
+    // raop_set_dnssd must be called before dnssd_register_raop/airplay because
+    // it sets dnssd->pk (the public key string) via dnssd_set_pk(). Without it,
+    // dnssd->pk is NULL and dnssd_register_raop crashes in strlen(dnssd->pk).
+    // It also comes before unregistering the old context, so GET /info on the
+    // HTTP thread stops reading the old TXT records before they are freed.
+    raop_set_dnssd(raop_ref, new_dnssd);
+
+    // Unregister the old service before registering the new one so iOS sees
+    // it disappear, which forces a fresh mDNS discovery when the new name is
+    // announced.  If we register the new name before removing the old one,
+    // iOS caches the old entry and ignores the new advertisement until the
+    // next connection.
     if (old_dnssd) {
         dnssd_unregister_raop(old_dnssd);
         dnssd_unregister_airplay(old_dnssd);
     }
-
-    // raop_set_dnssd must be called before dnssd_register_raop/airplay because
-    // it sets dnssd->pk (the public key string) via dnssd_set_pk(). Without it,
-    // dnssd->pk is NULL and dnssd_register_raop crashes in strlen(dnssd->pk).
-    raop_set_dnssd(raop_ref, new_dnssd);
 
     // A request handler on UxPlay's HTTP thread may still be reading the old
     // context, so it is not freed now: it is kept until the next name change
