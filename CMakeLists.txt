@@ -352,6 +352,7 @@ if(APPLE)
     find_library(CORE_FOUNDATION CoreFoundation REQUIRED)
     find_library(COCOA_LIBRARY Cocoa REQUIRED)
     find_library(CORE_BLUETOOTH_LIBRARY CoreBluetooth REQUIRED)
+    find_library(USER_NOTIFICATIONS_LIBRARY UserNotifications REQUIRED)
 
     # Update signatures are checked with CryptoKit, which has only a Swift
     # API. The one Swift file is compiled to an object here so any generator
@@ -404,6 +405,7 @@ if(APPLE)
     target_link_libraries(obs-airplay-ble-discovery PRIVATE
         ${COCOA_LIBRARY}
         ${CORE_BLUETOOTH_LIBRARY}
+        ${USER_NOTIFICATIONS_LIBRARY}
     )
     set_target_properties(obs-airplay-ble-discovery PROPERTIES
         OUTPUT_NAME "OBS AirPlay Discovery"

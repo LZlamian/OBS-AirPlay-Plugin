@@ -153,6 +153,13 @@ obs_properties_t* airplay_source_get_properties(void* data)
     obs_properties_add_bool(props, "log_latency_telemetry",
         "Log latency telemetry (decode/output ms, every 120 video / 240 audio frames)");
 
+    obs_property_t* updates = obs_properties_add_bool(props, "check_for_updates",
+        "Check for plugin updates once a day");
+    obs_property_set_long_description(updates,
+        "Asks GitHub once a day whether a newer OBS AirPlay is available. You are only asked, "
+        "never while streaming or recording, and nothing is installed unless you choose "
+        "Install Update. Turn off to make no update requests at all.");
+
     obs_properties_add_text(props, "plugin_version",
         "OBS AirPlay Plugin v" PLUGIN_VERSION, OBS_TEXT_INFO);
 

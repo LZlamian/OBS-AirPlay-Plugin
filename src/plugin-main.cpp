@@ -63,18 +63,40 @@ static void refresh_airplay_source_panels()
     }, nullptr);
 }
 
+// Streaming, recording, a replay buffer or the virtual camera.
+static bool any_output_active()
+{
+    bool active = false;
+    obs_enum_outputs([](void* param, obs_output_t* output) {
+        if (obs_output_active(output)) {
+            *static_cast<bool*>(param) = true;
+            return false;
+        }
+        return true;
+    }, &active);
+    return active;
+}
+
 static void status_thread_func()
 {
+    // The update helper never prompts while an output is active.
+    int outputs_active = -1;
     std::unique_lock<std::mutex> lock(g_status_mutex);
     while (!g_status_quit) {
         g_status_cv.wait_for(lock, std::chrono::seconds(1));
         if (g_status_quit) break;
+        lock.unlock();
         if (g_status_dirty.exchange(false)) {
-            lock.unlock();
             refresh_airplay_source_panels();
-            lock.lock();
         }
+        const int active = any_output_active() ? 1 : 0;
+        if (active != outputs_active) {
+            outputs_active = active;
+            set_helper_obs_outputs_active(active != 0);
+        }
+        lock.lock();
     }
+    set_helper_obs_outputs_active(false);
 }
 
 // Debounce: defer mDNS name updates until the user stops typing for 800ms.
@@ -220,6 +242,7 @@ static void apply_module_runtime(const ModuleSettings& settings)
     g_latency_telemetry_enabled.store(settings.log_latency_telemetry, std::memory_order_relaxed);
     MediaPlayer::setFollowSenderClock(settings.follow_sender_clock);
     MediaPlayer::setAllowInsecureTls(settings.allow_self_signed_media);
+    set_helper_update_checks_enabled(settings.check_for_updates);
 }
 
 static void write_module_settings(obs_data_t* data, const ModuleSettings& settings)

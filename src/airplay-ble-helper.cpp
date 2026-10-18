@@ -3,6 +3,8 @@
 
 #include <obs-module.h>
 
+#include <CoreFoundation/CoreFoundation.h>
+
 #include <cstring>
 #include <spawn.h>
 #include <string>
@@ -13,6 +15,23 @@ extern char **environ;
 
 namespace {
 bool g_helper_started = false;
+
+void set_helper_preference(CFStringRef key, bool value)
+{
+    const CFStringRef domain = CFSTR("com.lzlamian.obs-airplay.discovery");
+    CFPreferencesSetAppValue(key, value ? kCFBooleanTrue : kCFBooleanFalse, domain);
+    CFPreferencesAppSynchronize(domain);
+}
+}
+
+void set_helper_update_checks_enabled(bool enabled)
+{
+    set_helper_preference(CFSTR("OBS-AirPlay-CheckForUpdates"), enabled);
+}
+
+void set_helper_obs_outputs_active(bool active)
+{
+    set_helper_preference(CFSTR("OBS-AirPlay-OutputActive"), active);
 }
 
 bool start_airplay_ble_helper()

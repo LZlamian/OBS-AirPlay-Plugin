@@ -2,6 +2,7 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#import <UserNotifications/UserNotifications.h>
 
 #import "plugin-updater.h"
 
@@ -14,6 +15,14 @@ namespace {
 
 NSString *const kLastUpdateCheckKey = @"OBS-AirPlay-LastUpdateCheck";
 NSString *const kSkippedVersionKey = @"OBS-AirPlay-SkippedVersion";
+// "Later": no prompt for a week.
+NSString *const kSnoozedUntilKey = @"OBS-AirPlay-SnoozedUntil";
+constexpr NSTimeInterval kSnoozeInterval = 7.0 * 24.0 * 60.0 * 60.0;
+// Written by the plugin (airplay-ble-helper.cpp): the source panel's "Check
+// for updates" option, and whether OBS is streaming or recording.
+NSString *const kCheckForUpdatesKey = @"OBS-AirPlay-CheckForUpdates";
+NSString *const kOutputActiveKey = @"OBS-AirPlay-OutputActive";
+constexpr NSTimeInterval kBusyRetryInterval = 60.0;
 NSString *const kLatestReleaseAPI =
     @"https://api.github.com/repos/LZlamian/OBS-AirPlay-Plugin/releases/latest";
 NSString *const kLatestReleasePage =
@@ -43,21 +52,60 @@ NSImage *alertIcon(pid_t parentPID)
     return icon;
 }
 
+// The plugin writes these while OBS runs; read them fresh each time.
+bool helperPreference(NSString *key, bool fallback)
+{
+    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:key];
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : fallback;
+}
+
+bool updateChecksEnabled()
+{
+    return helperPreference(kCheckForUpdatesKey, true);
+}
+
+bool obsOutputActive()
+{
+    return helperPreference(kOutputActiveKey, false);
+}
+
+// The result of a download is reported in Notification Center, not with a
+// modal alert: it is never urgent and must not interrupt a show.
 void showUpdateResult(NSString *message, NSString *detail, bool offerReleasePage)
 {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.alertStyle = NSAlertStyleInformational;
-    if (gAlertIcon)
-        alert.icon = gAlertIcon;
-    alert.messageText = message;
-    alert.informativeText = detail;
-    [alert addButtonWithTitle:@"OK"];
-    if (offerReleasePage)
-        [alert addButtonWithTitle:@"View Release"];
+    UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+    // Provisional: delivered quietly without asking the user for permission.
+    [center requestAuthorizationWithOptions:UNAuthorizationOptionProvisional |
+                                            UNAuthorizationOptionAlert
+                          completionHandler:^(BOOL granted, NSError *error) {
+        if (!granted) {
+            NSLog(@"[OBS AirPlay Update] notification not allowed (%@): %@ %@",
+                  error.localizedDescription, message, detail);
+            return;
+        }
+        UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+        content.title = message;
+        content.body = detail;
+        if (offerReleasePage)
+            content.userInfo = @{@"url" : kLatestReleasePage};
+        UNNotificationRequest *request = [UNNotificationRequest
+            requestWithIdentifier:[NSUUID UUID].UUIDString content:content trigger:nil];
+        [center addNotificationRequest:request withCompletionHandler:nil];
+    }];
+}
 
-    [NSApp activateIgnoringOtherApps:YES];
-    if ([alert runModal] == NSAlertSecondButtonReturn)
-        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kLatestReleasePage]];
+// Runs `prompt` once OBS is not streaming or recording (and still running).
+void whenOBSIsIdle(pid_t parentPID, void (^prompt)(void))
+{
+    if (!parentIsAlive(parentPID))
+        return;
+    if (obsOutputActive()) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kBusyRetryInterval * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ whenOBSIsIdle(parentPID, prompt); });
+        return;
+    }
+    prompt();
 }
 
 // Downloads the release zip and stages it beside the plugin. The swap itself
@@ -115,7 +163,10 @@ void showUpdatePrompt(NSString *latestVersion, NSString *currentVersion,
     [alert addButtonWithTitle:@"Later"];
     [alert addButtonWithTitle:@"Skip This Version"];
 
-    [NSApp activateIgnoringOtherApps:YES];
+    // Visible above OBS but without activating the helper: OBS keeps the
+    // keyboard focus (no stolen keystrokes or hotkeys mid-show).
+    [alert layout];
+    alert.window.level = NSFloatingWindowLevel;
     // Buttons are numbered from NSAlertFirstButtonReturn in the order added.
     NSInteger choice = [alert runModal] - NSAlertFirstButtonReturn;
     if (!asset)
@@ -124,6 +175,10 @@ void showUpdatePrompt(NSString *latestVersion, NSString *currentVersion,
         downloadUpdate(asset, parentPID);
     } else if (choice == 1) {
         [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kLatestReleasePage]];
+    } else if (choice == 2) {
+        [[NSUserDefaults standardUserDefaults]
+            setObject:[NSDate dateWithTimeIntervalSinceNow:kSnoozeInterval]
+               forKey:kSnoozedUntilKey];
     } else if (choice == 3) {
         [[NSUserDefaults standardUserDefaults] setObject:latestVersion
                                                   forKey:kSkippedVersionKey];
@@ -162,7 +217,15 @@ void installStagedUpdateAfterOBS()
 
 void checkForUpdates(pid_t parentPID)
 {
+    // Off in the source panel: no request at all.
+    if (!updateChecksEnabled()) {
+        NSLog(@"[OBS AirPlay Update] update checks are turned off");
+        return;
+    }
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDate *snoozedUntil = [defaults objectForKey:kSnoozedUntilKey];
+    if ([snoozedUntil isKindOfClass:[NSDate class]] && snoozedUntil.timeIntervalSinceNow > 0)
+        return;
     NSDate *lastCheck = [defaults objectForKey:kLastUpdateCheckKey];
     if ([lastCheck isKindOfClass:[NSDate class]] &&
         -lastCheck.timeIntervalSinceNow < kUpdateCheckInterval) {
@@ -224,14 +287,39 @@ void checkForUpdates(pid_t parentPID)
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (parentIsAlive(parentPID))
-                showUpdatePrompt(latestVersion, installedVersion, asset, parentPID);
+            whenOBSIsIdle(parentPID, ^{
+                if (updateChecksEnabled())
+                    showUpdatePrompt(latestVersion, installedVersion, asset, parentPID);
+            });
         });
     }];
     [task resume];
 }
 
 } // namespace
+
+// Clicking a "could not be installed" notification opens the release page.
+@interface UpdateNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
+@end
+
+@implementation UpdateNotificationDelegate
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+    didReceiveNotificationResponse:(UNNotificationResponse *)response
+             withCompletionHandler:(void (^)(void))completionHandler
+{
+    NSString *url = response.notification.request.content.userInfo[@"url"];
+    if ([url isKindOfClass:[NSString class]])
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:url]];
+    completionHandler();
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler
+{
+    completionHandler(UNNotificationPresentationOptionList);
+}
+@end
 
 @interface AirPlayBLEDelegate : NSObject <CBPeripheralManagerDelegate>
 @property(nonatomic, strong) CBPeripheralManager *manager;
@@ -301,6 +389,9 @@ int main(int argc, const char *argv[])
 
         __strong AirPlayBLEDelegate *delegate = [[AirPlayBLEDelegate alloc] init];
         (void)delegate;
+        __strong UpdateNotificationDelegate *notificationDelegate =
+            [[UpdateNotificationDelegate alloc] init];
+        [UNUserNotificationCenter currentNotificationCenter].delegate = notificationDelegate;
 
         // Common modes: keep watching the parent while the update prompt's
         // modal session is running, so the helper never outlives OBS.
