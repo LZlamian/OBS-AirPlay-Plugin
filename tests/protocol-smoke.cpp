@@ -542,10 +542,10 @@ int main(int argc, char** argv)
         poller.join();
         free(body);
         // 100 ms on a developer Mac; shared CI runners are several times
-        // slower, so CI raises it with OBS_AIRPLAY_LATENCY_BUDGET_MS.
+        // slower and noisier, so CI scales it with OBS_AIRPLAY_TIMING_SCALE.
         double budget_ms = 100.0;
-        if (const char* env = std::getenv("OBS_AIRPLAY_LATENCY_BUDGET_MS")) {
-            if (std::atof(env) > 0.0) budget_ms = std::atof(env);
+        if (const char* env = std::getenv("OBS_AIRPLAY_TIMING_SCALE")) {
+            if (std::atof(env) >= 1.0) budget_ms *= std::atof(env);
         }
         std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms "
                     "(budget %.0f ms) -> %s\n", body_size, polls, worst_poll_ms, budget_ms,

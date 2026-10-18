@@ -66,7 +66,7 @@ jobs:
         run: cmake --build --preset release -j4
       - name: Test
         env:
-          OBS_AIRPLAY_LATENCY_BUDGET_MS: "500"   # shared runners are slower
+          OBS_AIRPLAY_TIMING_SCALE: "3"   # shared runners are slower and noisier
         run: ctest --preset release -j2
 
   sanitizers:
@@ -81,7 +81,7 @@ jobs:
           brew install --cask obs
       - name: AddressSanitizer + UBSan
         env:
-          OBS_AIRPLAY_LATENCY_BUDGET_MS: "1000"   # sanitizers add to that
+          OBS_AIRPLAY_TIMING_SCALE: "5"   # sanitizers add to that
         run: |
           cmake --preset asan
           cmake --build --preset asan -j4

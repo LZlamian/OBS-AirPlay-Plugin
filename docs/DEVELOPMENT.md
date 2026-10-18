@@ -47,6 +47,10 @@ The smokes can also be run by hand (see the usage line of each):
 - `obs-airplay-unit-tests`: the HLS playlist reader, the media port list and
   the audio decoder, without network or OBS.
 
+Timing checks (the large-blob latency budget, follow-clock tolerances) are
+set for a developer Mac; `OBS_AIRPLAY_TIMING_SCALE=3` widens them on slower
+machines, as CI does.
+
 `media-resilient-http` plays through `tests/truncating-server.py`, which cuts
 every response short, as some sender media servers do.
 

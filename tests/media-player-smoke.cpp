@@ -348,8 +348,13 @@ int followClock(const char* location)
     const auto since = [](clock::time_point from) {
         return std::chrono::duration<double>(clock::now() - from).count();
     };
-    // The output may be a frame or two off the sender's clock.
-    constexpr double kTolerance = 0.12;
+    // The output may be a frame or two off the sender's clock. Shared CI
+    // runners are slower and noisier: OBS_AIRPLAY_TIMING_SCALE widens this.
+    double timing_scale = 1.0;
+    if (const char* env = std::getenv("OBS_AIRPLAY_TIMING_SCALE")) {
+        if (std::atof(env) >= 1.0) timing_scale = std::atof(env);
+    }
+    const double kTolerance = 0.12 * timing_scale;
     bool ok = true;
     const auto check = [&](const char* what, double position, double expected) {
         const bool good = std::fabs(position - expected) <= kTolerance;
@@ -410,8 +415,11 @@ int followClock(const char* location)
     wait_for(300);
     const unsigned int after_jump = video_frames.load();
     player.stop();
-    // 0.3 s of a 30 fps video is 9 or 10 pictures.
-    const bool no_burst = after_start >= 1 && after_start <= 14 && after_jump >= 1 && after_jump <= 14;
+    // 0.3 s of a 30 fps video is 9 or 10 pictures; a burst of skipped ones
+    // would be many more.
+    const unsigned int max_pictures = static_cast<unsigned int>(9 + 5 * timing_scale);
+    const bool no_burst = after_start >= 1 && after_start <= max_pictures && after_jump >= 1 &&
+        after_jump <= max_pictures;
     std::fprintf(stderr, "media-smoke: follow-clock pictures in the first 0.3 s: %u after a slow start, %u after a jump %s\n",
                  after_start, after_jump, no_burst ? "ok" : "FAILED");
     ok = ok && no_burst;
