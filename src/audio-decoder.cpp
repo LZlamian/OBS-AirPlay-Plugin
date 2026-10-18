@@ -50,6 +50,7 @@ AudioDecoder::AudioDecoder()
 AudioDecoder::~AudioDecoder()
 {
     resetResampler();
+    av_freep(&m_convert[0]);
 
     if (m_codec_context) {
         avcodec_free_context(&m_codec_context);
@@ -318,6 +319,25 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             break;
         }
 
+        // AAC and ALAC decode to planar float: stereo needs no conversion.
+        const int channels =
+#if OBS_AIRPLAY_HAVE_CH_LAYOUT
+            m_frame->ch_layout.nb_channels;
+#else
+            m_frame->channels;
+#endif
+        if (m_frame->format == AV_SAMPLE_FMT_FLTP && channels == 2 && m_frame->nb_samples > 0 &&
+            m_frame->extended_data[0] && m_frame->extended_data[1]) {
+            const float* l = reinterpret_cast<const float*>(m_frame->extended_data[0]);
+            const float* r = reinterpret_cast<const float*>(m_frame->extended_data[1]);
+            left.insert(left.end(), l, l + m_frame->nb_samples);
+            right.insert(right.end(), r, r + m_frame->nb_samples);
+            sample_rate = m_frame->sample_rate > 0 ? m_frame->sample_rate : kDefaultSampleRate;
+            produced = true;
+            av_frame_unref(m_frame);
+            continue;
+        }
+
         if (!configureResampler(m_frame)) {
             av_frame_unref(m_frame);
             break;
@@ -334,12 +354,19 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             continue;
         }
 
-        uint8_t* out_data[2] = {nullptr, nullptr};
-        int out_linesize = 0;
-        if (av_samples_alloc(out_data, &out_linesize, 2, out_samples, AV_SAMPLE_FMT_FLTP, 0) < 0) {
-            av_frame_unref(m_frame);
-            break;
+        // One conversion buffer, grown when needed, instead of one per packet.
+        if (out_samples > m_convert_capacity) {
+            av_freep(&m_convert[0]);
+            m_convert[1] = nullptr;
+            int out_linesize = 0;
+            if (av_samples_alloc(m_convert, &out_linesize, 2, out_samples, AV_SAMPLE_FMT_FLTP, 0) < 0) {
+                m_convert_capacity = 0;
+                av_frame_unref(m_frame);
+                break;
+            }
+            m_convert_capacity = out_samples;
         }
+        uint8_t** out_data = m_convert;
 
         const int converted = swr_convert(
             m_swr_context,
@@ -355,10 +382,6 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             right.insert(right.end(), r, r + converted);
             sample_rate = m_output_sample_rate;
             produced = true;
-        }
-
-        if (out_data[0]) {
-            av_freep(&out_data[0]);
         }
 
         av_frame_unref(m_frame);

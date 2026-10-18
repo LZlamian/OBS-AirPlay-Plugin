@@ -42,6 +42,8 @@ private:
     bool m_resampler_configured;
     // Codec type whose decoder failed to open, and calls since: retried
     // only now and then, not on every packet.
+    uint8_t* m_convert[2] = {nullptr, nullptr};  // resampler output, reused
+    int m_convert_capacity = 0;
     uint8_t m_failed_codec_type = 0;
     unsigned m_failed_calls = 0;
 #if OBS_AIRPLAY_HAVE_CH_LAYOUT

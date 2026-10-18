@@ -1646,6 +1646,15 @@ private:
             return;
         }
 
+        // Planar float stereo (AAC, most streams) goes to OBS as decoded.
+        if (sample_format == AV_SAMPLE_FMT_FLTP && layout->nb_channels == 2 &&
+            decoded->nb_samples > 0 && decoded->extended_data[0] && decoded->extended_data[1]) {
+            presentAudio(reinterpret_cast<const float*>(decoded->extended_data[0]),
+                         reinterpret_cast<const float*>(decoded->extended_data[1]),
+                         decoded->nb_samples, sample_rate, position);
+            return;
+        }
+
         const bool layout_changed = input_layout->nb_channels == 0 ||
             av_channel_layout_compare(input_layout, layout) != 0;
         if (!*resampler || layout_changed || *input_rate != sample_rate ||
@@ -1676,11 +1685,14 @@ private:
         if (capacity <= 0) {
             return;
         }
-        std::vector<float> left(static_cast<size_t>(capacity));
-        std::vector<float> right(static_cast<size_t>(capacity));
+        // Reused across packets (worker thread only); grows, never shrinks.
+        if (audio_left.size() < static_cast<size_t>(capacity)) {
+            audio_left.resize(static_cast<size_t>(capacity));
+            audio_right.resize(static_cast<size_t>(capacity));
+        }
         uint8_t* output[2] = {
-            reinterpret_cast<uint8_t*>(left.data()),
-            reinterpret_cast<uint8_t*>(right.data())
+            reinterpret_cast<uint8_t*>(audio_left.data()),
+            reinterpret_cast<uint8_t*>(audio_right.data())
         };
         const int converted = swr_convert(
             *resampler, output, capacity,
@@ -1688,7 +1700,13 @@ private:
         if (converted <= 0) {
             return;
         }
+        presentAudio(audio_left.data(), audio_right.data(), converted, sample_rate, position);
+    }
 
+    void presentAudio(const float* left, const float* right, int samples, int sample_rate,
+                      double position)
+    {
+        const int converted = samples;
         uint64_t timestamp_ns = 0;
         if (!waitForPresentation(position, &timestamp_ns, false)) {
             return;
@@ -1700,8 +1718,8 @@ private:
         }
         if (callback) {
             MediaAudioFrame frame;
-            frame.data[0] = left.data();
-            frame.data[1] = right.data();
+            frame.data[0] = left;
+            frame.data[1] = right;
             frame.frames = static_cast<uint32_t>(converted);
             frame.sample_rate = static_cast<uint32_t>(sample_rate);
             frame.timestamp_ns = timestamp_ns;
@@ -2134,6 +2152,9 @@ private:
     MediaPlaybackInfo info;
     // The current item, for reopening it after its end (seek()).
     std::string current_location;
+    // Converted audio, reused for every packet (worker thread only).
+    std::vector<float> audio_left;
+    std::vector<float> audio_right;
     bool seek_pending = false;
     double seek_target = 0.0;
     uint64_t seek_generation = 0;

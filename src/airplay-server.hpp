@@ -74,6 +74,9 @@ private:
     std::unique_ptr<AudioDecoder> m_audio_decoder;
     std::mutex m_decoder_mutex;        // video decoders and their frames
     std::mutex m_audio_decoder_mutex;  // taken alone, or after m_decoder_mutex
+    // Decoded samples, reused for every packet (under m_audio_decoder_mutex).
+    std::vector<float> m_audio_left;
+    std::vector<float> m_audio_right;
     uint64_t m_video_frame_counter = 0;
     uint64_t m_first_decoded_frame_ns = 0;
     // Mirror statistics window ([MIRROR] line every ~10 s while frames arrive).

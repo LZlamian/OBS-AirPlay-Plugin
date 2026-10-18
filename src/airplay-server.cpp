@@ -365,18 +365,18 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
         return;
     }
 
-    std::vector<float> left;
-    std::vector<float> right;
     int sample_rate = 0;
     const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
     const uint64_t t_decode_start = tele ? os_gettime_ns() : 0;
-    {
-        // Its own lock: the video lock is held while a picture is decoded
-        // and copied into OBS, and audio must not wait for that.
-        std::lock_guard<std::mutex> dec_lock(m_audio_decoder_mutex);
-        if (!m_audio_decoder->decode(data, size, codec_type, left, right, sample_rate)) {
-            return;
-        }
+    // Its own lock: the video lock is held while a picture is decoded and
+    // copied into OBS, and audio must not wait for that. Held until OBS has
+    // copied the samples, since the buffers are reused for every packet
+    // (lock order: audio decoder, then sources).
+    std::lock_guard<std::mutex> dec_lock(m_audio_decoder_mutex);
+    std::vector<float>& left = m_audio_left;
+    std::vector<float>& right = m_audio_right;
+    if (!m_audio_decoder->decode(data, size, codec_type, left, right, sample_rate)) {
+        return;
     }
     const uint64_t t_decode_end = tele ? os_gettime_ns() : 0;
 
