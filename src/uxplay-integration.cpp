@@ -195,6 +195,283 @@ void UxPlayIntegration::deferredClearLoop()
     }
 }
 
+// UxPlay's callbacks into this object (cls). They run on UxPlay's threads:
+// the HTTP thread (requests, AirPlay video), the mirror and audio threads.
+raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
+{
+    raop_callbacks_t callbacks = {};
+    callbacks.cls = this;
+
+    // Timing: fires when iOS first TCP-connects (before handshake).
+    callbacks.conn_init = [](void* cls) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (self) {
+            self->m_open_connections.fetch_add(1);
+            self->notifyStateChanged();
+        }
+        const uint64_t now = os_gettime_ns();
+        bool expected = false;
+        if (self && self->m_connection_timing_active.compare_exchange_strong(expected, true)) {
+            self->m_first_video_logged.store(false, std::memory_order_relaxed);
+            self->m_connection_started_ns.store(now);
+            blog(LOG_INFO, "[CONNECT] +0.00ms TCP accepted — AirPlay negotiation starting");
+        }
+    };
+    // A device that goes away leaves its last frame behind unless the
+    // output is cleared: after a short grace period, so that a new
+    // connection that shows something at once (an item switch, a
+    // reconnect) replaces the frame without an empty source in between.
+    callbacks.conn_destroy = [](void* cls) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (!self) {
+            return;
+        }
+        if (self->m_open_connections.fetch_sub(1) <= 1) {
+            self->m_open_connections.store(0);
+            self->m_connection_timing_active.store(false);
+            if (self->m_frame_shown.load()) {
+                self->scheduleDeferredClear("the last AirPlay connection closed");
+            }
+        }
+        self->notifyStateChanged();
+    };
+    // A TEARDOWN that names no stream ends the device's whole mirroring
+    // session (UxPlay reports a video reset only for a single stream).
+    callbacks.conn_teardown = [](void* cls, bool* teardown_96, bool* teardown_110) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (!self || (teardown_96 && *teardown_96) || (teardown_110 && *teardown_110)) {
+            return;
+        }
+        self->processConnReset(false, true);
+        // iOS also ends its mirroring session while AirPlay video goes
+        // on over other connections; that item stays.
+        if (!self->m_media_active.load() && self->m_frame_shown.load()) {
+            self->scheduleDeferredClear("the device ended its AirPlay session");
+        }
+    };
+    callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (!self || !method || !url) {
+            return;
+        }
+        if (strcmp(url, "/feedback") == 0 || strcmp(url, "/playback-info") == 0) {
+            return;
+        }
+
+        const uint64_t now = os_gettime_ns();
+        const uint64_t origin = self->m_connection_started_ns.load();
+        const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
+        static thread_local uint64_t request_started_ns = 0;
+        if (started) {
+            request_started_ns = now;
+            blog(LOG_INFO, "[CONNECT] +%.2fms -> %s %s", elapsed_ms, method, url);
+        } else {
+            const double request_ms = request_started_ns && now >= request_started_ns
+                ? (now - request_started_ns) / 1e6 : 0.0;
+            blog(LOG_INFO, "[CONNECT] +%.2fms <- %s %s (handler %.2fms)",
+                 elapsed_ms, method, url, request_ms);
+            request_started_ns = 0;
+            if (strcmp(method, "TEARDOWN") == 0) {
+                self->m_connection_timing_active.store(false);
+            }
+        }
+    };
+
+    callbacks.mirror_connection_timing = [](void* cls, bool first_data) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        const uint64_t started_ns = self->m_connection_started_ns.load(std::memory_order_relaxed);
+        if (!started_ns) {
+            return;
+        }
+        const double elapsed_ms = (os_gettime_ns() - started_ns) / 1e6;
+        blog(LOG_INFO, "[CONNECT] +%.2fms mirroring TCP %s",
+             elapsed_ms, first_data ? "first header received" : "accepted");
+    };
+    
+    // Set video and audio processing callbacks
+    callbacks.video_process = [](void* cls, raop_ntp_t*, video_decode_struct* data) {
+        if (cls && data) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            self->processVideoData(data);
+        }
+    };
+    
+    callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) {
+        if (cls && data) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            self->processAudioData(data);
+        }
+    };
+
+    // Required by UxPlay runtime; provide safe defaults for callbacks
+    // that UxPlay may call without null checks.
+    callbacks.conn_feedback = [](void* cls) {
+        blog(LOG_DEBUG, "[UxPlay] feedback heartbeat received");
+        UNUSED_PARAMETER(cls);
+    };
+    callbacks.conn_reset = [](void* cls, int reason) {
+        if (cls) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
+            self->m_connection_timing_active.store(false);
+            self->processConnReset(!self->m_media_active.load());
+        }
+    };
+    callbacks.video_flush = [](void* cls) {
+        UNUSED_PARAMETER(cls);
+    };
+    callbacks.audio_flush = [](void* cls) {
+        UNUSED_PARAMETER(cls);
+    };
+    callbacks.audio_set_volume = [](void* cls, float volume) {
+        UNUSED_PARAMETER(cls);
+        UNUSED_PARAMETER(volume);
+    };
+    callbacks.audio_set_metadata = [](void* cls, const void* buffer, int buflen) {
+        UNUSED_PARAMETER(cls);
+        UNUSED_PARAMETER(buffer);
+        UNUSED_PARAMETER(buflen);
+    };
+    callbacks.audio_set_coverart = [](void* cls, const void* buffer, int buflen) {
+        UNUSED_PARAMETER(cls);
+        UNUSED_PARAMETER(buffer);
+        UNUSED_PARAMETER(buflen);
+    };
+    callbacks.audio_set_progress = [](void* cls, uint32_t* start, uint32_t* curr, uint32_t* end) {
+        UNUSED_PARAMETER(cls);
+        UNUSED_PARAMETER(start);
+        UNUSED_PARAMETER(curr);
+        UNUSED_PARAMETER(end);
+    };
+    callbacks.audio_set_client_volume = [](void* cls) -> double {
+        UNUSED_PARAMETER(cls);
+        return -15.0;
+    };
+    callbacks.on_video_play = [](void* cls, const char* location, const float start_position) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (!self || !self->m_media_player || !location || !*location) {
+            blog(LOG_ERROR, "[MEDIA] POST /play did not provide a usable media URL");
+            return;
+        }
+        blog(LOG_INFO, "[MEDIA] POST /play supplied a media URL (start=%.3fs)",
+             start_position);
+        // Stop a previous URL worker before resetting shared decoder
+        // state. The previous frame stays on screen until the new item's
+        // first frame replaces it, so switches never flash an empty source.
+        self->cancelDeferredClear();
+        self->m_media_player->stop();
+        // Not a mirror stream boundary: iOS may cancel this item and keep
+        // mirroring without a new keyframe, so leave the mirror decoder.
+        self->processConnReset(false, false);
+        self->m_media_active.store(true);
+        self->notifyStateChanged();
+        self->m_frame_shown.store(true);
+        self->m_media_player->play(location, start_position);
+    };
+    callbacks.on_video_scrub = [](void* cls, const float position) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (self && self->m_media_player) {
+            blog(LOG_INFO, "[MEDIA] POST /scrub requested %.3fs", position);
+            self->m_media_player->seek(position);
+        }
+    };
+    callbacks.on_video_rate = [](void* cls, const float rate) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (self && self->m_media_player) {
+            self->m_media_player->setRate(rate);
+        }
+    };
+    callbacks.on_video_stop = [](void* cls) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (self && self->m_media_player) {
+            blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
+            self->m_media_player->stop();
+            self->m_media_active.store(false);
+            self->notifyStateChanged();
+            self->processConnReset(false, false);
+            self->scheduleDeferredClear();
+        }
+    };
+    callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) {
+        if (!playback_video) {
+            return;
+        }
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        const MediaPlaybackInfo info = self && self->m_media_player
+            ? self->m_media_player->getPlaybackInfo() : MediaPlaybackInfo{};
+        playback_video->stallcount = 0;
+        // Do not turn a live/unknown-duration HLS stream into an ever-
+        // growing finite movie.  UxPlay emits empty range arrays for 0.
+        // At the end of a finite item UxPlay either holds it paused (when
+        // the sender set actionAtItemEnd=pause) or shuts the session down.
+        playback_video->ended = info.ended;
+        playback_video->duration = info.ended && !info.duration_known ? -1.0
+            : (info.duration_known ? info.duration : 0.0);
+        // While opening, report the requested start position so an
+        // AVPlayer sender's timeline does not jump back to zero.
+        playback_video->position = info.position;
+        playback_video->seek_start = info.seek_start;
+        playback_video->seek_duration = info.seek_duration;
+        playback_video->rate = info.rate;
+        playback_video->ready_to_play = info.ready_to_play;
+        playback_video->playback_buffer_empty = info.playback_buffer_empty;
+        playback_video->playback_buffer_full = info.playback_buffer_full;
+        playback_video->playback_likely_to_keep_up = info.playback_likely_to_keep_up;
+        playback_video->num_loaded_time_ranges = 0;
+        playback_video->num_seekable_time_ranges = 0;
+        playback_video->loadedTimeRanges = nullptr;
+        playback_video->seekableTimeRanges = nullptr;
+    };
+    callbacks.on_video_playlist_remove = [](void* cls) -> float {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        return self && self->m_media_player
+            ? self->m_media_player->pauseForPlaylistRemoval() : 0.0f;
+    };
+
+    // Required by UxPlay mirror thread.
+    callbacks.video_pause = [](void* cls) {
+        UNUSED_PARAMETER(cls);
+    };
+    callbacks.video_resume = [](void* cls) {
+        UNUSED_PARAMETER(cls);
+    };
+    callbacks.video_reset = [](void* cls, reset_type_t reset_type) {
+        if (cls) {
+            auto* self = static_cast<UxPlayIntegration*>(cls);
+            blog(LOG_INFO, "[UxPlay] Video reset (type=%d) — flushing decoders", static_cast<int>(reset_type));
+            if (self->m_media_player &&
+                (reset_type == RESET_TYPE_HLS_SHUTDOWN ||
+                 reset_type == RESET_TYPE_HLS_EOS ||
+                 reset_type == RESET_TYPE_NOHOLD)) {
+                self->m_media_player->stop();
+                self->m_media_active.store(false);
+                self->notifyStateChanged();
+                self->cancelDeferredClear();
+            }
+            // iOS tears down its (idle) mirror stream right after an
+            // AirPlay video item starts; that must not blank the item.
+            self->processConnReset(!self->m_media_active.load());
+        }
+    };
+    callbacks.video_set_codec = [](void* cls, video_codec_t codec) -> int {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        const uint64_t now = os_gettime_ns();
+        const uint64_t origin = self ? self->m_connection_started_ns.load() : 0;
+        const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
+        blog(LOG_INFO, "[CONNECT] +%.2fms codec configuration received (%s)",
+             elapsed_ms, codec == VIDEO_CODEC_H265 ? "H265/HEVC" : "H264");
+        // A new mirror stream starts here (it begins with its parameter
+        // sets and a keyframe): start its decoder state fresh, so a
+        // software fallback or statistics from an earlier stream do not
+        // carry over. The picture on screen is left alone.
+        if (self) {
+            self->processConnReset(false, true);
+        }
+        return 0;
+    };
+    return callbacks;
+}
+
 bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                               const std::string& server_name)
 {
@@ -264,278 +541,8 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             return compact;
         };
 
-        // Set up RAOP callbacks
-        raop_callbacks_t callbacks = {};
-        callbacks.cls = this;
+        raop_callbacks_t callbacks = makeRaopCallbacks();
 
-        // Timing: fires when iOS first TCP-connects (before handshake).
-        callbacks.conn_init = [](void* cls) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (self) {
-                self->m_open_connections.fetch_add(1);
-                self->notifyStateChanged();
-            }
-            const uint64_t now = os_gettime_ns();
-            bool expected = false;
-            if (self && self->m_connection_timing_active.compare_exchange_strong(expected, true)) {
-                self->m_first_video_logged.store(false, std::memory_order_relaxed);
-                self->m_connection_started_ns.store(now);
-                blog(LOG_INFO, "[CONNECT] +0.00ms TCP accepted — AirPlay negotiation starting");
-            }
-        };
-        // A device that goes away leaves its last frame behind unless the
-        // output is cleared: after a short grace period, so that a new
-        // connection that shows something at once (an item switch, a
-        // reconnect) replaces the frame without an empty source in between.
-        callbacks.conn_destroy = [](void* cls) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (!self) {
-                return;
-            }
-            if (self->m_open_connections.fetch_sub(1) <= 1) {
-                self->m_open_connections.store(0);
-                self->m_connection_timing_active.store(false);
-                if (self->m_frame_shown.load()) {
-                    self->scheduleDeferredClear("the last AirPlay connection closed");
-                }
-            }
-            self->notifyStateChanged();
-        };
-        // A TEARDOWN that names no stream ends the device's whole mirroring
-        // session (UxPlay reports a video reset only for a single stream).
-        callbacks.conn_teardown = [](void* cls, bool* teardown_96, bool* teardown_110) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (!self || (teardown_96 && *teardown_96) || (teardown_110 && *teardown_110)) {
-                return;
-            }
-            self->processConnReset(false, true);
-            // iOS also ends its mirroring session while AirPlay video goes
-            // on over other connections; that item stays.
-            if (!self->m_media_active.load() && self->m_frame_shown.load()) {
-                self->scheduleDeferredClear("the device ended its AirPlay session");
-            }
-        };
-        callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (!self || !method || !url) {
-                return;
-            }
-            if (strcmp(url, "/feedback") == 0 || strcmp(url, "/playback-info") == 0) {
-                return;
-            }
-
-            const uint64_t now = os_gettime_ns();
-            const uint64_t origin = self->m_connection_started_ns.load();
-            const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
-            static thread_local uint64_t request_started_ns = 0;
-            if (started) {
-                request_started_ns = now;
-                blog(LOG_INFO, "[CONNECT] +%.2fms -> %s %s", elapsed_ms, method, url);
-            } else {
-                const double request_ms = request_started_ns && now >= request_started_ns
-                    ? (now - request_started_ns) / 1e6 : 0.0;
-                blog(LOG_INFO, "[CONNECT] +%.2fms <- %s %s (handler %.2fms)",
-                     elapsed_ms, method, url, request_ms);
-                request_started_ns = 0;
-                if (strcmp(method, "TEARDOWN") == 0) {
-                    self->m_connection_timing_active.store(false);
-                }
-            }
-        };
-
-        callbacks.mirror_connection_timing = [](void* cls, bool first_data) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            const uint64_t started_ns = self->m_connection_started_ns.load(std::memory_order_relaxed);
-            if (!started_ns) {
-                return;
-            }
-            const double elapsed_ms = (os_gettime_ns() - started_ns) / 1e6;
-            blog(LOG_INFO, "[CONNECT] +%.2fms mirroring TCP %s",
-                 elapsed_ms, first_data ? "first header received" : "accepted");
-        };
-        
-        // Set video and audio processing callbacks
-        callbacks.video_process = [](void* cls, raop_ntp_t*, video_decode_struct* data) {
-            if (cls && data) {
-                auto* self = static_cast<UxPlayIntegration*>(cls);
-                self->processVideoData(data);
-            }
-        };
-        
-        callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) {
-            if (cls && data) {
-                auto* self = static_cast<UxPlayIntegration*>(cls);
-                self->processAudioData(data);
-            }
-        };
-
-        // Required by UxPlay runtime; provide safe defaults for callbacks
-        // that UxPlay may call without null checks.
-        callbacks.conn_feedback = [](void* cls) {
-            blog(LOG_DEBUG, "[UxPlay] feedback heartbeat received");
-            UNUSED_PARAMETER(cls);
-        };
-        callbacks.conn_reset = [](void* cls, int reason) {
-            if (cls) {
-                auto* self = static_cast<UxPlayIntegration*>(cls);
-                blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
-                self->m_connection_timing_active.store(false);
-                self->processConnReset(!self->m_media_active.load());
-            }
-        };
-        callbacks.video_flush = [](void* cls) {
-            UNUSED_PARAMETER(cls);
-        };
-        callbacks.audio_flush = [](void* cls) {
-            UNUSED_PARAMETER(cls);
-        };
-        callbacks.audio_set_volume = [](void* cls, float volume) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(volume);
-        };
-        callbacks.audio_set_metadata = [](void* cls, const void* buffer, int buflen) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(buffer);
-            UNUSED_PARAMETER(buflen);
-        };
-        callbacks.audio_set_coverart = [](void* cls, const void* buffer, int buflen) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(buffer);
-            UNUSED_PARAMETER(buflen);
-        };
-        callbacks.audio_set_progress = [](void* cls, uint32_t* start, uint32_t* curr, uint32_t* end) {
-            UNUSED_PARAMETER(cls);
-            UNUSED_PARAMETER(start);
-            UNUSED_PARAMETER(curr);
-            UNUSED_PARAMETER(end);
-        };
-        callbacks.audio_set_client_volume = [](void* cls) -> double {
-            UNUSED_PARAMETER(cls);
-            return -15.0;
-        };
-        callbacks.on_video_play = [](void* cls, const char* location, const float start_position) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (!self || !self->m_media_player || !location || !*location) {
-                blog(LOG_ERROR, "[MEDIA] POST /play did not provide a usable media URL");
-                return;
-            }
-            blog(LOG_INFO, "[MEDIA] POST /play supplied a media URL (start=%.3fs)",
-                 start_position);
-            // Stop a previous URL worker before resetting shared decoder
-            // state. The previous frame stays on screen until the new item's
-            // first frame replaces it, so switches never flash an empty source.
-            self->cancelDeferredClear();
-            self->m_media_player->stop();
-            // Not a mirror stream boundary: iOS may cancel this item and keep
-            // mirroring without a new keyframe, so leave the mirror decoder.
-            self->processConnReset(false, false);
-            self->m_media_active.store(true);
-            self->notifyStateChanged();
-            self->m_frame_shown.store(true);
-            self->m_media_player->play(location, start_position);
-        };
-        callbacks.on_video_scrub = [](void* cls, const float position) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (self && self->m_media_player) {
-                blog(LOG_INFO, "[MEDIA] POST /scrub requested %.3fs", position);
-                self->m_media_player->seek(position);
-            }
-        };
-        callbacks.on_video_rate = [](void* cls, const float rate) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (self && self->m_media_player) {
-                self->m_media_player->setRate(rate);
-            }
-        };
-        callbacks.on_video_stop = [](void* cls) {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            if (self && self->m_media_player) {
-                blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
-                self->m_media_player->stop();
-                self->m_media_active.store(false);
-                self->notifyStateChanged();
-                self->processConnReset(false, false);
-                self->scheduleDeferredClear();
-            }
-        };
-        callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) {
-            if (!playback_video) {
-                return;
-            }
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            const MediaPlaybackInfo info = self && self->m_media_player
-                ? self->m_media_player->getPlaybackInfo() : MediaPlaybackInfo{};
-            playback_video->stallcount = 0;
-            // Do not turn a live/unknown-duration HLS stream into an ever-
-            // growing finite movie.  UxPlay emits empty range arrays for 0.
-            // At the end of a finite item UxPlay either holds it paused (when
-            // the sender set actionAtItemEnd=pause) or shuts the session down.
-            playback_video->ended = info.ended;
-            playback_video->duration = info.ended && !info.duration_known ? -1.0
-                : (info.duration_known ? info.duration : 0.0);
-            // While opening, report the requested start position so an
-            // AVPlayer sender's timeline does not jump back to zero.
-            playback_video->position = info.position;
-            playback_video->seek_start = info.seek_start;
-            playback_video->seek_duration = info.seek_duration;
-            playback_video->rate = info.rate;
-            playback_video->ready_to_play = info.ready_to_play;
-            playback_video->playback_buffer_empty = info.playback_buffer_empty;
-            playback_video->playback_buffer_full = info.playback_buffer_full;
-            playback_video->playback_likely_to_keep_up = info.playback_likely_to_keep_up;
-            playback_video->num_loaded_time_ranges = 0;
-            playback_video->num_seekable_time_ranges = 0;
-            playback_video->loadedTimeRanges = nullptr;
-            playback_video->seekableTimeRanges = nullptr;
-        };
-        callbacks.on_video_playlist_remove = [](void* cls) -> float {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            return self && self->m_media_player
-                ? self->m_media_player->pauseForPlaylistRemoval() : 0.0f;
-        };
-
-        // Required by UxPlay mirror thread.
-        callbacks.video_pause = [](void* cls) {
-            UNUSED_PARAMETER(cls);
-        };
-        callbacks.video_resume = [](void* cls) {
-            UNUSED_PARAMETER(cls);
-        };
-        callbacks.video_reset = [](void* cls, reset_type_t reset_type) {
-            if (cls) {
-                auto* self = static_cast<UxPlayIntegration*>(cls);
-                blog(LOG_INFO, "[UxPlay] Video reset (type=%d) — flushing decoders", static_cast<int>(reset_type));
-                if (self->m_media_player &&
-                    (reset_type == RESET_TYPE_HLS_SHUTDOWN ||
-                     reset_type == RESET_TYPE_HLS_EOS ||
-                     reset_type == RESET_TYPE_NOHOLD)) {
-                    self->m_media_player->stop();
-                    self->m_media_active.store(false);
-                    self->notifyStateChanged();
-                    self->cancelDeferredClear();
-                }
-                // iOS tears down its (idle) mirror stream right after an
-                // AirPlay video item starts; that must not blank the item.
-                self->processConnReset(!self->m_media_active.load());
-            }
-        };
-        callbacks.video_set_codec = [](void* cls, video_codec_t codec) -> int {
-            auto* self = static_cast<UxPlayIntegration*>(cls);
-            const uint64_t now = os_gettime_ns();
-            const uint64_t origin = self ? self->m_connection_started_ns.load() : 0;
-            const double elapsed_ms = origin && now >= origin ? (now - origin) / 1e6 : 0.0;
-            blog(LOG_INFO, "[CONNECT] +%.2fms codec configuration received (%s)",
-                 elapsed_ms, codec == VIDEO_CODEC_H265 ? "H265/HEVC" : "H264");
-            // A new mirror stream starts here (it begins with its parameter
-            // sets and a keyframe): start its decoder state fresh, so a
-            // software fallback or statistics from an earlier stream do not
-            // carry over. The picture on screen is left alone.
-            if (self) {
-                self->processConnReset(false, true);
-            }
-            return 0;
-        };
-        
         // Initialize RAOP
         blog(LOG_INFO, "Initializing RAOP...");
         m_raop = raop_init(&callbacks);

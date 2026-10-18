@@ -26,6 +26,7 @@ typedef struct obs_source obs_source_t;
 
 // Forward declare UxPlay types
 typedef struct raop_s raop_t;
+struct raop_callbacks_s;
 typedef struct raop_ntp_s raop_ntp_t;
 
 // Video frame callback
@@ -145,6 +146,7 @@ private:
     void cancelDeferredClear();
     void deferredClearLoop();
     void stopDeferredClearThread();
+    struct raop_callbacks_s makeRaopCallbacks();
 
     // Held for the whole of start(), stop() and updateServerName(), which
     // replace m_raop / m_dnssd (OBS main thread, name debounce thread).
