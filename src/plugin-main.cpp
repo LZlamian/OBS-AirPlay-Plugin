@@ -87,6 +87,9 @@ static void apply_server_name(const std::string& name)
 {
     {
         std::lock_guard<std::mutex> lock(g_server_name_mutex);
+        // The user reverted to the advertised name before the debounce fired.
+        if (name == g_server_name)
+            return;
         g_server_name = name;
     }
     blog(LOG_INFO, "Updating AirPlay server name to: %s", name.c_str());
@@ -148,13 +151,18 @@ static void name_debounce_thread_func()
 void update_server_name(const std::string& new_name)
 {
     const std::string resolved = new_name.empty() ? "OBS AirPlay" : new_name;
-    {
-        std::lock_guard<std::mutex> lock(g_server_name_mutex);
+
+    std::lock_guard<std::mutex> lock(g_debounce_mutex);
+    if (g_debounce_gen != 0) {
+        // A change is in flight: compare with the name it will apply, so
+        // reverting to the advertised name replaces the pending one.
+        if (resolved == g_debounce_pending)
+            return;
+    } else {
+        std::lock_guard<std::mutex> name_lock(g_server_name_mutex);
         if (resolved == g_server_name)
             return;
     }
-
-    std::lock_guard<std::mutex> lock(g_debounce_mutex);
     g_debounce_pending = resolved;
     ++g_debounce_gen;
     g_debounce_cv.notify_one();
