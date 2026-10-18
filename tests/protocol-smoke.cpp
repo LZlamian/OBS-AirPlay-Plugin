@@ -17,6 +17,7 @@
 #include <vector>
 
 extern "C" {
+#include "dnssd.h"
 #include "raop.h"
 }
 
@@ -225,6 +226,17 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "failed to initialize receiver\n");
         return 1;
     }
+    // GET /info reads the advertised name and device ID from the DNS-SD
+    // context; nothing is registered with mDNSResponder.
+    int dnssd_error = 0;
+    const char hw_addr[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+    dnssd_t* dnssd = dnssd_init("Protocol Smoke", 14, hw_addr, sizeof(hw_addr), &dnssd_error, 0);
+    if (!dnssd || dnssd_error != DNSSD_ERROR_NOERROR) {
+        std::fprintf(stderr, "failed to initialize dnssd context\n");
+        raop_destroy(raop);
+        return 1;
+    }
+    raop_set_dnssd(raop, dnssd);
     raop_set_log_callback(raop, receiverLog, nullptr);
     raop_set_log_level(raop, LOGGER_INFO);
     if (std::getenv("PROTOCOL_SMOKE_MEDIA_TRACE")) {
@@ -234,6 +246,7 @@ int main(int argc, char** argv)
     if (raop_set_plist(raop, "hls", 1) != 0) {
         std::fprintf(stderr, "failed to enable HLS receiver mode\n");
         raop_destroy(raop);
+        dnssd_destroy(dnssd);
         return 1;
     }
 
@@ -241,6 +254,7 @@ int main(int argc, char** argv)
     if (raop_start_httpd(raop, &port) < 0) {
         std::fprintf(stderr, "failed to start protocol smoke receiver\n");
         raop_destroy(raop);
+        dnssd_destroy(dnssd);
         return 1;
     }
     raop_set_port(raop, port);
@@ -869,7 +883,54 @@ int main(int argc, char** argv)
     const bool close_stops = stops_after_close == stops_before_close + 1;
     std::printf("close_without_stop=%s\n", close_stops ? "stopped" : "FAILED");
     if (reverse_fd >= 0) close(reverse_fd);
+
+    const std::string info_request = "GET /info RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n";
+
+    // POST /fp-setup2 with no body (or one too short to hold the FairPlay
+    // version byte) is answered 400; 2.5.1 dereferenced the missing body.
+    const auto fp_setup2 = [&](const std::string& body) {
+        return httpExchange(port,
+                            std::string("POST /fp-setup2 HTTP/1.1\r\n") +
+                                "Host: 127.0.0.1\r\n" +
+                                "X-Apple-Session-ID: " + session + "\r\n" +
+                                "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" +
+                                body);
+    };
+    const std::string fp_empty_response = fp_setup2("");
+    const std::string fp_short_response = fp_setup2("\x46\x50");
+    const std::string fp_survived_response = httpExchange(port, info_request);
+    const bool fp_setup2_ok =
+        fp_empty_response.find("400 Bad Request") != std::string::npos &&
+        fp_short_response.find("400 Bad Request") != std::string::npos &&
+        fp_survived_response.find("200 OK") != std::string::npos;
+    std::printf("fp_setup2_short_body=%s\n", fp_setup2_ok ? "rejected" : "FAILED");
+
+    // A connection that sends one byte and stalls must not hold up the single
+    // HTTP thread: another connection's GET /info is still answered promptly.
+    const int stalled_fd = connectLocal(port);
+    const bool stalled_sent = stalled_fd >= 0 && sendAll(stalled_fd, "G", 1);
+    usleep(100000);
+    const auto info_started = std::chrono::steady_clock::now();
+    std::string stalled_info_response;
+    const int info_fd = connectLocal(port);
+    if (info_fd >= 0) {
+        timeval info_timeout = {3, 0};
+        setsockopt(info_fd, SOL_SOCKET, SO_RCVTIMEO, &info_timeout, sizeof(info_timeout));
+        if (sendAll(info_fd, info_request.data(), info_request.size())) {
+            stalled_info_response = receiveResponse(info_fd);
+        }
+        close(info_fd);
+    }
+    const auto info_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - info_started).count();
+    if (stalled_fd >= 0) close(stalled_fd);
+    const bool stall_ok = stalled_sent &&
+        stalled_info_response.find("200 OK") != std::string::npos && info_ms < 2000;
+    std::printf("one_byte_stall=%s info_ms=%lld\n", stall_ok ? "not-blocking" : "FAILED",
+                static_cast<long long>(info_ms));
+
     raop_stop_httpd(raop);
     raop_destroy(raop);
-    return passed && stop_cancels_fetch && close_stops ? 0 : 1;
+    dnssd_destroy(dnssd);
+    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok ? 0 : 1;
 }
