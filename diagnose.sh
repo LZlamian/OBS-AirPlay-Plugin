@@ -1,273 +1,153 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+#
+# OBS AirPlay diagnostics: run while OBS is open if devices cannot see or
+# connect to the receiver. Needs no administrator rights and changes nothing.
+#
+#   ./diagnose.sh                 (OBS_BUNDLE_PATH=/path/to/OBS.app to override)
+#
+# The output names your network interface, local IP address and the AirPlay
+# devices on your network: read it before posting it publicly.
 
-# OBS AirPlay Plugin Diagnostic Script
-# Run this if your plugin isn't working
+set -uo pipefail
 
-set +e  # Don't exit on error
+OBS_BUNDLE_PATH="${OBS_BUNDLE_PATH:-/Applications/OBS.app}"
+OBS_SUPPORT="${HOME}/Library/Application Support/obs-studio"
+PLUGIN="${OBS_SUPPORT}/plugins/obs-airplay.plugin"
+LEGACY_PLUGIN="/Library/Application Support/obs-studio/plugins/obs-airplay.plugin"
+SETTINGS="${OBS_SUPPORT}/plugin_config/obs-airplay/settings.json"
+ISSUES="https://github.com/LZlamian/OBS-AirPlay-Plugin/issues"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+errors=0
+warnings=0
+ok()   { printf '  \033[0;32mok\033[0m    %s\n' "$*"; }
+warn() { printf '  \033[1;33mwarn\033[0m  %s\n' "$*"; warnings=$((warnings + 1)); }
+fail() { printf '  \033[0;31mfail\033[0m  %s\n' "$*"; errors=$((errors + 1)); }
+info() { printf '        %s\n' "$*"; }
+section() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
-echo -e "${BLUE}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  OBS AirPlay Plugin Diagnostic Tool           ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════╝${NC}"
-echo ""
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "${SCRATCH}"' EXIT
 
-ERRORS=0
-WARNINGS=0
-
-# Check 1: OBS Installation
-echo -e "${YELLOW}[1/10]${NC} Checking OBS installation..."
-if [ -d "/Applications/OBS.app" ]; then
-    OBS_VERSION=$(defaults read /Applications/OBS.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null)
-    echo -e "  ${GREEN}✓${NC} OBS found: version ${OBS_VERSION}"
+section "OBS"
+if [[ -d "${OBS_BUNDLE_PATH}" ]]; then
+  ok "OBS $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+      "${OBS_BUNDLE_PATH}/Contents/Info.plist" 2>/dev/null || echo '?') at ${OBS_BUNDLE_PATH}"
 else
-    echo -e "  ${RED}✗${NC} OBS not found at /Applications/OBS.app"
-    ((ERRORS++))
+  fail "OBS not found at ${OBS_BUNDLE_PATH} (set OBS_BUNDLE_PATH if it is elsewhere)"
 fi
-echo ""
+if pgrep -xq OBS; then ok "OBS is running"; else warn "OBS is not running: start it, then run this again"; fi
 
-# Check 2: Plugin Installation
-echo -e "${YELLOW}[2/10]${NC} Checking plugin installation..."
-PLUGIN_PATH="$HOME/Library/Application Support/obs-studio/plugins/obs-airplay.plugin"
-if [ -d "$PLUGIN_PATH" ]; then
-    echo -e "  ${GREEN}✓${NC} Plugin installed at: $PLUGIN_PATH"
-    
-    # Check if dylib exists
-    if [ -f "$PLUGIN_PATH/Contents/MacOS/obs-airplay" ] || [ -f "$PLUGIN_PATH/Contents/MacOS/obs-airplay.so" ]; then
-        echo -e "  ${GREEN}✓${NC} Binary found"
-    else
-        echo -e "  ${RED}✗${NC} Binary not found"
-        ((ERRORS++))
-    fi
+section "Plugin"
+if [[ -d "${PLUGIN}" ]]; then
+  ok "installed: ${PLUGIN}"
+  info "version $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+      "${PLUGIN}/Contents/Info.plist" 2>/dev/null || echo '?')"
+  if /usr/bin/codesign --verify --deep --strict "${PLUGIN}" 2>/dev/null; then
+    ok "code seal intact"
+  else
+    fail "code seal broken: reinstall the plugin from the release page"
+  fi
+  # Release packages carry their own FFmpeg; a developer build uses Homebrew's.
+  if compgen -G "${PLUGIN}/Contents/Frameworks/libavcodec*.dylib" >/dev/null; then
+    ok "self-contained release build (bundled FFmpeg)"
+  elif command -v brew >/dev/null 2>&1 && brew list ffmpeg >/dev/null 2>&1; then
+    ok "developer build using Homebrew FFmpeg"
+  else
+    fail "developer build, but Homebrew FFmpeg is missing (brew install ffmpeg libplist)"
+  fi
 else
-    echo -e "  ${RED}✗${NC} Plugin not installed"
-    ((ERRORS++))
+  fail "not installed in ${OBS_SUPPORT}/plugins"
 fi
-echo ""
+if [[ -d "${LEGACY_PLUGIN}" ]]; then
+  warn "an old system-wide copy exists (${LEGACY_PLUGIN}); OBS may load it instead."
+  info "Installing the current .pkg removes it, or delete it in Finder."
+fi
 
-# Check 3: Dependencies
-echo -e "${YELLOW}[3/10]${NC} Checking dependencies..."
-
-check_lib() {
-    if brew list "$1" &> /dev/null; then
-        echo -e "  ${GREEN}✓${NC} $1 installed"
-    else
-        echo -e "  ${RED}✗${NC} $1 missing (install with: brew install $1)"
-        ((ERRORS++))
-    fi
-}
-
-check_lib "ffmpeg"
-check_lib "libplist"
-check_lib "pkg-config"
-echo ""
-
-# Check 4: Network Configuration
-echo -e "${YELLOW}[4/10]${NC} Checking network..."
-
-# Get primary network interface
-IFACE=$(route -n get default 2>/dev/null | grep interface | awk '{print $2}')
-if [ -n "$IFACE" ]; then
-    IP=$(ifconfig "$IFACE" | grep "inet " | awk '{print $2}')
-    echo -e "  ${GREEN}✓${NC} Interface: $IFACE"
-    echo -e "  ${GREEN}✓${NC} IP Address: $IP"
-    
-    # Check if on private network
-    if [[ $IP == 192.168.* ]] || [[ $IP == 10.* ]] || [[ $IP == 172.16.* ]]; then
-        echo -e "  ${GREEN}✓${NC} On private network"
-    else
-        echo -e "  ${YELLOW}!${NC} Not on typical private network range"
-        ((WARNINGS++))
-    fi
+section "Network"
+iface="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
+if [[ "${iface}" == utun* || "${iface}" == ipsec* ]]; then
+  warn "the default route goes through a VPN (${iface}); AirPlay uses the local network:"
+  for lan in en0 en1; do
+    address="$(ipconfig getifaddr "${lan}" 2>/dev/null)"
+    [[ -n "${address}" ]] && info "${lan}: ${address}"
+  done
+  info "if devices cannot find the receiver, try with the VPN off"
+elif [[ -n "${iface}" ]]; then
+  ok "default interface ${iface}, address $(ipconfig getifaddr "${iface}" 2>/dev/null || echo '?')"
+  info "the device must be on the same network (and VLAN) as this Mac"
 else
-    echo -e "  ${RED}✗${NC} Could not determine network interface"
-    ((ERRORS++))
+  fail "no default network interface"
 fi
-echo ""
 
-# Check 5: Firewall
-echo -e "${YELLOW}[5/10]${NC} Checking firewall..."
-FIREWALL_STATE=$(sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null)
-if echo "$FIREWALL_STATE" | grep -q "enabled"; then
-    echo -e "  ${YELLOW}!${NC} Firewall is ENABLED"
-    echo -e "    You may need to add OBS to firewall exceptions:"
-    echo -e "    ${BLUE}sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Applications/OBS.app${NC}"
-    echo -e "    ${BLUE}sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS.app${NC}"
-    ((WARNINGS++))
+section "Firewall"
+fw="$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null)"
+if [[ "${fw}" == *enabled* ]]; then
+  blocked="$(/usr/libexec/ApplicationFirewall/socketfilterfw --getappblocked "${OBS_BUNDLE_PATH}" 2>/dev/null)"
+  if [[ "${blocked}" == *"is blocked"* ]]; then
+    fail "the firewall blocks OBS: System Settings > Network > Firewall > Options, allow OBS"
+  else
+    ok "firewall on; OBS is not blocked"
+  fi
 else
-    echo -e "  ${GREEN}✓${NC} Firewall is disabled"
+  ok "firewall off"
 fi
-echo ""
 
-# Check 6: Port Availability
-echo -e "${YELLOW}[6/10]${NC} Checking ports..."
+section "Ports (the receiver uses TCP 7000, or 7001 if 7000 is taken)"
+for port in 7000 7001; do
+  owner="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 {print $1}')"
+  if [[ -z "${owner}" ]]; then
+    info "port ${port}: free"
+  elif [[ "${owner}" == OBS* || "${owner}" == obs* ]]; then
+    ok "port ${port}: OBS (the receiver)"
+  elif [[ "${owner}" == ControlCe* || "${owner}" == AirPlayXP* ]]; then
+    warn "port ${port}: macOS AirPlay Receiver. If OBS has neither port, turn it off in"
+    info "System Settings > General > AirDrop & Handoff > AirPlay Receiver"
+  else
+    warn "port ${port}: ${owner}"
+  fi
+done
 
-check_port() {
-    PORT=$1
-    if lsof -i :"$PORT" &> /dev/null; then
-        PROCESS=$(lsof -i :"$PORT" | tail -1 | awk '{print $1}')
-        if [ "$PROCESS" == "OBS" ] || [ "$PROCESS" == "obs" ]; then
-            echo -e "  ${GREEN}✓${NC} Port $PORT in use by OBS"
-        else
-            echo -e "  ${RED}✗${NC} Port $PORT in use by $PROCESS (conflict!)"
-            ((ERRORS++))
-        fi
-    else
-        echo -e "  ${YELLOW}!${NC} Port $PORT not in use (OBS may not be running)"
-        ((WARNINGS++))
-    fi
-}
-
-check_port 7000
-check_port 5000
-echo ""
-
-# Check 7: mDNS Responder
-echo -e "${YELLOW}[7/10]${NC} Checking mDNS responder..."
-if ps aux | grep -v grep | grep -q "mDNSResponder"; then
-    echo -e "  ${GREEN}✓${NC} mDNSResponder is running"
-else
-    echo -e "  ${RED}✗${NC} mDNSResponder is not running"
-    echo -e "    Try: ${BLUE}sudo killall -HUP mDNSResponder${NC}"
-    ((ERRORS++))
+section "Bonjour (5 s scan of _airplay._tcp)"
+name="OBS AirPlay"
+if [[ -f "${SETTINGS}" ]]; then
+  saved="$(/usr/bin/plutil -extract server_name raw -o - "${SETTINGS}" 2>/dev/null)"
+  [[ -n "${saved}" ]] && name="${saved}"
 fi
-echo ""
-
-# Check 8: AirPlay Service Advertisement
-echo -e "${YELLOW}[8/10]${NC} Checking AirPlay service advertisement..."
-echo -e "  ${BLUE}Scanning for 5 seconds...${NC}"
-
-timeout 5 dns-sd -B _airplay._tcp > /tmp/airplay_scan.txt 2>&1 &
-SCAN_PID=$!
+dns-sd -B _airplay._tcp > "${SCRATCH}/scan.txt" 2>&1 &
+scan_pid=$!
 sleep 5
-kill $SCAN_PID 2>/dev/null || true
-
-if grep -q "OBS AirPlay" /tmp/airplay_scan.txt; then
-    echo -e "  ${GREEN}✓${NC} OBS AirPlay service is being advertised!"
+kill "${scan_pid}" 2>/dev/null
+wait "${scan_pid}" 2>/dev/null
+if grep -qF "${name}" "${SCRATCH}/scan.txt"; then
+  ok "\"${name}\" is advertised"
 else
-    echo -e "  ${RED}✗${NC} OBS AirPlay service not found"
-    echo -e "    This means the plugin is not advertising via mDNS"
-    echo -e "    Check OBS logs for errors"
-    ((ERRORS++))
+  fail "\"${name}\" is not advertised (is OBS running with the plugin loaded?)"
 fi
+others="$(grep -c ' Add ' "${SCRATCH}/scan.txt" 2>/dev/null)"
+info "${others:-0} AirPlay service(s) seen in total"
 
-# Show other AirPlay devices found
-OTHER_DEVICES=$(grep -v "OBS AirPlay" /tmp/airplay_scan.txt | grep "Add" | wc -l)
-if [ "$OTHER_DEVICES" -gt 0 ]; then
-    echo -e "  ${BLUE}ℹ${NC} Found $OTHER_DEVICES other AirPlay device(s) on network"
-fi
-rm -f /tmp/airplay_scan.txt
-echo ""
-
-# Check 9: OBS Logs
-echo -e "${YELLOW}[9/10]${NC} Checking OBS logs..."
-LOG_DIR="$HOME/Library/Application Support/obs-studio/logs"
-if [ -d "$LOG_DIR" ]; then
-    LATEST_LOG=$(ls -t "$LOG_DIR" | head -1)
-    if [ -n "$LATEST_LOG" ]; then
-        echo -e "  ${GREEN}✓${NC} Latest log: $LATEST_LOG"
-        
-        # Check for plugin messages
-        if grep -q "AirPlay" "$LOG_DIR/$LATEST_LOG"; then
-            echo -e "  ${GREEN}✓${NC} Plugin messages found in log"
-            
-            # Check for errors
-            if grep -i "airplay.*error\|airplay.*failed" "$LOG_DIR/$LATEST_LOG" &> /dev/null; then
-                echo -e "  ${RED}✗${NC} Errors found in log:"
-                grep -i "airplay.*error\|airplay.*failed" "$LOG_DIR/$LATEST_LOG" | tail -3 | sed 's/^/    /'
-                ((ERRORS++))
-            fi
-            
-            # Check for success messages
-            if grep -q "mDNS advertising started" "$LOG_DIR/$LATEST_LOG"; then
-                echo -e "  ${GREEN}✓${NC} mDNS advertising confirmed in logs"
-            else
-                echo -e "  ${RED}✗${NC} mDNS advertising not confirmed"
-                ((ERRORS++))
-            fi
-        else
-            echo -e "  ${RED}✗${NC} No plugin messages in log (plugin may not have loaded)"
-            ((ERRORS++))
-        fi
-    else
-        echo -e "  ${YELLOW}!${NC} No log files found"
-        ((WARNINGS++))
-    fi
+section "OBS log"
+latest="$(ls -t "${OBS_SUPPORT}/logs" 2>/dev/null | head -1)"
+if [[ -n "${latest}" ]]; then
+  log="${OBS_SUPPORT}/logs/${latest}"
+  ok "latest log: ${latest}"
+  if grep -q 'OBS AirPlay Plugin loaded' "${log}"; then
+    ok "the plugin loaded"
+  else
+    fail "the plugin did not load in that session"
+  fi
+  grep -E 'UxPlay integration (started|active)|Failed to start UxPlay|\[LOAD\]' "${log}" | tail -5 |
+    sed 's/^/        /'
 else
-    echo -e "  ${YELLOW}!${NC} Log directory not found"
-    ((WARNINGS++))
-fi
-echo ""
-
-# Check 10: System Resources
-echo -e "${YELLOW}[10/10]${NC} Checking system resources..."
-
-CPU_USAGE=$(ps aux | grep "OBS" | grep -v grep | awk '{sum+=$3} END {print sum}')
-if [ -n "$CPU_USAGE" ]; then
-    echo -e "  ${BLUE}ℹ${NC} OBS CPU usage: ${CPU_USAGE}%"
-    if (( $(echo "$CPU_USAGE > 80" | bc -l) )); then
-        echo -e "  ${YELLOW}!${NC} High CPU usage may affect streaming quality"
-        ((WARNINGS++))
-    fi
+  warn "no OBS logs found"
 fi
 
-MEM_PRESSURE=$(memory_pressure | grep "System-wide memory free percentage" | awk '{print $5}' | tr -d '%')
-if [ -n "$MEM_PRESSURE" ]; then
-    echo -e "  ${BLUE}ℹ${NC} Memory pressure: ${MEM_PRESSURE}%"
-    if [ "$MEM_PRESSURE" -lt 30 ]; then
-        echo -e "  ${YELLOW}!${NC} Low memory available"
-        ((WARNINGS++))
-    fi
-fi
-echo ""
-
-# Summary
-echo -e "${BLUE}╔════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  Diagnostic Summary                            ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════╝${NC}"
-echo ""
-
-if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
-    echo -e "${GREEN}✓ All checks passed!${NC}"
-    echo ""
-    echo "If your device still doesn't show up:"
-    echo "1. Restart OBS"
-    echo "2. Restart your iOS device"
-    echo "3. Ensure both devices are on the same WiFi network"
-    echo "4. Check iOS: Settings -> WiFi -> Your Network -> (i) icon"
-    echo "5. Compare IP address ranges (should match)"
+section "Summary"
+if (( errors == 0 && warnings == 0 )); then
+  ok "nothing wrong found"
 else
-    if [ $ERRORS -gt 0 ]; then
-        echo -e "${RED}✗ Found $ERRORS error(s) that need attention${NC}"
-    fi
-    
-    if [ $WARNINGS -gt 0 ]; then
-        echo -e "${YELLOW}! Found $WARNINGS warning(s)${NC}"
-    fi
-    
-    echo ""
-    echo "Recommended actions:"
-    
-    if [ $ERRORS -gt 0 ]; then
-        echo "1. Fix the errors listed above"
-        echo "2. Rebuild the plugin: ./build.sh"
-        echo "3. Restart OBS"
-    fi
-    
-    if grep -q "Firewall is ENABLED" /tmp/diag_output.txt 2>/dev/null; then
-        echo "4. Add OBS to firewall exceptions (see firewall section above)"
-    fi
+  info "${errors} problem(s), ${warnings} warning(s)"
 fi
-
-echo ""
-echo "For more help, see:"
-echo "- README.md for detailed documentation"
-echo "- QUICKSTART.md for common issues"
-echo "- OBS logs: $LOG_DIR"
-echo ""
-echo -e "${BLUE}Support: https://github.com/yourusername/obs-airplay-plugin/issues${NC}"
+info "Report problems at ${ISSUES} (read the output first: it names your network and devices)."
+exit $(( errors > 0 ? 1 : 0 ))
