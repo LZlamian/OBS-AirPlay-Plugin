@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -109,10 +110,13 @@ void sign(OBSAirPlayReleaseAsset *asset, NSString *keyPath, NSString *scratch)
 }
 
 // Zips everything in `folder`; the asset describes the zip as GitHub would.
+// Always a new archive, without the extra timestamp field (it carries access
+// times): `zip` on an existing archive updates it, which could change bytes
+// an earlier asset's digest describes.
 OBSAirPlayReleaseAsset *makeZip(NSString *folder, NSString *zip, NSString *version)
 {
-    shell([NSString stringWithFormat:@"cd %@ && /usr/bin/zip -q -r -y %@ .",
-           quoted(folder), quoted(zip)]);
+    shell([NSString stringWithFormat:@"rm -f %@ && cd %@ && /usr/bin/zip -q -r -y -X %@ .",
+           quoted(zip), quoted(folder), quoted(zip)]);
     OBSAirPlayReleaseAsset *asset = [[OBSAirPlayReleaseAsset alloc] init];
     asset.version = version;
     asset.downloadURL = [NSURL URLWithString:@"https://github.com/example"];
@@ -426,41 +430,55 @@ int main(int argc, const char *argv[])
                ![files fileExistsAtPath:staging], "staging folder others can change is refused");
 
         // A lock left by a process that has gone does not block the update;
-        // two installers at once swap exactly once.
-        error = nil;
-        staged = OBSAirPlayStageUpdate(goodZipURL, asset, pluginURL, &error);
-        if (error)
-            std::printf("  stage error: %s\n", error.localizedDescription.UTF8String);
+        // installers racing for it swap exactly once, and the version they
+        // replace is kept whole. Repeated, with a stale lock each time: the
+        // race is in taking over that lock.
         NSString *lockPath = [plugins stringByAppendingPathComponent:@".obs-airplay.update.lock"];
-        [@"999999\n" writeToFile:lockPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
-        std::atomic<int> swaps{0};
-        std::thread first([&] {
-            if (OBSAirPlayInstallStagedUpdate(pluginURL, nil)) ++swaps;
-        });
-        std::thread second([&] {
-            if (OBSAirPlayInstallStagedUpdate(pluginURL, nil)) ++swaps;
-        });
-        first.join();
-        second.join();
-        expect(staged && swaps.load() == 1 && [bundleVersion(installed) isEqualToString:@"9.9.9"] &&
-               ![files fileExistsAtPath:staging] && ![files fileExistsAtPath:lockPath] &&
-               shell([NSString stringWithFormat:
-                   @"codesign --verify --deep --strict %@ 2>/dev/null", quoted(installed)]),
-               "two installers at once: one swap replaces the plugin");
-        const bool kept_same = shell([NSString stringWithFormat:
-            @"diff -rq %@ %@/.obs-airplay.previous/obs-airplay.plugin >/dev/null",
-            quoted(built), quoted(plugins)]);
-        NSString *kept_version = OBSAirPlayPreviousVersion(pluginURL);
-        if (!kept_same || ![kept_version isEqualToString:installedVersion]) {
-            std::printf("  kept version %s (expected %s); differences:\n",
-                        kept_version ? kept_version.UTF8String : "(none)",
-                        installedVersion.UTF8String);
-            shell([NSString stringWithFormat:
-                @"diff -rq %@ %@/.obs-airplay.previous/obs-airplay.plugin | head -20; "
-                @"ls -la %@", quoted(built), quoted(plugins), quoted(plugins)]);
+        constexpr int kRounds = 10;
+        constexpr int kInstallers = 4;
+        int good_rounds = 0;
+        for (int round = 0; round < kRounds; ++round) {
+            if (round > 0) {
+                // Back to the built version, as before the first round.
+                OBSAirPlayDiscardStagedUpdate(pluginURL);
+                [files removeItemAtPath:[plugins stringByAppendingPathComponent:@".obs-airplay.previous"]
+                                  error:nil];
+                [files removeItemAtPath:installed error:nil];
+                shell([NSString stringWithFormat:@"cp -R %@ %@", quoted(built), quoted(installed)]);
+            }
+            error = nil;
+            staged = OBSAirPlayStageUpdate(goodZipURL, asset, pluginURL, &error);
+            if (error)
+                std::printf("  round %d stage error: %s\n", round, error.localizedDescription.UTF8String);
+            [@"999999\n" writeToFile:lockPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
+            std::atomic<int> swaps{0};
+            std::vector<std::thread> installers;
+            for (int i = 0; i < kInstallers; ++i) {
+                installers.emplace_back([&] {
+                    if (OBSAirPlayInstallStagedUpdate(pluginURL, nil)) ++swaps;
+                });
+            }
+            for (std::thread &installer : installers)
+                installer.join();
+            const bool swapped = staged && swaps.load() == 1 &&
+                [bundleVersion(installed) isEqualToString:@"9.9.9"] &&
+                ![files fileExistsAtPath:staging] && ![files fileExistsAtPath:lockPath] &&
+                shell([NSString stringWithFormat:
+                    @"codesign --verify --deep --strict %@ 2>/dev/null", quoted(installed)]);
+            const bool kept_same = shell([NSString stringWithFormat:
+                @"diff -rq %@ %@/.obs-airplay.previous/obs-airplay.plugin >/dev/null",
+                quoted(built), quoted(plugins)]);
+            NSString *kept_version = OBSAirPlayPreviousVersion(pluginURL);
+            if (swapped && kept_same && [kept_version isEqualToString:installedVersion]) {
+                ++good_rounds;
+            } else {
+                std::printf("  round %d: staged=%d swaps=%d installed=%s kept=%s same=%d\n", round,
+                            staged ? 1 : 0, swaps.load(), bundleVersion(installed).UTF8String,
+                            kept_version ? kept_version.UTF8String : "(none)", kept_same ? 1 : 0);
+            }
         }
-        expect([kept_version isEqualToString:installedVersion] && kept_same,
-               "replaced version is kept intact for rollback");
+        expect(good_rounds == kRounds,
+               "installers racing for a stale lock: one swap, replaced version kept");
         OBSAirPlayForgetPreviousVersion(pluginURL);
         expect(!OBSAirPlayPreviousVersion(pluginURL), "kept version removed after a newer start");
 

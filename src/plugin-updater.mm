@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -203,33 +204,46 @@ bool ownedByUser(NSURL *url)
 // lock whose process has gone is taken over.
 class UpdateLock {
 public:
+    // An flock() on the lock file: the kernel drops it when the holder
+    // exits, so a lock left by a crashed process never blocks, and nothing
+    // has to guess from a stored PID whether its owner is alive. The holder
+    // removes the file before letting go; a waiter that then locks the
+    // removed file finds it is no longer the one at the path and starts over.
     explicit UpdateLock(NSURL *pluginURL)
         : m_path([[pluginURL URLByDeletingLastPathComponent]
               URLByAppendingPathComponent:kLockName].path)
     {
-        for (int attempt = 0; attempt < 2 && m_fd < 0; ++attempt) {
-            m_fd = open(m_path.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW,
-                        0600);
-            if (m_fd >= 0) {
+        const char *path = m_path.fileSystemRepresentation;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const int fd = open(path, O_CREAT | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
+            if (fd < 0)
+                return;
+            if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+                close(fd);
+                return; // another installer holds it
+            }
+            struct stat opened = {};
+            struct stat current = {};
+            if (fstat(fd, &opened) == 0 && S_ISREG(opened.st_mode) &&
+                opened.st_uid == getuid() && lstat(path, &current) == 0 &&
+                opened.st_dev == current.st_dev && opened.st_ino == current.st_ino) {
+                m_fd = fd;
+                // For people looking at the folder; not used for locking.
                 const char *pid = [NSString stringWithFormat:@"%d\n", getpid()].UTF8String;
-                (void)write(m_fd, pid, strlen(pid));
+                if (ftruncate(fd, 0) == 0)
+                    (void)write(fd, pid, strlen(pid));
                 return;
             }
-            if (errno != EEXIST)
-                return;
-            NSString *text = [NSString stringWithContentsOfFile:m_path encoding:NSUTF8StringEncoding
-                                                          error:nil];
-            const pid_t owner = (pid_t)text.intValue;
-            if (owner > 0 && (kill(owner, 0) == 0 || errno != ESRCH))
-                return; // held by a live process
-            unlink(m_path.fileSystemRepresentation);
+            close(fd);
+            if (S_ISREG(opened.st_mode) && opened.st_uid != getuid())
+                return; // someone else's file: never ours to take
         }
     }
     ~UpdateLock()
     {
         if (m_fd >= 0) {
-            close(m_fd);
             unlink(m_path.fileSystemRepresentation);
+            close(m_fd);
         }
     }
     UpdateLock(const UpdateLock &) = delete;
