@@ -70,6 +70,17 @@ void airplay_source_get_defaults(obs_data_t* settings)
     obs_data_set_default_bool(settings, "allow_self_signed_media", false);
     obs_data_set_default_string(settings, "airplay_video", "sender");
     obs_data_set_default_bool(settings, "check_for_updates", true);
+    obs_data_set_default_bool(settings, "show_advanced", false);
+}
+
+// Shows or hides the Advanced group (OBS has no collapsible section).
+static bool show_advanced_modified(obs_properties_t* props, obs_property_t* property,
+                                   obs_data_t* settings)
+{
+    UNUSED_PARAMETER(property);
+    obs_property_set_visible(obs_properties_get(props, "advanced"),
+                             obs_data_get_bool(settings, "show_advanced"));
+    return true;
 }
 
 static bool reset_server_name_clicked(obs_properties_t* props, obs_property_t* property,
@@ -137,25 +148,32 @@ obs_properties_t* airplay_source_get_properties(void* data)
         obs_property_text_set_info_type(status, OBS_TEXT_INFO_WARNING);
     }
 
-    obs_property_t* follow = obs_properties_add_bool(props, "follow_sender_clock",
+    // Everything below the status lives in an Advanced group, shown when
+    // "Show advanced settings" is ticked.
+    obs_property_t* show_advanced = obs_properties_add_bool(props, "show_advanced",
+        obs_module_text("AirPlay.ShowAdvanced"));
+    obs_property_set_modified_callback(show_advanced, show_advanced_modified);
+
+    obs_properties_t* advanced = obs_properties_create();
+    obs_property_t* follow = obs_properties_add_bool(advanced, "follow_sender_clock",
         obs_module_text("AirPlay.FollowSenderClock"));
     obs_property_set_long_description(follow, obs_module_text("AirPlay.FollowSenderClock.Tooltip"));
 
-    obs_property_t* self_signed = obs_properties_add_bool(props, "allow_self_signed_media",
+    obs_property_t* self_signed = obs_properties_add_bool(advanced, "allow_self_signed_media",
         obs_module_text("AirPlay.AllowSelfSigned"));
     obs_property_set_long_description(self_signed, obs_module_text("AirPlay.AllowSelfSigned.Tooltip"));
 
-    obs_property_t* telemetry = obs_properties_add_bool(props, "log_latency_telemetry",
+    obs_property_t* telemetry = obs_properties_add_bool(advanced, "log_latency_telemetry",
         obs_module_text("AirPlay.LatencyTelemetry"));
     obs_property_set_long_description(telemetry, obs_module_text("AirPlay.LatencyTelemetry.Tooltip"));
 
-    obs_property_t* updates = obs_properties_add_bool(props, "check_for_updates",
+    obs_property_t* updates = obs_properties_add_bool(advanced, "check_for_updates",
         obs_module_text("AirPlay.CheckForUpdates"));
     obs_property_set_long_description(updates, obs_module_text("AirPlay.CheckForUpdates.Tooltip"));
 
     // One choice with three answers (the settings behind it are "accept
     // AirPlay video" and "only from the sending device").
-    obs_property_t* video = obs_properties_add_list(props, "airplay_video",
+    obs_property_t* video = obs_properties_add_list(advanced, "airplay_video",
         obs_module_text("AirPlay.Video"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
     // Least to most permissive; "sender" is the default. Last in the list:
     // its tooltip is long, and below it there is no help icon to cover.
@@ -163,6 +181,9 @@ obs_properties_t* airplay_source_get_properties(void* data)
     obs_property_list_add_string(video, obs_module_text("AirPlay.Video.SenderOnly"), "sender");
     obs_property_list_add_string(video, obs_module_text("AirPlay.Video.Anywhere"), "anywhere");
     obs_property_set_long_description(video, obs_module_text("AirPlay.Video.Tooltip"));
+
+    obs_properties_add_group(props, "advanced", obs_module_text("AirPlay.Advanced"),
+                             OBS_GROUP_NORMAL, advanced);
 
     char version[64];
     snprintf(version, sizeof(version), obs_module_text("AirPlay.Version"), PLUGIN_VERSION);
