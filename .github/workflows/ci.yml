@@ -65,6 +65,8 @@ jobs:
       - name: Build
         run: cmake --build --preset release -j4
       - name: Test
+        env:
+          OBS_AIRPLAY_LATENCY_BUDGET_MS: "500"   # shared runners are slower
         run: ctest --preset release -j2
 
   sanitizers:
@@ -78,6 +80,8 @@ jobs:
           brew install cmake pkg-config ffmpeg libplist openssl@3
           brew install --cask obs
       - name: AddressSanitizer + UBSan
+        env:
+          OBS_AIRPLAY_LATENCY_BUDGET_MS: "1000"   # sanitizers add to that
         run: |
           cmake --preset asan
           cmake --build --preset asan -j4

@@ -447,10 +447,19 @@ int main(int argc, const char *argv[])
                shell([NSString stringWithFormat:
                    @"codesign --verify --deep --strict %@ 2>/dev/null", quoted(installed)]),
                "two installers at once: one swap replaces the plugin");
-        expect([OBSAirPlayPreviousVersion(pluginURL) isEqualToString:installedVersion] &&
-               shell([NSString stringWithFormat:
-                   @"diff -rq %@ %@/.obs-airplay.previous/obs-airplay.plugin >/dev/null",
-                   quoted(built), quoted(plugins)]),
+        const bool kept_same = shell([NSString stringWithFormat:
+            @"diff -rq %@ %@/.obs-airplay.previous/obs-airplay.plugin >/dev/null",
+            quoted(built), quoted(plugins)]);
+        NSString *kept_version = OBSAirPlayPreviousVersion(pluginURL);
+        if (!kept_same || ![kept_version isEqualToString:installedVersion]) {
+            std::printf("  kept version %s (expected %s); differences:\n",
+                        kept_version ? kept_version.UTF8String : "(none)",
+                        installedVersion.UTF8String);
+            shell([NSString stringWithFormat:
+                @"diff -rq %@ %@/.obs-airplay.previous/obs-airplay.plugin | head -20; "
+                @"ls -la %@", quoted(built), quoted(plugins), quoted(plugins)]);
+        }
+        expect([kept_version isEqualToString:installedVersion] && kept_same,
                "replaced version is kept intact for rollback");
         OBSAirPlayForgetPreviousVersion(pluginURL);
         expect(!OBSAirPlayPreviousVersion(pluginURL), "kept version removed after a newer start");

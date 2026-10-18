@@ -541,9 +541,16 @@ int main(int argc, char** argv)
         transfer_done.store(true);
         poller.join();
         free(body);
-        std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms -> %s\n",
-                    body_size, polls, worst_poll_ms, worst_poll_ms < 100.0 ? "ok" : "SLOW");
-        large_transfer_ok = worst_poll_ms < 100.0 && polls > 10;
+        // 100 ms on a developer Mac; shared CI runners are several times
+        // slower, so CI raises it with OBS_AIRPLAY_LATENCY_BUDGET_MS.
+        double budget_ms = 100.0;
+        if (const char* env = std::getenv("OBS_AIRPLAY_LATENCY_BUDGET_MS")) {
+            if (std::atof(env) > 0.0) budget_ms = std::atof(env);
+        }
+        std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms "
+                    "(budget %.0f ms) -> %s\n", body_size, polls, worst_poll_ms, budget_ms,
+                    worst_poll_ms < budget_ms ? "ok" : "SLOW");
+        large_transfer_ok = worst_poll_ms < budget_ms && polls > 10;
     } else {
         blob_action_response = binaryPlistExchange(port, "/action", session, blob_action);
     }
