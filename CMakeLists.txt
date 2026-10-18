@@ -282,6 +282,7 @@ set(obs-airplay_SOURCES
     src/audio-decoder.cpp
     src/media-player.cpp
     src/media-url-policy.cpp
+    src/module-settings.cpp
 )
 
 set(obs-airplay_HEADERS

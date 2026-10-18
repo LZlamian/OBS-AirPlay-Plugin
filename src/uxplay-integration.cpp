@@ -600,10 +600,10 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }
 
         int dnssd_error = 0;
-        // Use any name queued by updateServerName() before start() ran, otherwise
-        // fall back to the parameter (loaded from saved prefs by obs_module_load).
-        const std::string svc_name = !m_server_name.empty() ? m_server_name
-                                     : (server_name.empty() ? "OBS AirPlay" : server_name);
+        // The caller's name (the saved one, from obs_module_load); without
+        // one, a name updateServerName() stored before start() ran.
+        const std::string svc_name = !server_name.empty() ? server_name
+                                     : (!m_server_name.empty() ? m_server_name : "OBS AirPlay");
         m_server_name = svc_name;     // canonical record
         m_hw_addr = hw_addr;          // store for later name updates
         m_dnssd = dnssd_init(svc_name.c_str(),

@@ -3,6 +3,7 @@
 
 #include <obs-module.h>
 #include <memory>
+#include <string>
 
 // Source callbacks
 const char* airplay_source_get_name(void* type_data);
@@ -21,6 +22,15 @@ std::shared_ptr<class AirPlayServer> get_airplay_server();
 
 // Update the advertised AirPlay server name and restart mDNS
 void update_server_name(const std::string& new_name);
+
+// The receiver's settings, shared by all AirPlay sources (plugin-main.cpp).
+struct ModuleSettings;
+ModuleSettings get_module_settings();
+ModuleSettings read_source_settings(obs_data_t* data);
+void set_module_settings(ModuleSettings settings, obs_source_t* origin);
+void adopt_or_show_module_settings(obs_data_t* source_settings, obs_source_t* source);
+// Why the last server name was not used, or empty.
+std::string get_server_name_error();
 
 struct AirPlaySource {
     obs_source_t* source;

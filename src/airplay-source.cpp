@@ -3,6 +3,7 @@
 #include "airplay-server.hpp"
 #include "uxplay-integration.hpp"
 #include "media-player.hpp"
+#include "module-settings.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <atomic>
@@ -53,17 +54,9 @@ void* airplay_source_create(obs_data_t* settings, obs_source_t* source)
 {
     auto airplay_source = new AirPlaySource(source);
 
-    // OBS may defer the 'update' callback to the graphics thread via
-    // obs_source_video_tick. Apply the saved name here, synchronously on the
-    // main thread, so the server advertises the correct name from the moment
-    // the source is loaded — not just after the first frame tick.
-    const char* saved_name = obs_data_get_string(settings, "server_name");
-    if (saved_name && *saved_name) {
-        update_server_name(saved_name);
-    }
-
-    MediaPlayer::setFollowSenderClock(obs_data_get_bool(settings, "follow_sender_clock"));
-    MediaPlayer::setAllowInsecureTls(obs_data_get_bool(settings, "allow_self_signed_media"));
+    // The receiver's settings are shared by all AirPlay sources: this one
+    // shows them (or, the first time, provides them).
+    adopt_or_show_module_settings(settings, source);
 
     blog(LOG_INFO, "AirPlay source created");
     return airplay_source;
@@ -82,6 +75,7 @@ void airplay_source_get_defaults(obs_data_t* settings)
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
     obs_data_set_default_bool(settings, "follow_sender_clock", false);
     obs_data_set_default_bool(settings, "allow_self_signed_media", false);
+    obs_data_set_default_bool(settings, "check_for_updates", true);
 }
 
 static bool reset_server_name_clicked(obs_properties_t* props, obs_property_t* property,
@@ -157,20 +151,11 @@ obs_properties_t* airplay_source_get_properties(void* data)
 
 void airplay_source_update(void* data, obs_data_t* settings)
 {
-    UNUSED_PARAMETER(data);
-
-    const char* new_name = obs_data_get_string(settings, "server_name");
-    if (new_name && *new_name) {
-        // Forward to update_server_name which guards against no-op updates
-        // and delegates to UxPlay's dnssd context (the sole mDNS advertiser).
-        update_server_name(new_name);
-    }
-
-    g_latency_telemetry_enabled.store(
-        obs_data_get_bool(settings, "log_latency_telemetry"),
-        std::memory_order_relaxed);
-    MediaPlayer::setFollowSenderClock(obs_data_get_bool(settings, "follow_sender_clock"));
-    MediaPlayer::setAllowInsecureTls(obs_data_get_bool(settings, "allow_self_signed_media"));
+    auto* airplay_src = static_cast<AirPlaySource*>(data);
+    // The name goes through update_server_name's debounce; the other values
+    // apply at once. All AirPlay sources then show the same values.
+    set_module_settings(read_source_settings(settings),
+                        airplay_src ? airplay_src->source : nullptr);
 }
 
 void airplay_source_show(void* data)

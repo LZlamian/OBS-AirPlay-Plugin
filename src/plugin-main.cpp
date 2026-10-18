@@ -4,11 +4,15 @@
 #include "airplay-server.hpp"
 #include "uxplay-integration.hpp"
 #include "airplay-ble-helper.hpp"
+#include "media-player.hpp"
+#include "module-settings.hpp"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
 #include <cstdio>
+#include <cstring>
 #include <util/platform.h>
 
 // Static initializer to test if plugin loads
@@ -30,6 +34,13 @@ static std::string g_server_name = "OBS AirPlay";
 // g_server_name is read by OBS threads (source create/update) and written by
 // the debounce thread.
 static std::mutex g_server_name_mutex;
+
+// The receiver's settings, shared by every AirPlay source (module-settings.hpp).
+static std::mutex g_module_settings_mutex;
+static ModuleSettings g_module_settings;
+// False until settings.json exists or the first source's settings were taken.
+static bool g_module_settings_known = false;
+static std::string g_server_name_error;
 
 // Debounce: defer mDNS name updates until the user stops typing for 800ms.
 static std::mutex              g_debounce_mutex;
@@ -169,9 +180,131 @@ void update_server_name(const std::string& new_name)
     g_debounce_cv.notify_one();
 }
 
+static void apply_module_runtime(const ModuleSettings& settings)
+{
+    g_latency_telemetry_enabled.store(settings.log_latency_telemetry, std::memory_order_relaxed);
+    MediaPlayer::setFollowSenderClock(settings.follow_sender_clock);
+    MediaPlayer::setAllowInsecureTls(settings.allow_self_signed_media);
+}
+
+static void write_module_settings(obs_data_t* data, const ModuleSettings& settings)
+{
+    obs_data_set_string(data, "server_name", settings.server_name.c_str());
+    obs_data_set_bool(data, "follow_sender_clock", settings.follow_sender_clock);
+    obs_data_set_bool(data, "log_latency_telemetry", settings.log_latency_telemetry);
+    obs_data_set_bool(data, "allow_self_signed_media", settings.allow_self_signed_media);
+    obs_data_set_bool(data, "check_for_updates", settings.check_for_updates);
+}
+
+ModuleSettings read_source_settings(obs_data_t* data)
+{
+    ModuleSettings settings;
+    const char* name = obs_data_get_string(data, "server_name");
+    settings.server_name = name && *name ? name : "OBS AirPlay";
+    settings.follow_sender_clock = obs_data_get_bool(data, "follow_sender_clock");
+    settings.log_latency_telemetry = obs_data_get_bool(data, "log_latency_telemetry");
+    settings.allow_self_signed_media = obs_data_get_bool(data, "allow_self_signed_media");
+    settings.check_for_updates = obs_data_get_bool(data, "check_for_updates");
+    return settings;
+}
+
+ModuleSettings get_module_settings()
+{
+    std::lock_guard<std::mutex> lock(g_module_settings_mutex);
+    return g_module_settings;
+}
+
+std::string get_server_name_error()
+{
+    std::lock_guard<std::mutex> lock(g_module_settings_mutex);
+    return g_server_name_error;
+}
+
+// Shows the receiver's settings in every AirPlay source except `except`
+// (their panels read the source's own settings). Does not call update.
+static void show_module_settings_in_sources(const ModuleSettings& settings, obs_source_t* except)
+{
+    struct Context {
+        const ModuleSettings* settings;
+        obs_source_t* except;
+    } context = {&settings, except};
+    obs_enum_sources([](void* param, obs_source_t* source) {
+        auto* ctx = static_cast<Context*>(param);
+        const char* id = obs_source_get_unversioned_id(source);
+        if (source != ctx->except && id && strcmp(id, "airplay_source") == 0) {
+            obs_data_t* data = obs_source_get_settings(source);
+            write_module_settings(data, *ctx->settings);
+            obs_data_release(data);
+        }
+        return true;
+    }, &context);
+}
+
+// From a source's update: the receiver takes the new values, saves them and
+// shows them in the other sources.
+void set_module_settings(ModuleSettings settings, obs_source_t* origin)
+{
+    std::string accepted_name;
+    {
+        std::lock_guard<std::mutex> lock(g_module_settings_mutex);
+        if (settings.server_name.size() > kMaxServerNameBytes) {
+            g_server_name_error = "The name is longer than " +
+                std::to_string(kMaxServerNameBytes) +
+                " bytes, the most AirPlay devices can show; still advertising \"" +
+                g_module_settings.server_name + "\".";
+            blog(LOG_WARNING, "[AirPlay] server name too long (%zu bytes); keeping \"%s\"",
+                 settings.server_name.size(), g_module_settings.server_name.c_str());
+            settings.server_name = g_module_settings.server_name;
+        } else {
+            g_server_name_error.clear();
+        }
+        if (g_module_settings_known && settings == g_module_settings) return;
+        g_module_settings = settings;
+        g_module_settings_known = true;
+        accepted_name = settings.server_name;
+    }
+    apply_module_runtime(settings);
+    update_server_name(accepted_name);
+    module_settings_save(settings);
+    show_module_settings_in_sources(settings, origin);
+}
+
+// From a source's create: an existing configuration is shown in it; before
+// settings.json exists the first source's (per-source, older versions)
+// settings become the receiver's.
+void adopt_or_show_module_settings(obs_data_t* source_settings, obs_source_t* source)
+{
+    bool known = false;
+    ModuleSettings current;
+    {
+        std::lock_guard<std::mutex> lock(g_module_settings_mutex);
+        known = g_module_settings_known;
+        current = g_module_settings;
+    }
+    if (!known) {
+        blog(LOG_INFO, "[AirPlay] taking receiver settings from the first AirPlay source");
+        set_module_settings(read_source_settings(source_settings), source);
+    } else {
+        write_module_settings(source_settings, current);
+    }
+}
+
 bool obs_module_load(void)
 {
     blog(LOG_INFO, "OBS AirPlay Plugin loaded (version " PLUGIN_VERSION ")");
+
+    {
+        bool found = false;
+        ModuleSettings settings = module_settings_load(&found);
+        std::lock_guard<std::mutex> lock(g_module_settings_mutex);
+        g_module_settings = settings;
+        g_module_settings_known = found;
+        std::lock_guard<std::mutex> name_lock(g_server_name_mutex);
+        // The receiver starts with the saved name: no rename once the
+        // scene collection loads.
+        g_server_name = settings.server_name;
+    }
+    apply_module_runtime(get_module_settings());
 
     // Start the name debounce thread before anything else.
     g_debounce_thread = std::thread(name_debounce_thread_func);
@@ -181,7 +314,10 @@ bool obs_module_load(void)
         obs_source_info airplay_source_info = {};
         airplay_source_info.id = "airplay_source";
         airplay_source_info.type = OBS_SOURCE_TYPE_INPUT;
-        airplay_source_info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO;
+        // One receiver per process: a duplicate would only mirror the same
+        // picture, so OBS offers a reference instead.
+        airplay_source_info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
+                                           OBS_SOURCE_DO_NOT_DUPLICATE;
         airplay_source_info.get_name = airplay_source_get_name;
         airplay_source_info.create = airplay_source_create;
         airplay_source_info.destroy = airplay_source_destroy;
