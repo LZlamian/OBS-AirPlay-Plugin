@@ -378,8 +378,17 @@ void adopt_or_show_module_settings(obs_data_t* source_settings, obs_source_t* so
     }
 }
 
+// [LOAD] lines: how long each step of obs_module_load took (OBS waits for
+// the whole of it before showing its window).
+static uint64_t g_load_started_ns = 0;
+static void log_load_step(const char* step)
+{
+    blog(LOG_INFO, "[LOAD] +%.1f ms %s", (os_gettime_ns() - g_load_started_ns) / 1e6, step);
+}
+
 bool obs_module_load(void)
 {
+    g_load_started_ns = os_gettime_ns();
     blog(LOG_INFO, "OBS AirPlay Plugin loaded (version " PLUGIN_VERSION ")");
 
     if (char* config_dir = obs_module_config_path("")) {
@@ -426,6 +435,7 @@ bool obs_module_load(void)
         blog(LOG_INFO, "Registering AirPlay source...");
         obs_register_source(&airplay_source_info);
         blog(LOG_INFO, "AirPlay source registered successfully");
+        log_load_step("source registered");
         
         // Initialize AirPlay server first to get a consistent MAC address
         g_airplay_server = std::make_shared<AirPlayServer>();
@@ -454,11 +464,13 @@ bool obs_module_load(void)
             return true;
         } else {
             blog(LOG_INFO, "UxPlay integration started successfully");
+            log_load_step("receiver started");
 
             // AirServer starts an otherwise empty CoreBluetooth peripheral
             // advertisement before any iPhone connection. Keep the
             // equivalent discovery signal alive while the receiver runs.
             start_airplay_ble_helper();
+            log_load_step("discovery helper launch requested (continues in the background)");
 
             g_uxplay_integration->setVideoCallback([](const uint8_t* data, size_t size, uint64_t pts, bool is_h265) {
                 if (!data || size == 0) {
@@ -512,6 +524,7 @@ bool obs_module_load(void)
             // registrations caused mDNSResponder to silently rename one entry,
             // so iOS saw the stale/wrong name in Screen Mirroring.
             blog(LOG_INFO, "UxPlay integration active on port %d", g_uxplay_integration->getActualPort());
+            log_load_step("done");
 
             return true;
         }

@@ -2,6 +2,7 @@
 #include "airplay-ble-helper.hpp"
 
 #include <obs-module.h>
+#include <util/platform.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -9,12 +10,16 @@
 #include <spawn.h>
 #include <string>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 extern char **environ;
 
 namespace {
 bool g_helper_started = false;
+// Waits for /usr/bin/open (LaunchServices takes 100 ms or more) so that
+// module load does not.
+std::thread g_launch_waiter;
 
 void set_helper_preference(CFStringRef key, bool value)
 {
@@ -92,20 +97,25 @@ bool start_airplay_ble_helper()
         return false;
     }
 
-    int launcher_status = 0;
-    if (waitpid(launcher_pid, &launcher_status, 0) < 0 ||
-        !WIFEXITED(launcher_status) || WEXITSTATUS(launcher_status) != 0) {
-        blog(LOG_WARNING, "[BLE] LaunchServices could not start the discovery helper");
-        return false;
-    }
-
     g_helper_started = true;
-    blog(LOG_INFO, "[BLE] Discovery helper launched through LaunchServices");
+    const uint64_t spawned_ns = os_gettime_ns();
+    g_launch_waiter = std::thread([launcher_pid, spawned_ns] {
+        int launcher_status = 0;
+        if (waitpid(launcher_pid, &launcher_status, 0) < 0 ||
+            !WIFEXITED(launcher_status) || WEXITSTATUS(launcher_status) != 0) {
+            blog(LOG_WARNING, "[BLE] LaunchServices could not start the discovery helper");
+            return;
+        }
+        blog(LOG_INFO, "[BLE] Discovery helper launched through LaunchServices (%.0f ms)",
+             (os_gettime_ns() - spawned_ns) / 1e6);
+    });
     return true;
 }
 
 void stop_airplay_ble_helper()
 {
+    if (g_launch_waiter.joinable())
+        g_launch_waiter.join();
     if (!g_helper_started)
         return;
 
