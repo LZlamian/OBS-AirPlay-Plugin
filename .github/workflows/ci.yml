@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Build and test on every push and pull request; a tag vX.Y.Z also builds
+# release artifacts, which wait for approval (the "release" environment)
+# and are attached to a draft release for the maintainer to publish.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: No build artifacts tracked
+        run: |
+          if git ls-files | grep -E '^(build|build-[^/]+|dist)/|\.DS_Store$|\.(pkg|zip)$'; then
+            echo "::error::build outputs are tracked"; exit 1
+          fi
+      - name: Property lists
+        run: |
+          for f in Info.plist.in src/airplay-ble-discovery-Info.plist.in; do
+            sed 's/@[A-Z_]*@/x/g' "$f" | plutil -lint -
+          done
+      - name: The version is set only in CMakeLists.txt
+        run: |
+          grep -q '@PROJECT_VERSION@' Info.plist.in
+          grep -q '@PROJECT_VERSION@' src/airplay-ble-discovery-Info.plist.in
+          if grep -nE '<string>[0-9]+\.[0-9]+\.[0-9]+</string>' Info.plist.in src/*.plist.in; then
+            echo "::error::hard-coded version in a plist template"; exit 1
+          fi
+      - name: Shell scripts
+        run: |
+          brew install shellcheck
+          shellcheck -S error build.sh scripts/*.sh tests/*.sh diagnose.sh
+
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple silicon
+            arch: arm64
+          - runner: macos-13   # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Submodule URL from .gitmodules
+        run: git submodule sync --recursive && git submodule update --init --recursive
+      - name: Dependencies
+        run: |
+          brew install cmake pkg-config ffmpeg libplist openssl@3
+          brew install --cask obs
+      - name: Configure
+        run: cmake --preset release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+      - name: Build
+        run: cmake --build --preset release -j4
+      - name: Test
+        run: ctest --preset release -j2
+
+  sanitizers:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Dependencies
+        run: |
+          brew install cmake pkg-config ffmpeg libplist openssl@3
+          brew install --cask obs
+      - name: AddressSanitizer + UBSan
+        run: |
+          cmake --preset asan
+          cmake --build --preset asan -j4
+          ctest --preset asan -j2 -R 'protocol|media-'
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, build-test, sanitizers]
+    runs-on: macos-14
+    environment: release   # requires a maintainer's approval
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Dependencies
+        run: |
+          brew install cmake pkg-config libplist openssl@3
+          brew install --cask obs
+      - name: Release dependencies (cached by the script's content)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/obs-airplay-release-deps
+          key: release-deps-arm64-${{ hashFiles('scripts/build-macos-release-deps.sh') }}
+      - name: Build release dependencies
+        run: scripts/build-macos-release-deps.sh
+      - name: Package
+        env:
+          OBS_AIRPLAY_RELEASE_TAG: ${{ github.ref_name }}
+          OBS_AIRPLAY_DEPS_PREFIX: /Users/runner/Library/Caches/obs-airplay-release-deps/arm64-macos12.0
+          OBS_AIRPLAY_BUILD_DIR: /Users/runner/obs-airplay-release-build
+          OBS_AIRPLAY_DIST_DIR: /Users/runner/obs-airplay-dist
+        run: scripts/package-macos.sh
+      - name: Sign the zip for the self-updater (only with the key as a secret)
+        env:
+          SIGNING_KEY: ${{ secrets.OBS_AIRPLAY_SIGNING_KEY }}
+        if: env.SIGNING_KEY != ''
+        run: |
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          OBS_AIRPLAY_SIGNING_KEY="$RUNNER_TEMP/key.pem" \
+            OBS_AIRPLAY_OPENSSL="$(brew --prefix openssl@3)/bin/openssl" \
+            scripts/sign-release.sh /Users/runner/obs-airplay-dist/obs-airplay-${{ github.ref_name }}-macos-arm64.zip
+          rm -f "$RUNNER_TEMP/key.pem"
+      - name: Checksums
+        run: cd /Users/runner/obs-airplay-dist && shasum -a 256 * > SHA256SUMS
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="RELEASE_NOTES_${{ github.ref_name }}.md"
+          [ -f "$notes" ] || notes=/dev/null
+          gh release create "${{ github.ref_name }}" --draft --verify-tag \
+            --title "OBS AirPlay ${{ github.ref_name }}" --notes-file "$notes" \
+            /Users/runner/obs-airplay-dist/*
