@@ -75,9 +75,10 @@ public:
     // Called, from any thread, when connectionState() has changed.
     void setStateChangedCallback(std::function<void()> callback);
 
-    // "Accept AirPlay video" and "Only fetch AirPlay video from the sending
-    // device"; apply to the next POST /play (and, for sender_only, to what
-    // the current item fetches next). Callable before start().
+    // The "AirPlay video" setting: Off (accept_video false) and Only from
+    // the sending device (sender_only). Applies to the next POST /play (and,
+    // for sender_only, to what the current item fetches next). Callable
+    // before start().
     void setVideoPolicy(bool accept_video, bool sender_only);
     // The latest refused AirPlay video request, "HH:MM:SS: reason", or empty.
     // Cleared when an item is accepted.

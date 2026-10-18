@@ -597,7 +597,7 @@ int urlPolicy()
     if (checkLocalFile("/etc/passwd").empty()) ++failures;
     if (checkLocalFile("/tmp/../etc/obs-airplay-fcup-x").empty()) ++failures;
     if (checkLocalFile("/tmp/obs-airplay-fcup-missing").empty()) ++failures;
-    // "Only fetch AirPlay video from the sending device": everything an item
+    // "AirPlay video: Only from the sending device": everything an item
     // fetches must be on the item's (the sender's) address, any port; a
     // named item host is refused. The HLS proxy's playlists stay allowed,
     // but not the hosts they point at.

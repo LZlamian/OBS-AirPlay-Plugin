@@ -1063,10 +1063,10 @@ int main(int argc, char** argv)
     policy_ok = policy_ok && classic_refused.find("400 Bad Request") != std::string::npos;
     std::printf("url_policy=%s\n", policy_ok ? "enforced" : "FAILED");
 
-    // Receiver settings: "Only fetch AirPlay video from the sending device"
-    // refuses other hosts but not the sender's own media server; "Accept
-    // AirPlay video" off refuses every item, however it arrives. Each
-    // refusal reaches the host with its reason.
+    // Receiver setting "AirPlay video": "Only from the sending device"
+    // refuses other hosts but not the sender's own media server; "Off"
+    // refuses every item, however it arrives. Each refusal reaches the host
+    // with its reason.
     const auto refusal = [&]() {
         std::lock_guard<std::mutex> lock(state.mutex);
         return std::make_pair(state.refused_count, state.refused_reason);

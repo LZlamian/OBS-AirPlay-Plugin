@@ -289,8 +289,9 @@ static void write_module_settings(obs_data_t* data, const ModuleSettings& settin
     obs_data_set_bool(data, "follow_sender_clock", settings.follow_sender_clock);
     obs_data_set_bool(data, "log_latency_telemetry", settings.log_latency_telemetry);
     obs_data_set_bool(data, "allow_self_signed_media", settings.allow_self_signed_media);
-    obs_data_set_bool(data, "accept_airplay_video", settings.accept_airplay_video);
-    obs_data_set_bool(data, "media_sender_only", settings.media_sender_only);
+    obs_data_set_string(data, "airplay_video", !settings.accept_airplay_video ? "off"
+                                               : settings.media_sender_only ? "sender"
+                                                                            : "anywhere");
     obs_data_set_bool(data, "check_for_updates", settings.check_for_updates);
 }
 
@@ -302,8 +303,10 @@ ModuleSettings read_source_settings(obs_data_t* data)
     settings.follow_sender_clock = obs_data_get_bool(data, "follow_sender_clock");
     settings.log_latency_telemetry = obs_data_get_bool(data, "log_latency_telemetry");
     settings.allow_self_signed_media = obs_data_get_bool(data, "allow_self_signed_media");
-    settings.accept_airplay_video = obs_data_get_bool(data, "accept_airplay_video");
-    settings.media_sender_only = obs_data_get_bool(data, "media_sender_only");
+    // "anywhere" (the default), "sender" or "off".
+    const char* video = obs_data_get_string(data, "airplay_video");
+    settings.accept_airplay_video = !(video && strcmp(video, "off") == 0);
+    settings.media_sender_only = video && strcmp(video, "sender") == 0;
     settings.check_for_updates = obs_data_get_bool(data, "check_for_updates");
     return settings;
 }

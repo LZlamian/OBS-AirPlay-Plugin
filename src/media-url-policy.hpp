@@ -20,7 +20,7 @@ std::vector<unsigned short> allowedPorts();
 // Parses "80, 443,8080"; returns an empty list when nothing valid is found.
 std::vector<unsigned short> parsePortList(const std::string& text);
 
-// "Only fetch AirPlay video from the sending device": item URLs must be an
+// "AirPlay video: Only from the sending device": item URLs must be an
 // address (the receiver checked it is the sender's) or the receiver's own HLS
 // proxy, and everything fetched for an item must be on the item's address.
 void setSenderOnly(bool sender_only);

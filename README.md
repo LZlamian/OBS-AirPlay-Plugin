@@ -149,18 +149,22 @@ All AirPlay sources share these settings (there is one receiver per OBS):
 - **Status**: what the receiver is doing, and why it is not working when it is
   not (for example, both ports in use), and the last AirPlay video it refused
   and why.
-- **Accept AirPlay video** (on by default): AirPlay video (the AirPlay button
-  in Safari, YouTube and other apps) hands OBS a link that this Mac then
-  fetches. Turn off to refuse every such request; the device then plays the
-  video itself or shows an error. Screen mirroring is not affected.
-- **Only fetch AirPlay video from the sending device** (off by default): only
-  video the device serves from its own address plays (its own files, video
-  local to the page). Links to other hosts, redirects to them and HLS
-  playlists that point at them are refused, so apps that stream from a website
-  (YouTube, most video sites) will not play. Without it, private LAN addresses
-  and internet hosts on web ports are allowed. Any device on the network can
-  send AirPlay video without a password either way; refusals are logged with
-  their reason.
+- **AirPlay video**: AirPlay video (the AirPlay button in Safari, YouTube and
+  other apps) hands OBS a web address that this Mac then downloads from.
+  Screen mirroring is not affected by this setting.
+  - **From any web address** (the default): videos from websites play, as on
+    an Apple TV. Private LAN addresses and internet hosts on web ports are
+    allowed.
+  - **Only from the sending device**: only video the device serves from its
+    own address plays (its own files, video local to the page). Links to
+    other hosts, redirects to them and HLS playlists that point at them are
+    refused, so apps that stream from a website (YouTube, most video sites)
+    will not play.
+  - **Off (screen mirroring only)**: every AirPlay video is refused; the
+    device then plays the video itself or shows an error.
+
+  Any device on the network can send AirPlay video without a password; each
+  refusal is logged with its reason.
 - **Keep AirPlay video in step with the sending app**: for apps that also play
   the video on the device; leave off for Safari.
 - **Allow self-signed media servers**: AirPlay video from HTTPS servers whose

@@ -18,11 +18,10 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
   else.
 - **You decide what AirPlay video may fetch.** With AirPlay video, the device
   sends the receiver a web address and your Mac downloads the video itself.
-  Two new settings in the source's properties control that: turn off
-  **Accept AirPlay video** to allow only screen mirroring, or turn on **Only
-  fetch AirPlay video from the sending device** to keep videos played from
-  the device's own apps and pages working while refusing other web
-  addresses. Each refused video is named, with the reason, in the OBS log
+  The new **AirPlay video** setting in the source's properties controls that:
+  **From any web address** (as before), **Only from the sending device**
+  (videos played from the device's own apps and pages keep working, other
+  web addresses are refused), or **Off** (screen mirroring only). Each refused video is named, with the reason, in the OBS log
   and on the source's Status line.
 - **Only the device that started an AirPlay video can control or stop it.**
 - **Updates must be signed.** From this version on, an update is installed only
