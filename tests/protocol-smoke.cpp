@@ -1170,9 +1170,36 @@ int main(int argc, char** argv)
                     nonreader_ok ? "dropped" : "FAILED", flooded, nonreader_ms);
     }
 
+    // With the fast-connect profile, /info reports the DNS-SD context's
+    // features, so a bit masked there (FairPlay video) is masked in /info.
+    const auto info_features = [&]() -> uint64_t {
+        const std::string response = httpExchange(port, info_request);
+        const size_t body = response.find("\r\n\r\n");
+        if (body == std::string::npos) return 0;
+        plist_t root = nullptr;
+        plist_from_bin(response.data() + body + 4,
+                       static_cast<uint32_t>(response.size() - body - 4), &root);
+        uint64_t value = 0;
+        plist_t node = root ? plist_dict_get_item(root, "features") : nullptr;
+        if (node) plist_get_uint_val(node, &value);
+        if (root) plist_free(root);
+        return value;
+    };
+    raop_set_fast_connect(raop, true);
+    dnssd_set_airserver_profile(dnssd, true);
+    const uint64_t profile_features = info_features();
+    dnssd_set_airplay_features(dnssd, 2, 0);
+    const uint64_t masked_features = info_features();
+    const bool features_ok = profile_features == UINT64_C(0x0E427FFFF7) &&
+        masked_features == UINT64_C(0x0E427FFFF3);
+    std::printf("fast_connect_features=%s profile=0x%llX masked=0x%llX\n",
+                features_ok ? "ok" : "FAILED",
+                static_cast<unsigned long long>(profile_features),
+                static_cast<unsigned long long>(masked_features));
+
     raop_stop_httpd(raop);
     raop_destroy(raop);
     dnssd_destroy(dnssd);
     return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok &&
-        oversized_ok && budget_ok && nonreader_ok && binding_ok ? 0 : 1;
+        oversized_ok && budget_ok && nonreader_ok && binding_ok && features_ok ? 0 : 1;
 }

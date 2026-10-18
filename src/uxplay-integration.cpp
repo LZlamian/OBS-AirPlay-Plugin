@@ -71,6 +71,30 @@ bool media_trace_requested()
     }
     return OBS_AIRPLAY_MEDIA_TRACE_DEFAULT != 0;
 }
+// The AirServer profile advertises features 0x0E427FFFF7, which include
+// FairPlay-protected video (bit 2). The receiver cannot play protected video;
+// the claim draws POST /fp-setup2 and protected-HLS requests. Masking it is
+// opt-in (OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1) until it has been checked on
+// real iOS and macOS senders that connection speed is unchanged.
+bool mask_fairplay_video_requested()
+{
+    const char* env = std::getenv("OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO");
+    return env && std::strcmp(env, "1") == 0;
+}
+
+void apply_fast_connect_profile(dnssd_t* dnssd)
+{
+    dnssd_set_airserver_profile(dnssd, true);
+    if (mask_fairplay_video_requested()) {
+        constexpr int kFeatureVideoFairPlay = 2;
+        dnssd_set_airplay_features(dnssd, kFeatureVideoFairPlay, 0);
+        static std::once_flag logged;
+        std::call_once(logged, [] {
+            blog(LOG_INFO, "Fast connection profile: FairPlay video feature bit masked "
+                           "(OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1)");
+        });
+    }
+}
 } // namespace
 
 UxPlayIntegration::UxPlayIntegration()
@@ -601,7 +625,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // initial qualified GET /info with the full runtime profile. Direct
         // pair-verify remains a fallback for senders that still request it.
         raop_set_fast_connect(m_raop, true);
-        dnssd_set_airserver_profile(m_dnssd, true);
+        apply_fast_connect_profile(m_dnssd);
         blog(LOG_INFO, "Fast initial connection enabled (AirServer Bonjour + /info profile; direct-verify fallback)");
 #else
         blog(LOG_INFO, "Fast initial connection disabled (UxPlay compatibility profile)");
@@ -760,7 +784,7 @@ void UxPlayIntegration::updateServerName(const std::string& name)
     }
 
 #if OBS_AIRPLAY_FAST_CONNECT
-    dnssd_set_airserver_profile(new_dnssd, true);
+    apply_fast_connect_profile(new_dnssd);
 #endif
 
     // raop_set_dnssd must be called before dnssd_register_raop/airplay because
