@@ -49,7 +49,10 @@ The smokes can also be run by hand (see the usage line of each):
 
 Timing checks (the large-blob latency budget, follow-clock tolerances) are
 set for a developer Mac; `OBS_AIRPLAY_TIMING_SCALE=3` widens them on slower
-machines, as CI does.
+machines, as CI does. CI only reports the large-blob latency
+(`OBS_AIRPLAY_LATENCY_REPORT_ONLY=1`): its worst case is the 96 MB spool file
+being written on the receiver's thread, which on a shared runner's disk takes
+up to seconds.
 
 `media-resilient-http` plays through `tests/truncating-server.py`, which cuts
 every response short, as some sender media servers do.

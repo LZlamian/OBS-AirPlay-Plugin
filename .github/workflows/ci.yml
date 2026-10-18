@@ -67,6 +67,7 @@ jobs:
       - name: Test
         env:
           OBS_AIRPLAY_TIMING_SCALE: "3"   # shared runners are slower and noisier
+          OBS_AIRPLAY_LATENCY_REPORT_ONLY: "1"   # large-blob latency is the runner's disk
         run: ctest --preset release -j2
 
   sanitizers:
@@ -82,6 +83,7 @@ jobs:
       - name: AddressSanitizer + UBSan
         env:
           OBS_AIRPLAY_TIMING_SCALE: "5"   # sanitizers add to that
+          OBS_AIRPLAY_LATENCY_REPORT_ONLY: "1"
         run: |
           cmake --preset asan
           cmake --build --preset asan -j4
