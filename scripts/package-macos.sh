@@ -10,12 +10,25 @@ PKG_SCRIPTS_DIR="${BUILD_DIR}/pkg-scripts"
 
 PLUGIN_NAME="obs-airplay.plugin"
 PLUGIN_BUNDLE="${BUILD_DIR}/${PLUGIN_NAME}"
-INSTALL_BASE="/Library/Application Support/obs-studio/plugins"
-INSTALL_PATH="${INSTALL_BASE}/${PLUGIN_NAME}"
+# The pkg payload is only a staging copy; postinstall installs the plugin
+# into the console user's own plugins folder, the one place OBS loads it
+# from and the self-updater can replace it.
+PAYLOAD_BASE="/Library/Application Support/OBS AirPlay/pkg-payload"
+USER_PLUGINS_SUBDIR="Library/Application Support/obs-studio/plugins"
+# Where releases before v2.6.0 also installed a copy; removed on install.
+LEGACY_SYSTEM_PLUGIN="/Library/Application Support/obs-studio/plugins/${PLUGIN_NAME}"
 
 PACKAGE_ID="com.obsairplay.plugin"
 VERSION="$(sed -nE 's/^project\(obs-airplay VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' "${ROOT_DIR}/CMakeLists.txt" | head -n1)"
-VERSION="${VERSION:-2.5.2}"
+if [[ -z "${VERSION}" ]]; then
+  echo "error: could not read the version from CMakeLists.txt" >&2
+  exit 1
+fi
+# A tagged release must build the version it is tagged with.
+if [[ -n "${OBS_AIRPLAY_RELEASE_TAG:-}" && "${OBS_AIRPLAY_RELEASE_TAG#v}" != "${VERSION}" ]]; then
+  echo "error: tag ${OBS_AIRPLAY_RELEASE_TAG} does not match CMakeLists.txt version ${VERSION}" >&2
+  exit 1
+fi
 ARCH="${ARCH_OVERRIDE:-$(uname -m)}"
 MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET_OVERRIDE:-12.0}"
 DEPS_PREFIX="${OBS_AIRPLAY_DEPS_PREFIX:-}"
@@ -251,6 +264,18 @@ vendor_runtime_deps() {
     fi
   done < <(otool -L "${main_bin}" | tail -n +2 | awk '{print $1}')
 
+  # No load paths from the build machine (home folder, Homebrew, the deps
+  # prefix) may remain in shipped binaries.
+  local image
+  for image in "${main_bin}" "${copied[@]-}"; do
+    [[ -z "${image}" ]] && continue
+    while IFS= read -r rpath; do
+      [[ -z "${rpath}" || "${rpath}" == @* ]] && continue
+      [[ "${rpath}" == "/Applications/OBS.app/Contents/Frameworks" ]] && continue
+      install_name_tool -delete_rpath "${rpath}" "${image}"
+    done < <(otool -l "${image}" | awk '/cmd LC_RPATH/ { getline; getline; print $2 }')
+  done
+
   # Rewrite vendored libraries to reference each other locally.
   local vendored
   for vendored in "${copied[@]-}"; do
@@ -271,6 +296,25 @@ vendor_runtime_deps() {
   local copied_count
   copied_count="$(find "${frameworks_dir}" -type f -name '*.dylib' | wc -l | tr -d ' ')"
   echo "==> Vendored ${copied_count} runtime libraries into ${frameworks_dir}"
+}
+
+# Both bundles must carry the version being released and the deployment
+# target as their minimum macOS (the updater checks both).
+check_bundle_versions() {
+  local plist key expected actual
+  for plist in "${PLUGIN_BUNDLE}/Contents/Info.plist" \
+               "${PLUGIN_BUNDLE}/Contents/Resources/OBS AirPlay Discovery.app/Contents/Info.plist"; do
+    for key in CFBundleShortVersionString CFBundleVersion LSMinimumSystemVersion; do
+      expected="${VERSION}"
+      [[ "${key}" == LSMinimumSystemVersion ]] && expected="${MACOS_DEPLOYMENT_TARGET}"
+      actual="$(/usr/libexec/PlistBuddy -c "Print :${key}" "${plist}" 2>/dev/null || true)"
+      if [[ "${actual}" != "${expected}" ]]; then
+        echo "error: ${plist} has ${key}=${actual:-<missing>}, expected ${expected}" >&2
+        exit 1
+      fi
+    done
+  done
+  echo "==> Bundle versions: ${VERSION}, macOS ${MACOS_DEPLOYMENT_TARGET}+"
 }
 
 sign_bundle() {
@@ -337,6 +381,7 @@ CMAKE_ARGS=(
   -DCMAKE_OSX_ARCHITECTURES="${ARCH}"
   -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}"
   -DNO_MARCH_NATIVE=ON
+  -DBUILD_TESTING=OFF
 )
 if [[ -n "${DEPS_PREFIX}" ]]; then
   CMAKE_ARGS+=(
@@ -359,6 +404,7 @@ fi
 echo "==> Vendoring runtime dependencies"
 vendor_runtime_deps
 validate_deployment_target
+check_bundle_versions
 # Source/build volumes can add provenance and resource-fork metadata that turns
 # into spurious ._* files in zip/pkg payloads. The bundle does not use it.
 xattr -cr "${PLUGIN_BUNDLE}"
@@ -384,8 +430,8 @@ fi
 
 echo "==> Creating pkg staging layout"
 rm -rf "${STAGE_DIR}"
-mkdir -p "${STAGE_DIR}${INSTALL_BASE}"
-COPYFILE_DISABLE=1 cp -R "${PLUGIN_BUNDLE}" "${STAGE_DIR}${INSTALL_BASE}/"
+mkdir -p "${STAGE_DIR}${PAYLOAD_BASE}"
+COPYFILE_DISABLE=1 cp -R "${PLUGIN_BUNDLE}" "${STAGE_DIR}${PAYLOAD_BASE}/"
 xattr -cr "${STAGE_DIR}"
 # Some filesystems materialize AppleDouble sidecars during a recursive copy.
 # They are metadata artifacts, not part of the plugin payload.
@@ -394,31 +440,53 @@ find "${STAGE_DIR}" -type f -name '._*' -delete
 echo "==> Creating installer postinstall script"
 rm -rf "${PKG_SCRIPTS_DIR}"
 mkdir -p "${PKG_SCRIPTS_DIR}"
-cat > "${PKG_SCRIPTS_DIR}/postinstall" <<'EOS'
+cat > "${PKG_SCRIPTS_DIR}/postinstall" <<EOS
 #!/bin/bash
 set -euo pipefail
 
-PLUGIN_NAME="obs-airplay.plugin"
-SYSTEM_PLUGIN="/Library/Application Support/obs-studio/plugins/${PLUGIN_NAME}"
+PLUGIN_NAME="${PLUGIN_NAME}"
+PAYLOAD="${PAYLOAD_BASE}/\${PLUGIN_NAME}"
+LEGACY_SYSTEM_PLUGIN="${LEGACY_SYSTEM_PLUGIN}"
+USER_PLUGINS_SUBDIR="${USER_PLUGINS_SUBDIR}"
+EOS
+cat >> "${PKG_SCRIPTS_DIR}/postinstall" <<'EOS'
+log() { echo "obs-airplay postinstall: $*"; }
 
-CONSOLE_USER="$(/usr/sbin/scutil <<< "show State:/Users/ConsoleUser" | /usr/bin/awk '/Name :/ && $3 != "loginwindow" { print $3 }')"
+# An older release also installed a system-wide copy, which OBS would load
+# next to the user's (and the updater never replaced). Remove it if it is
+# ours.
+if [[ -d "${LEGACY_SYSTEM_PLUGIN}" && ! -L "${LEGACY_SYSTEM_PLUGIN}" ]] &&
+   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+          "${LEGACY_SYSTEM_PLUGIN}/Contents/Info.plist" 2>/dev/null)" == "com.lzlamian.obs-airplay" ]]; then
+  /bin/rm -rf "${LEGACY_SYSTEM_PLUGIN}"
+  log "removed the system-wide copy left by an earlier version"
+fi
+
+CONSOLE_USER="$(/usr/sbin/scutil <<< "show State:/Users/ConsoleUser" |
+                /usr/bin/awk '/Name :/ && $3 != "loginwindow" { print $3 }')"
 if [[ -z "${CONSOLE_USER}" ]]; then
+  log "no user is logged in; copy ${PAYLOAD} into ~/${USER_PLUGINS_SUBDIR} by hand"
   exit 0
 fi
 
-USER_HOME="$(/usr/bin/dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
-if [[ -z "${USER_HOME}" ]]; then
+# NFSHomeDirectory may contain spaces; read it from the plist output.
+USER_HOME="$(/usr/bin/dscl -plist . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory |
+             /usr/bin/plutil -extract dsAttrTypeStandard:NFSHomeDirectory.0 raw -o - - 2>/dev/null || true)"
+if [[ -z "${USER_HOME}" || ! -d "${USER_HOME}" ]]; then
+  log "could not find the home folder of ${CONSOLE_USER}"
   exit 0
 fi
 
-TARGET_DIR="${USER_HOME}/Library/Application Support/obs-studio/plugins"
+# Everything in the user's folder is done as the user, so root never
+# follows links the user controls.
+as_user() { /usr/bin/sudo -u "${CONSOLE_USER}" "$@"; }
+TARGET_DIR="${USER_HOME}/${USER_PLUGINS_SUBDIR}"
 TARGET_PLUGIN="${TARGET_DIR}/${PLUGIN_NAME}"
-
-/bin/mkdir -p "${TARGET_DIR}"
-/bin/rm -rf "${TARGET_PLUGIN}"
-/bin/cp -R "${SYSTEM_PLUGIN}" "${TARGET_PLUGIN}"
-/usr/sbin/chown -R "${CONSOLE_USER}:staff" "${TARGET_PLUGIN}" || true
-
+as_user /bin/mkdir -p "${TARGET_DIR}"
+as_user /bin/rm -rf "${TARGET_PLUGIN}"
+as_user /usr/bin/ditto "${PAYLOAD}" "${TARGET_PLUGIN}"
+/bin/rm -rf "${PAYLOAD}"
+log "installed for ${CONSOLE_USER} in ${TARGET_DIR}"
 exit 0
 EOS
 /bin/chmod 755 "${PKG_SCRIPTS_DIR}/postinstall"
@@ -458,6 +526,6 @@ echo "  ${DIST_DIR}/${PKG_NAME}"
 echo
 echo "Install notes:"
 echo "  - Zip: unpack and copy ${PLUGIN_NAME} into ~/Library/Application Support/obs-studio/plugins/"
-echo "  - Pkg: installs to ${INSTALL_PATH} and also copies into the active user's ~/Library/Application Support/obs-studio/plugins/"
+echo "  - Pkg: installs into the logged-in user's ~/${USER_PLUGINS_SUBDIR}/ (and removes a system-wide copy from older versions)"
 echo
 echo "Tip: set ARCH_OVERRIDE=x86_64 or ARCH_OVERRIDE=\"arm64;x86_64\" before running to build other architectures."

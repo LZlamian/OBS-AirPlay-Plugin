@@ -354,6 +354,22 @@ int main(int argc, const char *argv[])
                                       pluginURL, &error) &&
                ![files fileExistsAtPath:staging], "another bundle identifier is refused");
 
+        // Info.plist now carries LSMinimumSystemVersion; a release that needs
+        // a newer macOS is refused.
+        NSString *future = [scratch stringByAppendingPathComponent:@"future"];
+        NSString *futureBundle = makeBundle(built, future, @"CFBundleShortVersionString", @"9.9.9");
+        shell([NSString stringWithFormat:
+            @"(/usr/libexec/PlistBuddy -c 'Delete :LSMinimumSystemVersion' %@/Contents/Info.plist 2>/dev/null;"
+            @" /usr/libexec/PlistBuddy -c 'Add :LSMinimumSystemVersion string 99.0' %@/Contents/Info.plist)"
+            @" && codesign --force --deep --sign - %@ 2>/dev/null",
+            quoted(futureBundle), quoted(futureBundle), quoted(futureBundle)]);
+        NSString *futureZip = [scratch stringByAppendingPathComponent:@"future.zip"];
+        OBSAirPlayReleaseAsset *futureAsset = makeZip(future, futureZip, @"9.9.9");
+        sign(futureAsset, releaseKey, scratch);
+        expect(!OBSAirPlayStageUpdate([NSURL fileURLWithPath:futureZip], futureAsset, pluginURL,
+                                      &error) &&
+               ![files fileExistsAtPath:staging], "release needing a newer macOS is refused");
+
         NSString *extra = [scratch stringByAppendingPathComponent:@"extra"];
         makeBundle(built, extra, @"CFBundleShortVersionString", @"9.9.9");
         shell([NSString stringWithFormat:@"echo x > %@/extra.txt", quoted(extra)]);

@@ -76,7 +76,10 @@ rm -rf \
 
 COMMON_CFLAGS="-O2 -arch ${ARCH} -mmacosx-version-min=${MACOS_DEPLOYMENT_TARGET}"
 
-if [[ -f "${PREFIX}/lib/libcrypto.a" && -f "${PREFIX}/lib/pkgconfig/openssl.pc" ]]; then
+# OPENSSLDIR is /etc/ssl so OpenSSL finds macOS's CA bundle (/etc/ssl/cert.pem);
+# a prefix built with the old in-prefix openssldir is rebuilt.
+if [[ -f "${PREFIX}/lib/libcrypto.a" && -f "${PREFIX}/lib/pkgconfig/openssl.pc" ]] &&
+   /usr/bin/grep -aq 'OPENSSLDIR: "/etc/ssl"' "${PREFIX}/lib/libcrypto.a"; then
   echo "==> Reusing OpenSSL ${OPENSSL_VERSION}"
 else
   echo "==> Building OpenSSL ${OPENSSL_VERSION}"
@@ -86,7 +89,7 @@ else
       ./Configure "${OPENSSL_TARGET}" \
         "-mmacosx-version-min=${MACOS_DEPLOYMENT_TARGET}" \
         no-shared no-tests no-apps no-docs \
-        --prefix="${PREFIX}" --openssldir="${PREFIX}/ssl"
+        --prefix="${PREFIX}" --openssldir=/etc/ssl
     make -j"${JOBS}"
     make install_sw
   )
@@ -115,7 +118,7 @@ fi
 
 # The feature stamp makes a prefix built before a configure change (e.g.
 # without VideoToolbox hardware decoding) rebuild instead of being reused.
-FFMPEG_FEATURES="videotoolbox-hwaccel-v1"
+FFMPEG_FEATURES="videotoolbox-hwaccel-v1;openssldir-etc-ssl"
 FFMPEG_STAMP="${PREFIX}/.obs-airplay-ffmpeg-features"
 if [[ -f "${PREFIX}/lib/libavformat.dylib" && -f "${PREFIX}/lib/pkgconfig/libavformat.pc" \
       && "$(cat "${FFMPEG_STAMP}" 2>/dev/null)" == "${FFMPEG_FEATURES}" ]]; then

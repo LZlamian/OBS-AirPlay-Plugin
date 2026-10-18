@@ -7,6 +7,13 @@ endif()
 
 project(obs-airplay VERSION 2.5.2)
 
+# The only place the version is set: both bundles' Info.plists are generated
+# from it, and scripts/package-macos.sh reads it and checks the result.
+set(OBS_AIRPLAY_COPYRIGHT "Copyright © 2025-2026 LZlamian and contributors. GPL-3.0-or-later.")
+configure_file("${CMAKE_SOURCE_DIR}/Info.plist.in" "${CMAKE_BINARY_DIR}/Info.plist" @ONLY)
+configure_file("${CMAKE_SOURCE_DIR}/src/airplay-ble-discovery-Info.plist.in"
+               "${CMAKE_BINARY_DIR}/airplay-ble-discovery-Info.plist" @ONLY)
+
 set(PLUGIN_AUTHOR "LZlamian")
 set(MACOS_BUNDLEID "com.lzlamian.obs-airplay")
 
@@ -401,7 +408,7 @@ if(APPLE)
         OUTPUT_NAME "OBS AirPlay Discovery"
         MACOSX_BUNDLE_BUNDLE_NAME "OBS AirPlay Discovery"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.lzlamian.obs-airplay.discovery"
-        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/src/airplay-ble-discovery-Info.plist"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/airplay-ble-discovery-Info.plist"
     )
     add_dependencies(obs-airplay obs-airplay-ble-discovery)
     
@@ -448,7 +455,7 @@ if(APPLE)
                 "${PLUGIN_BUNDLE_DIR}/Contents/Resources/THIRD_PARTY_NOTICES.md"
         
         # Copy Info.plist
-        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/Info.plist" "${PLUGIN_BUNDLE_DIR}/Contents/Info.plist"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/Info.plist" "${PLUGIN_BUNDLE_DIR}/Contents/Info.plist"
         
         COMMENT "Creating plugin bundle structure"
     )
