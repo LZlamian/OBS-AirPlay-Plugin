@@ -2,7 +2,7 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
-## Unreleased
+## 2.6.0 (2026-10-18)
 
 Receiver settings for AirPlay video:
 - **Accept AirPlay video** (on by default): when off, POST /play (and an
@@ -13,8 +13,6 @@ Receiver settings for AirPlay video:
   sub-resources must stay on it; other hosts are refused.
 - Every refusal is logged with its reason, and the latest one is shown on the
   source's Status line.
-
-## 2.6.0 (2026-10-18)
 
 Security and network hardening:
 - AirPlay video URLs are checked: no loopback, link-local (except the sender),
