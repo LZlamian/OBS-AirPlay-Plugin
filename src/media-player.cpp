@@ -636,7 +636,11 @@ public:
 
     void play(const std::string& location, double start_position)
     {
-        stop();
+        // control_mutex serialises play() and stop(), which run on the HTTP
+        // thread, the UxPlay mirror thread, the deferred-clear thread and the
+        // OBS main thread; `worker` is only touched under it.
+        std::lock_guard<std::mutex> control(control_mutex);
+        stopLocked();
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             info = {};
@@ -668,9 +672,20 @@ public:
 
     void stop()
     {
-        stop_requested.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> control(control_mutex);
+        stopLocked();
+    }
+
+    void stopLocked()
+    {
+        {
+            // Stored under state_mutex so the worker cannot miss the wake-up
+            // between checking stop_requested and waiting on state_cv.
+            std::lock_guard<std::mutex> lock(state_mutex);
+            stop_requested.store(true, std::memory_order_release);
+        }
         state_cv.notify_all();
-        if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) {
+        if (worker.joinable()) {
             worker.join();
         }
         std::lock_guard<std::mutex> lock(state_mutex);
@@ -1052,7 +1067,10 @@ private:
                 }
                 // A frame that was waiting when playback paused is kept and
                 // shown at its proper time after resume, not dropped.
-                state_cv.wait(lock);
+                state_cv.wait_for(lock, std::chrono::milliseconds(250), [&] {
+                    return stop_requested.load(std::memory_order_acquire) || seek_pending ||
+                           info.rate > 0.0f || (preview_pending && info.has_video);
+                });
                 continue;
             }
 
@@ -1854,6 +1872,7 @@ private:
     std::atomic<bool> first_video_logged{false};
     std::atomic<bool> first_audio_logged{false};
     std::atomic<bool> pause_before_first_frame_logged{false};
+    std::mutex control_mutex;
     std::thread worker;
 };
 

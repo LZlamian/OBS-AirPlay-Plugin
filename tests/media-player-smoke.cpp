@@ -452,6 +452,68 @@ int followClockShortItem(const char* location, bool quick = false)
     return shown > 0 ? 0 : 1;
 }
 
+// stop() racing a paused worker and concurrent play()/stop() callers (the
+// HTTP, mirror, deferred-clear and OBS threads all reach the player). A lost
+// wake-up hangs stop(); unsynchronised `worker` access ends in std::terminate.
+int stopRace(const char* location, int iterations)
+{
+    std::atomic<unsigned int> progress{0};
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+        unsigned int last = progress.load();
+        auto last_change = std::chrono::steady_clock::now();
+        while (!done.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const unsigned int now_progress = progress.load();
+            if (now_progress != last) {
+                last = now_progress;
+                last_change = std::chrono::steady_clock::now();
+            } else if (std::chrono::steady_clock::now() - last_change > std::chrono::seconds(10)) {
+                std::fprintf(stderr, "media-smoke: stop-race hung after %u steps -> FAILED\n",
+                             now_progress);
+                std::fflush(stderr);
+                std::_Exit(1);
+            }
+        }
+    });
+
+    MediaPlayer player;
+    player.setVideoCallback([](const MediaVideoFrame&) {});
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    for (int i = 0; i < iterations; ++i) {
+        player.play(location, 0.0);
+        player.setRate(0.0f);
+        // Vary where stop() lands relative to the worker reaching its paused wait.
+        if (i % 4) std::this_thread::sleep_for(std::chrono::microseconds((i % 7) * 400));
+        player.stop();
+        ++progress;
+    }
+    const auto paused_steps = progress.load();
+
+    std::thread player_thread([&] {
+        for (int i = 0; i < iterations; ++i) {
+            player.play(location, 0.0);
+            if (i % 3 == 0) player.setRate(0.0f);
+            ++progress;
+        }
+    });
+    std::thread stop_thread([&] {
+        for (int i = 0; i < iterations; ++i) {
+            player.stop();
+            if (i % 5) std::this_thread::sleep_for(std::chrono::microseconds((i % 5) * 300));
+            ++progress;
+        }
+    });
+    player_thread.join();
+    stop_thread.join();
+    player.stop();
+    done.store(true);
+    watchdog.join();
+    std::fprintf(stderr, "media-smoke: stop-race paused=%u concurrent=%u -> ok\n",
+                 paused_steps, progress.load() - paused_steps);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     if (argc == 3 && std::strcmp(argv[1], "--follow-clock") == 0) {
@@ -485,6 +547,9 @@ int main(int argc, char** argv)
     if (argc == 3 && std::strcmp(argv[1], "--sparse-clip") == 0) {
         return sparseClip(argv[2]);
     }
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--stop-race") == 0) {
+        return stopRace(argv[2], argc == 4 ? std::max(1, std::atoi(argv[3])) : 1000);
+    }
     bool startup_only = false;
     bool require_audio = false;
     const char* location = nullptr;
@@ -501,7 +566,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations]\n", argv[0]);
         return 2;
     }
 

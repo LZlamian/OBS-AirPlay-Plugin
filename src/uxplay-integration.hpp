@@ -133,4 +133,5 @@ private:
     void scheduleDeferredClear(const char* reason = "no new AirPlay video item followed /stop");
     void cancelDeferredClear();
     void deferredClearLoop();
+    void stopDeferredClearThread();
 };

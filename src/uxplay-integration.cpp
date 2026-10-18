@@ -86,6 +86,11 @@ UxPlayIntegration::UxPlayIntegration()
 UxPlayIntegration::~UxPlayIntegration()
 {
     stop();
+    stopDeferredClearThread();
+}
+
+void UxPlayIntegration::stopDeferredClearThread()
+{
     {
         std::lock_guard<std::mutex> lock(m_clear_mutex);
         m_clear_exit = true;
@@ -165,6 +170,15 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
     if (m_running) {
         blog(LOG_WARNING, "UxPlay integration already running");
         return true;
+    }
+    if (!m_clear_thread.joinable()) {
+        // stop() joined the deferred-clear thread; restart it.
+        {
+            std::lock_guard<std::mutex> lock(m_clear_mutex);
+            m_clear_exit = false;
+            m_clear_pending = false;
+        }
+        m_clear_thread = std::thread(&UxPlayIntegration::deferredClearLoop, this);
     }
     
     // Initialize network first
@@ -807,6 +821,8 @@ void UxPlayIntegration::stop()
     if (m_raop) {
         raop_stop_httpd(m_raop);
     }
+    // The deferred-clear thread also stops the player; join it first.
+    stopDeferredClearThread();
     if (m_media_player) {
         m_media_player->stop();
     }
