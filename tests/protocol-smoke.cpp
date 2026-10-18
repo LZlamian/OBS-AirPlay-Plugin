@@ -974,9 +974,71 @@ int main(int argc, char** argv)
     policy_ok = policy_ok && classic_refused.find("400 Bad Request") != std::string::npos;
     std::printf("url_policy=%s\n", policy_ok ? "enforced" : "FAILED");
 
+    // Bodies are capped (16 MiB unless a reverse fetch is pending) and share
+    // one buffer budget across connections; over either limit the request
+    // is answered 413 and its buffer released.
+    const auto post_headers = [&](size_t length) {
+        return std::string("POST /fp-setup2 HTTP/1.1\r\n") +
+            "Host: 127.0.0.1\r\n" +
+            "X-Apple-Session-ID: " + session + "\r\n" +
+            "Content-Length: " + std::to_string(length) + "\r\n\r\n";
+    };
+    const std::string oversized_response =
+        httpExchange(port, post_headers(20U * 1024U * 1024U));
+    const bool oversized_ok = oversized_response.find("413") != std::string::npos;
+
+    raop_set_plist(raop, "max_inflight_body_mib", 40);
+    const size_t declared = 15U * 1024U * 1024U;
+    const std::vector<char> chunk(14U * 1024U * 1024U, 'x');
+    int held[3] = {-1, -1, -1};
+    std::string held_response[3];
+    for (int i = 0; i < 3; ++i) {
+        held[i] = connectLocal(port);
+        const std::string headers = post_headers(declared);
+        if (held[i] < 0 || !sendAll(held[i], headers.data(), headers.size()) ||
+            !sendAll(held[i], chunk.data(), chunk.size())) {
+            break;
+        }
+        usleep(300000);
+    }
+    // Only the connection that went over the budget has been answered.
+    for (int i = 0; i < 3; ++i) {
+        if (held[i] < 0) continue;
+        timeval quick = {0, 300000};
+        setsockopt(held[i], SOL_SOCKET, SO_RCVTIMEO, &quick, sizeof(quick));
+        held_response[i] = receiveResponse(held[i]);
+    }
+    for (int& fd : held) {
+        if (fd >= 0) close(fd);
+    }
+    usleep(300000);
+    // With the held bodies gone, the budget is free again.
+    std::string released_response;
+    {
+        const int fd = connectLocal(port);
+        const std::string headers = post_headers(declared);
+        const std::vector<char> body(declared, 'y');
+        if (fd >= 0 && sendAll(fd, headers.data(), headers.size()) &&
+            sendAll(fd, body.data(), body.size())) {
+            released_response = receiveResponse(fd);
+        }
+        if (fd >= 0) close(fd);
+    }
+    raop_set_plist(raop, "max_inflight_body_mib", 256);
+    const bool budget_ok = held_response[0].empty() && held_response[1].empty() &&
+        held_response[2].find("413") != std::string::npos &&
+        !released_response.empty() && released_response.find("413") == std::string::npos;
+    std::printf("body_limits=%s oversized=%s held=[%s|%s|%s] released=%.12s\n",
+                oversized_ok && budget_ok ? "enforced" : "FAILED",
+                oversized_ok ? "413" : "missing",
+                held_response[0].empty() ? "-" : held_response[0].substr(9, 3).c_str(),
+                held_response[1].empty() ? "-" : held_response[1].substr(9, 3).c_str(),
+                held_response[2].empty() ? "-" : held_response[2].substr(9, 3).c_str(),
+                released_response.c_str());
+
     raop_stop_httpd(raop);
     raop_destroy(raop);
     dnssd_destroy(dnssd);
-    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok
-        ? 0 : 1;
+    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok &&
+        oversized_ok && budget_ok ? 0 : 1;
 }
