@@ -74,6 +74,14 @@ bool media_trace_requested()
 // the claim draws POST /fp-setup2 and protected-HLS requests. Masking it is
 // opt-in (OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1) until it has been checked on
 // real iOS and macOS senders that connection speed is unchanged.
+// A localised message with one integer in it.
+std::string format_text(const char* key, int value)
+{
+    char text[512];
+    snprintf(text, sizeof(text), obs_module_text(key), value);
+    return text;
+}
+
 bool mask_fairplay_video_requested()
 {
     const char* env = std::getenv("OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO");
@@ -646,7 +654,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         blog(LOG_INFO, "Calling raop_init2 with Device ID: %s", device_id_str.c_str());
         if (raop_init2(m_raop, 1, device_id_str.c_str(), "") != 0) {
             blog(LOG_ERROR, "Failed to initialize RAOP with device ID");
-            setLastError("The AirPlay receiver could not be set up (see the OBS log).");
+            setLastError(obs_module_text("AirPlay.Error.SetupFailed"));
             raop_destroy(m_raop);
             dnssd_destroy(m_dnssd);
             m_raop = nullptr;
@@ -662,7 +670,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // Keep the advertised feature bits and the request handlers in sync.
         if (raop_set_plist(m_raop, "hls", 1) != 0) {
             blog(LOG_ERROR, "Failed to enable Safari Media AirPlay protocol mode");
-            setLastError("The AirPlay receiver could not be set up (see the OBS log).");
+            setLastError(obs_module_text("AirPlay.Error.SetupFailed"));
             raop_destroy(m_raop);
             dnssd_destroy(m_dnssd);
             m_raop = nullptr;
@@ -694,10 +702,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                     blog(LOG_ERROR, "Failed to start RAOP HTTP server on port %d, error code: %d",
                          actual_port, result);
                     blog(LOG_ERROR, "System errno: %d (%s)", errno, strerror(errno));
-                    setLastError("Ports 7000 and 7001 are both in use, so devices cannot connect. "
-                                 "macOS's own AirPlay Receiver uses port 7000: turn it off in "
-                                 "System Settings > General > AirDrop & Handoff, or quit the app "
-                                 "using the ports, then restart OBS.");
+                    setLastError(obs_module_text("AirPlay.Error.PortsBusy"));
                     raop_destroy(m_raop);
                     dnssd_destroy(m_dnssd);
                     m_raop = nullptr;
@@ -706,8 +711,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                 }
                 blog(LOG_INFO, "UxPlay integration started successfully on port %d", actual_port);
             } else {
-                setLastError("Port " + std::to_string(port) + " is in use, so devices cannot "
-                             "connect. Quit the app using it, then restart OBS.");
+                setLastError(format_text("AirPlay.Error.PortBusy", port));
                 raop_destroy(m_raop);
                 dnssd_destroy(m_dnssd);
                 m_raop = nullptr;
@@ -735,10 +739,9 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }
         if (raop_register_error != DNSSD_ERROR_NOERROR ||
             airplay_register_error != DNSSD_ERROR_NOERROR) {
-            setLastError("Running, but devices may not find it: Bonjour registration failed "
-                         "(error " + std::to_string(raop_register_error ? raop_register_error
-                                                                        : airplay_register_error) +
-                         "). Check that the name is unique on the network.");
+            setLastError(format_text("AirPlay.Error.Bonjour",
+                                     raop_register_error ? raop_register_error
+                                                         : airplay_register_error));
         } else {
             setLastError({});
         }
@@ -883,11 +886,12 @@ std::string UxPlayIntegration::lastError() const
 
 std::string UxPlayIntegration::connectionState() const
 {
-    if (m_media_active.load()) return "Playing AirPlay video";
+    if (m_media_active.load()) return obs_module_text("AirPlay.State.Video");
     if (m_open_connections.load() > 0) {
-        return m_frame_shown.load() ? "Screen mirroring" : "Device connected";
+        return obs_module_text(m_frame_shown.load() ? "AirPlay.State.Mirroring"
+                                                    : "AirPlay.State.Connected");
     }
-    return "Waiting for a device";
+    return obs_module_text("AirPlay.State.Waiting");
 }
 
 void UxPlayIntegration::setStateChangedCallback(std::function<void()> callback)

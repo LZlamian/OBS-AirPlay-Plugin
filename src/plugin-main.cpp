@@ -337,10 +337,10 @@ void set_module_settings(ModuleSettings settings, obs_source_t* origin)
     {
         std::lock_guard<std::mutex> lock(g_module_settings_mutex);
         if (settings.server_name.size() > kMaxServerNameBytes) {
-            g_server_name_error = "The name is longer than " +
-                std::to_string(kMaxServerNameBytes) +
-                " bytes, the most AirPlay devices can show; still advertising \"" +
-                g_module_settings.server_name + "\".";
+            char text[512];
+            snprintf(text, sizeof(text), obs_module_text("AirPlay.Error.NameTooLong"),
+                     static_cast<int>(kMaxServerNameBytes), g_module_settings.server_name.c_str());
+            g_server_name_error = text;
             blog(LOG_WARNING, "[AirPlay] server name too long (%zu bytes); keeping \"%s\"",
                  settings.server_name.size(), g_module_settings.server_name.c_str());
             settings.server_name = g_module_settings.server_name;

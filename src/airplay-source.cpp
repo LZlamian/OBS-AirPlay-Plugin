@@ -102,31 +102,33 @@ obs_properties_t* airplay_source_get_properties(void* data)
 
     obs_properties_t* props = obs_properties_create();
 
-    obs_properties_add_text(props, "server_name",
+    obs_property_t* name = obs_properties_add_text(props, "server_name",
         obs_module_text("AirPlay.ServerName"),
         OBS_TEXT_DEFAULT);
+    obs_property_set_long_description(name, obs_module_text("AirPlay.ServerNameTooltip"));
 
     obs_properties_add_button(props, "reset_server_name",
         obs_module_text("AirPlay.ResetServerName"),
         reset_server_name_clicked);
 
-    obs_properties_add_text(props, "info", 
-        "Add this source to start receiving AirPlay streams.\n"
-        "Your device should appear in the screen mirroring list on iOS devices.",
-        OBS_TEXT_INFO);
+    obs_properties_add_text(props, "info", obs_module_text("AirPlay.Info"), OBS_TEXT_INFO);
     
     // Live state; the panel is refreshed when it changes.
     auto uxplay = get_uxplay_integration();
     std::string server_info;
     if (uxplay && uxplay->isRunning()) {
-        server_info = "Status: " + uxplay->connectionState() + " (port " +
-                      std::to_string(uxplay->getActualPort()) + ")";
+        char line[256];
+        snprintf(line, sizeof(line), obs_module_text("AirPlay.Status"),
+                 uxplay->connectionState().c_str(), static_cast<int>(uxplay->getActualPort()));
+        server_info = line;
     } else {
-        server_info = "Status: Not running";
+        server_info = obs_module_text("AirPlay.Status.NotRunning");
     }
     const std::string error = uxplay ? uxplay->lastError() : std::string();
     if (!error.empty()) server_info += "\n" + error;
-    else if (!uxplay || !uxplay->isRunning()) server_info += "\nSee the OBS log for details.";
+    else if (!uxplay || !uxplay->isRunning()) {
+        server_info += std::string("\n") + obs_module_text("AirPlay.Status.SeeLog");
+    }
     const std::string name_error = get_server_name_error();
     if (!name_error.empty()) server_info += "\n" + name_error;
     obs_property_t* status = obs_properties_add_text(props, "server_info", server_info.c_str(),
@@ -136,32 +138,23 @@ obs_properties_t* airplay_source_get_properties(void* data)
     }
 
     obs_property_t* follow = obs_properties_add_bool(props, "follow_sender_clock",
-        "Keep AirPlay video in step with the sending app");
-    obs_property_set_long_description(follow,
-        "For apps that also play the video on the device, such as Shelf. "
-        "A video starts where the app has got to by the time its first picture is ready, "
-        "skipping the moment it took to open, so OBS does not run behind the device. "
-        "Leave off for Safari and other apps that wait for the receiver.");
+        obs_module_text("AirPlay.FollowSenderClock"));
+    obs_property_set_long_description(follow, obs_module_text("AirPlay.FollowSenderClock.Tooltip"));
 
     obs_property_t* self_signed = obs_properties_add_bool(props, "allow_self_signed_media",
-        "Allow self-signed media servers");
-    obs_property_set_long_description(self_signed,
-        "AirPlay video from an HTTPS server whose certificate cannot be verified "
-        "(self-signed, or from a private certificate authority) is refused unless this is on. "
-        "Turning it on lets anyone on the network between OBS and that server see or change the video.");
+        obs_module_text("AirPlay.AllowSelfSigned"));
+    obs_property_set_long_description(self_signed, obs_module_text("AirPlay.AllowSelfSigned.Tooltip"));
 
     obs_properties_add_bool(props, "log_latency_telemetry",
-        "Log latency telemetry (decode/output ms, every 120 video / 240 audio frames)");
+        obs_module_text("AirPlay.LatencyTelemetry"));
 
     obs_property_t* updates = obs_properties_add_bool(props, "check_for_updates",
-        "Check for plugin updates once a day");
-    obs_property_set_long_description(updates,
-        "Asks GitHub once a day whether a newer OBS AirPlay is available. You are only asked, "
-        "never while streaming or recording, and nothing is installed unless you choose "
-        "Install Update. Turn off to make no update requests at all.");
+        obs_module_text("AirPlay.CheckForUpdates"));
+    obs_property_set_long_description(updates, obs_module_text("AirPlay.CheckForUpdates.Tooltip"));
 
-    obs_properties_add_text(props, "plugin_version",
-        "OBS AirPlay Plugin v" PLUGIN_VERSION, OBS_TEXT_INFO);
+    char version[64];
+    snprintf(version, sizeof(version), obs_module_text("AirPlay.Version"), PLUGIN_VERSION);
+    obs_properties_add_text(props, "plugin_version", version, OBS_TEXT_INFO);
 
     return props;
 }
