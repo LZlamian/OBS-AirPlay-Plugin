@@ -66,7 +66,6 @@ if(APPLE)
         "${OBS_BUNDLE_PATH}/Contents/Resources/include"
         "${OBS_BUNDLE_PATH}/Contents/Frameworks/obs.framework/Headers"
         "${OBS_BUNDLE_PATH}/Contents/Headers"
-        "${CMAKE_SOURCE_DIR}/obs-headers"
     )
     
     foreach(DIR ${POSSIBLE_INCLUDE_DIRS})
@@ -76,129 +75,22 @@ if(APPLE)
         endif()
     endforeach()
     
-    # If headers not found, download them
+    # The headers are vendored (obs-headers/PROVENANCE.md); configure never
+    # downloads anything or writes into the source tree.
+    if(NOT OBS_INCLUDE_DIR AND EXISTS "${CMAKE_SOURCE_DIR}/obs-headers/libobs/obs-module.h")
+        set(OBS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/obs-headers/libobs")
+    endif()
     if(NOT OBS_INCLUDE_DIR)
-        message(STATUS "OBS headers not found in installation. Downloading from GitHub...")
-        
-        set(OBS_HEADERS_DIR "${CMAKE_SOURCE_DIR}/obs-headers")
-        
-        if(NOT EXISTS "${OBS_HEADERS_DIR}")
-            # Download OBS headers matching the installed version
-            set(OBS_REPO_URL "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_VERSION}.tar.gz")
-            set(OBS_DOWNLOAD_FILE "${CMAKE_BINARY_DIR}/obs-studio.tar.gz")
-            
-            message(STATUS "Downloading OBS ${OBS_VERSION} headers...")
-            file(DOWNLOAD 
-                "${OBS_REPO_URL}"
-                "${OBS_DOWNLOAD_FILE}"
-                STATUS DOWNLOAD_STATUS
-                TIMEOUT 60
-            )
-            
-            list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-            if(NOT STATUS_CODE EQUAL 0)
-                # Try without patch version (e.g., 30.0 instead of 30.0.0)
-                string(REGEX REPLACE "\\.[0-9]+$" "" OBS_VERSION_SHORT "${OBS_VERSION}")
-                set(OBS_REPO_URL "https://github.com/obsproject/obs-studio/archive/refs/tags/${OBS_VERSION_SHORT}.tar.gz")
-                message(STATUS "Trying alternative URL: ${OBS_REPO_URL}")
-                
-                file(DOWNLOAD 
-                    "${OBS_REPO_URL}"
-                    "${OBS_DOWNLOAD_FILE}"
-                    STATUS DOWNLOAD_STATUS
-                    TIMEOUT 60
-                )
-                
-                list(GET DOWNLOAD_STATUS 0 STATUS_CODE)
-                if(NOT STATUS_CODE EQUAL 0)
-                    message(FATAL_ERROR "Failed to download OBS headers. Please install OBS development files or clone obs-studio source.")
-                endif()
-            endif()
-            
-            # Extract headers
-            message(STATUS "Extracting headers...")
-            execute_process(
-                COMMAND ${CMAKE_COMMAND} -E tar xzf "${OBS_DOWNLOAD_FILE}"
-                WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-                RESULT_VARIABLE EXTRACT_RESULT
-            )
-            
-            if(NOT EXTRACT_RESULT EQUAL 0)
-                message(FATAL_ERROR "Failed to extract OBS headers")
-            endif()
-            
-            # Find extracted directory
-            file(GLOB EXTRACTED_DIR "${CMAKE_BINARY_DIR}/obs-studio-*")
-            
-            # Copy headers to a known location
-            file(MAKE_DIRECTORY "${OBS_HEADERS_DIR}")
-            file(COPY "${EXTRACTED_DIR}/libobs" DESTINATION "${OBS_HEADERS_DIR}")
-            
-            # Download and extract simde separately (it's a submodule in OBS)
-            message(STATUS "Downloading simde library...")
-            set(SIMDE_URL "https://github.com/simd-everywhere/simde/archive/refs/heads/master.tar.gz")
-            set(SIMDE_DOWNLOAD "${CMAKE_BINARY_DIR}/simde.tar.gz")
-            
-            file(DOWNLOAD "${SIMDE_URL}" "${SIMDE_DOWNLOAD}" STATUS SIMDE_STATUS TIMEOUT 30)
-            list(GET SIMDE_STATUS 0 SIMDE_CODE)
-            
-            if(SIMDE_CODE EQUAL 0)
-                execute_process(
-                    COMMAND ${CMAKE_COMMAND} -E tar xzf "${SIMDE_DOWNLOAD}"
-                    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-                )
-                
-                file(GLOB SIMDE_EXTRACTED "${CMAKE_BINARY_DIR}/simde-*")
-                if(SIMDE_EXTRACTED)
-                    file(COPY "${SIMDE_EXTRACTED}/" DESTINATION "${OBS_HEADERS_DIR}/simde")
-                    file(REMOVE_RECURSE "${SIMDE_EXTRACTED}")
-                    message(STATUS "Simde library downloaded successfully")
-                endif()
-                
-                file(REMOVE "${SIMDE_DOWNLOAD}")
-            else()
-                message(WARNING "Failed to download simde library, build may fail")
-            endif()
-            
-            # Clean up OBS archive
-            file(REMOVE_RECURSE "${EXTRACTED_DIR}")
-            file(REMOVE "${OBS_DOWNLOAD_FILE}")
-        endif()
-        
-        set(OBS_INCLUDE_DIR "${OBS_HEADERS_DIR}/libobs")
-        
-        if(NOT EXISTS "${OBS_INCLUDE_DIR}/obs-module.h")
-            message(FATAL_ERROR "Failed to set up OBS headers at ${OBS_INCLUDE_DIR}")
-        endif()
-        
-        message(STATUS "Using downloaded headers at: ${OBS_INCLUDE_DIR}")
+        message(FATAL_ERROR
+            "OBS headers not found: obs-headers/libobs is missing from the checkout.")
     endif()
-    
-    # Always add simde to include path if it exists in our headers directory
-    if(EXISTS "${CMAKE_SOURCE_DIR}/obs-headers/simde")
+    message(STATUS "OBS headers: ${OBS_INCLUDE_DIR}")
+    if(EXISTS "${CMAKE_SOURCE_DIR}/obs-headers/simde/simde")
         include_directories("${CMAKE_SOURCE_DIR}/obs-headers/simde")
-        message(STATUS "Added simde include directory: ${CMAKE_SOURCE_DIR}/obs-headers/simde")
     else()
-        message(WARNING "Simde headers not found at ${CMAKE_SOURCE_DIR}/obs-headers/simde")
+        message(FATAL_ERROR "SIMDe headers not found at obs-headers/simde")
     endif()
-    
-    # Copy obsconfig.h to the headers directory if it doesn't exist
-    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/obs-headers/libobs/obsconfig.h")
-        if(EXISTS "${CMAKE_SOURCE_DIR}/obsconfig.h")
-            file(COPY "${CMAKE_SOURCE_DIR}/obsconfig.h" 
-                 DESTINATION "${CMAKE_SOURCE_DIR}/obs-headers/libobs/")
-            message(STATUS "Copied obsconfig.h to headers directory")
-        else()
-            message(WARNING "obsconfig.h not found - creating minimal version")
-            # Create a minimal obsconfig.h
-            file(WRITE "${CMAKE_SOURCE_DIR}/obs-headers/libobs/obsconfig.h"
-                "#pragma once\n"
-                "#define OBS_VERSION \"30.0.0\"\n"
-                "#define OBS_VERSION_CANONICAL \"30.0.0\"\n"
-            )
-        endif()
-    endif()
-    
+
     # Try multiple possible locations for libraries
     set(POSSIBLE_LIB_DIRS
         "${OBS_BUNDLE_PATH}/Contents/Frameworks"
