@@ -14,13 +14,6 @@ static std::atomic<uint64_t> g_first_frame_queued_ns{0};
 
 AirPlaySource::AirPlaySource(obs_source_t* src)
     : source(src)
-    , active(false)
-    , width(1920)
-    , height(1080)
-    , format(VIDEO_FORMAT_NV12)
-    , sample_rate(44100)
-    , audio_format(AUDIO_FORMAT_FLOAT_PLANAR)
-    , speakers(SPEAKERS_STEREO)
 {
     // Disable OBS's internal async-source buffering for low-latency live mirroring.
     // Default behaviour buffers several frames before display (adds 100-200ms);
@@ -168,19 +161,7 @@ void airplay_source_update(void* data, obs_data_t* settings)
                         airplay_src ? airplay_src->source : nullptr);
 }
 
-void airplay_source_show(void* data)
-{
-    auto airplay_source = static_cast<AirPlaySource*>(data);
-    airplay_source->active = true;
-    blog(LOG_INFO, "AirPlay source shown");
-}
 
-void airplay_source_hide(void* data)
-{
-    auto airplay_source = static_cast<AirPlaySource*>(data);
-    airplay_source->active = false;
-    blog(LOG_INFO, "AirPlay source hidden");
-}
 
 void airplay_source_notify_frame_queued(uint64_t queued_ns)
 {

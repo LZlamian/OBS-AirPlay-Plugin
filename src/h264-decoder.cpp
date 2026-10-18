@@ -11,7 +11,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <sys/stat.h>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -115,7 +114,7 @@ double warm_up_video_decoding()
     for (const Canned& keyframe : canned) {
         H264Decoder decoder(keyframe.codec, H264Decoder::Mode::Auto);
         DecodedVideoFrame frame;
-        decoder.decodeToI420(keyframe.data, keyframe.size, frame);
+        decoder.decode(keyframe.data, keyframe.size, frame);
         decoder.flush();
     }
     return (os_gettime_ns() - started) / 1e6;
@@ -588,7 +587,7 @@ bool H264Decoder::produceFrame(DecodedVideoFrame& out_frame, int* error)
     return true;
 }
 
-bool H264Decoder::decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame,
+bool H264Decoder::decode(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame,
                                int64_t pts)
 {
     if (!m_codec_context || !m_frame || !m_frame_next || !m_frame_i420 || !m_frame_transfer ||

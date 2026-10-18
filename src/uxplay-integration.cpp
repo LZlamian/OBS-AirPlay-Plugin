@@ -771,11 +771,6 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
     }
 }
 
-void UxPlayIntegration::disableInternalMDNS()
-{
-    // No-op: kept for compatibility with existing call sites.
-}
-
 void UxPlayIntegration::updateServerName(const std::string& name)
 {
     // Not while start() or stop() replace m_raop / m_dnssd.
@@ -920,14 +915,6 @@ void UxPlayIntegration::notifyStateChanged()
         callback = m_state_changed;
     }
     if (callback) callback();
-}
-
-std::string UxPlayIntegration::getPK() const
-{
-    if (m_raop) {
-        return raop_get_pk_str(m_raop);
-    }
-    return "";
 }
 
 void UxPlayIntegration::stop()

@@ -54,7 +54,7 @@ public:
 
     // Decodes one packet (Annex B). When it holds more than one picture,
     // the newest is returned. `pts` comes back in out_frame.pts.
-    bool decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame,
+    bool decode(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame,
                       int64_t pts = AV_NOPTS_VALUE);
     void flush();
     // The caller is done with the last frame's planes (OBS has copied them):

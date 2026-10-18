@@ -12,8 +12,6 @@ void airplay_source_destroy(void* data);
 void airplay_source_get_defaults(obs_data_t* settings);
 obs_properties_t* airplay_source_get_properties(void* data);
 void airplay_source_update(void* data, obs_data_t* settings);
-void airplay_source_show(void* data);
-void airplay_source_hide(void* data);
 void airplay_source_video_tick(void* data, float seconds);
 void airplay_source_notify_frame_queued(uint64_t queued_ns);
 
@@ -32,20 +30,11 @@ void adopt_or_show_module_settings(obs_data_t* source_settings, obs_source_t* so
 // Why the last server name was not used, or empty.
 std::string get_server_name_error();
 
+// Per-source state. Everything else is the receiver's, shared by all
+// AirPlay sources (AirPlayServer, UxPlayIntegration, module settings).
 struct AirPlaySource {
     obs_source_t* source;
-    bool active;
-    
-    // Video settings
-    int width;
-    int height;
-    enum video_format format;
-    
-    // Audio settings
-    int sample_rate;
-    enum audio_format audio_format;
-    enum speaker_layout speakers;
-    
+
     AirPlaySource(obs_source_t* source);
     ~AirPlaySource();
 };

@@ -19,14 +19,6 @@
 #include <cstring>
 #include <util/platform.h>
 
-// Static initializer to test if plugin loads
-static bool plugin_loaded = false;
-__attribute__((constructor))
-static void plugin_initializer() {
-    blog(LOG_INFO, "=== OBS AirPlay Plugin CONSTRUCTOR called ===");
-    plugin_loaded = true;
-}
-
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-airplay", "en-US")
 
@@ -433,8 +425,6 @@ bool obs_module_load(void)
         airplay_source_info.get_properties = airplay_source_get_properties;
         airplay_source_info.update = airplay_source_update;
         airplay_source_info.video_tick = airplay_source_video_tick;
-        airplay_source_info.show = airplay_source_show;
-        airplay_source_info.hide = airplay_source_hide;
         airplay_source_info.icon_type = OBS_ICON_TYPE_MEDIA;
         
         blog(LOG_INFO, "Registering AirPlay source...");

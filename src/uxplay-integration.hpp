@@ -67,12 +67,6 @@ public:
     // Called, from any thread, when connectionState() has changed.
     void setStateChangedCallback(std::function<void()> callback);
 
-    // Get the Public Key string from UxPlay
-    std::string getPK() const;
-    
-    // Disable UxPlay's internal mDNS to prevent crashes
-    void disableInternalMDNS();
-
     // Update the advertised server name in the UxPlay dnssd context (live, no restart)
     void updateServerName(const std::string& name);
     

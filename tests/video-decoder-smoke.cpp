@@ -141,7 +141,7 @@ double cpuPerFrame(H264Decoder& decoder, const Stream& stream)
     const double before = processCpuMs();
     for (const auto& packet : stream.packets) {
         DecodedVideoFrame frame;
-        if (decoder.decodeToI420(packet.data(), packet.size(), frame)) ++frames;
+        if (decoder.decode(packet.data(), packet.size(), frame)) ++frames;
     }
     return frames ? (processCpuMs() - before) / frames : 0.0;
 }
@@ -158,7 +158,7 @@ std::vector<Picture> decodeAll(H264Decoder& decoder, const Stream& stream, doubl
     std::chrono::steady_clock::time_point first_picture;
     for (const auto& packet : stream.packets) {
         DecodedVideoFrame frame;
-        if (decoder.decodeToI420(packet.data(), packet.size(), frame)) {
+        if (decoder.decode(packet.data(), packet.size(), frame)) {
             if (pictures.empty()) first_picture = std::chrono::steady_clock::now();
             pictures.push_back(copyPicture(frame, decoder.usingHardware()));
         }
@@ -199,7 +199,7 @@ int twoAccessUnits(const Stream& stream)
     std::vector<Picture> reference;
     for (size_t i = 0; i < stream.packets.size(); ++i) {
         DecodedVideoFrame frame;
-        if (reference_decoder.decodeToI420(stream.packets[i].data(), stream.packets[i].size(),
+        if (reference_decoder.decode(stream.packets[i].data(), stream.packets[i].size(),
                                            frame, static_cast<int64_t>(i))) {
             reference.push_back(copyPicture(frame, false));
         }
@@ -215,20 +215,20 @@ int twoAccessUnits(const Stream& stream)
         const size_t merged = 10;
         for (size_t i = 0; i < merged; ++i) {
             DecodedVideoFrame frame;
-            decoder.decodeToI420(stream.packets[i].data(), stream.packets[i].size(), frame,
+            decoder.decode(stream.packets[i].data(), stream.packets[i].size(), frame,
                                  static_cast<int64_t>(i));
         }
         std::vector<uint8_t> two = stream.packets[merged];
         two.insert(two.end(), stream.packets[merged + 1].begin(), stream.packets[merged + 1].end());
         DecodedVideoFrame frame;
-        const bool decoded = decoder.decodeToI420(two.data(), two.size(), frame,
+        const bool decoded = decoder.decode(two.data(), two.size(), frame,
                                                   static_cast<int64_t>(merged + 1));
         const Picture picture = decoded ? copyPicture(frame, decoder.usingHardware()) : Picture{};
         const double newer = decoded ? psnr(picture, reference[merged + 1]) : 0.0;
         const double older = decoded ? psnr(picture, reference[merged]) : 0.0;
         // The next ordinary packet must not bring back a held picture.
         DecodedVideoFrame next;
-        const bool next_ok = decoder.decodeToI420(stream.packets[merged + 2].data(),
+        const bool next_ok = decoder.decode(stream.packets[merged + 2].data(),
                                                   stream.packets[merged + 2].size(), next,
                                                   static_cast<int64_t>(merged + 2)) &&
             psnr(copyPicture(next, false), reference[merged + 2]) >= 40.0 &&
@@ -258,7 +258,7 @@ int colorspace(const Stream& bt601_stream, const Stream& bt709_stream)
             bool bt601 = false;
             for (const auto& packet : stream.packets) {
                 DecodedVideoFrame frame;
-                if (decoder.decodeToI420(packet.data(), packet.size(), frame)) {
+                if (decoder.decode(packet.data(), packet.size(), frame)) {
                     got = true;
                     bt601 = frame.bt601;
                     break;
@@ -288,7 +288,7 @@ int firstDecode(const Stream& stream, bool warm)
     double first_ms = -1.0;
     for (const auto& packet : stream.packets) {
         DecodedVideoFrame frame;
-        if (decoder.decodeToI420(packet.data(), packet.size(), frame)) {
+        if (decoder.decode(packet.data(), packet.size(), frame)) {
             first_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count();
             break;
@@ -429,7 +429,7 @@ int main(int argc, char** argv)
         // hardware decoder; a long run of them may.
         for (int i = 0; i < 8; ++i) {
             DecodedVideoFrame frame;
-            automatic.decodeToI420(garbage.data(), garbage.size(), frame);
+            automatic.decode(garbage.data(), garbage.size(), frame);
         }
         const std::vector<Picture> glitch = decodeAll(automatic, a, nullptr);
         const bool glitch_ok = !glitch.empty() && !reference.empty() &&
@@ -443,7 +443,7 @@ int main(int argc, char** argv)
 
         for (int i = 0; i < 40; ++i) {
             DecodedVideoFrame frame;
-            automatic.decodeToI420(garbage.data(), garbage.size(), frame);
+            automatic.decode(garbage.data(), garbage.size(), frame);
         }
         const std::vector<Picture> recovered = decodeAll(automatic, a, nullptr);
         const bool recovered_ok = !recovered.empty() && !reference.empty() &&

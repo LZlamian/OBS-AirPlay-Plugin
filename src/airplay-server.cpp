@@ -301,7 +301,7 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
     const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
     const bool first_frame = m_video_frame_counter == 0;
     const uint64_t t_decode_start = (tele || first_frame) ? os_gettime_ns() : 0;
-    if (!decoder->decodeToI420(data, size, decoded, static_cast<int64_t>(pts))) {
+    if (!decoder->decode(data, size, decoded, static_cast<int64_t>(pts))) {
         return;
     }
     // The picture's own packet pts: with two pictures in one payload, or a
