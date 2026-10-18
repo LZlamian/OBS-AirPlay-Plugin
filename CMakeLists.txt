@@ -398,6 +398,14 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
         DESTINATION "$ENV{HOME}/Library/Application Support/obs-studio/plugins"
         USE_SOURCE_PERMISSIONS)
 
+# Warnings for this project's own code (UxPlay keeps its upstream flags).
+set(OBS_AIRPLAY_WARNING_FLAGS -Wall -Wextra)
+foreach(target obs-airplay obs-airplay-ble-discovery)
+    if(TARGET ${target})
+        target_compile_options(${target} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+    endif()
+endforeach()
+
 include(CTest)
 if(BUILD_TESTING)
     pkg_check_modules(PLIST_TEST REQUIRED libplist-2.0)
@@ -463,6 +471,12 @@ if(BUILD_TESTING)
     add_executable(obs-airplay-protocol-smoke
         tests/protocol-smoke.cpp
     )
+    foreach(target obs-airplay-media-smoke obs-airplay-decoder-smoke obs-airplay-updater-smoke
+                   obs-airplay-protocol-smoke)
+        if(TARGET ${target})
+            target_compile_options(${target} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+        endif()
+    endforeach()
     target_include_directories(obs-airplay-protocol-smoke PRIVATE
         ${CMAKE_SOURCE_DIR}/uxplay/lib
         ${PLIST_TEST_INCLUDE_DIRS}

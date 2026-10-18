@@ -25,14 +25,15 @@ if ! command -v brew &> /dev/null; then
 fi
 
 # Check if OBS is installed
-if [ ! -d "/Applications/OBS.app" ]; then
+OBS_BUNDLE_PATH="${OBS_BUNDLE_PATH:-/Applications/OBS.app}"
+if [ ! -d "${OBS_BUNDLE_PATH}" ]; then
     echo -e "${RED}Error: OBS Studio is not installed${NC}"
     echo "Download it from: https://obsproject.com"
     exit 1
 fi
 
 # Get OBS version
-OBS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" /Applications/OBS.app/Contents/Info.plist 2>/dev/null || echo "unknown")
+OBS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${OBS_BUNDLE_PATH}/Contents/Info.plist" 2>/dev/null || echo "unknown")
 echo -e "${GREEN}Found OBS Studio version: ${OBS_VERSION}${NC}\n"
 
 # Check for required dependencies
@@ -74,6 +75,7 @@ rm -rf build
 cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF \
+    -DOBS_BUNDLE_PATH="${OBS_BUNDLE_PATH}" \
     -DCMAKE_OSX_ARCHITECTURES="$(uname -m)"
 cd build
 

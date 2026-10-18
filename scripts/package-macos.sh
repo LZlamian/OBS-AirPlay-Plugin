@@ -47,7 +47,9 @@ if [[ -n "${DEPS_PREFIX}" ]]; then
   export HOMEBREW_PREFIX="${DEPS_PREFIX}"
 fi
 
-OBS_LIB="/Applications/OBS.app/Contents/Frameworks/libobs.framework/libobs"
+# The OBS.app to build against (headers are vendored; libobs is linked).
+OBS_BUNDLE_PATH="${OBS_BUNDLE_PATH:-/Applications/OBS.app}"
+OBS_LIB="${OBS_BUNDLE_PATH}/Contents/Frameworks/libobs.framework/libobs"
 FFMPEG_LIBDIR="$(pkg-config --variable=libdir libavcodec 2>/dev/null || true)"
 PLIST_LIBDIR="$(pkg-config --variable=libdir libplist-2.0 2>/dev/null || true)"
 OPENSSL_PREFIX="$(pkg-config --variable=prefix openssl 2>/dev/null || true)"
@@ -383,6 +385,7 @@ CMAKE_ARGS=(
   -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}"
   -DNO_MARCH_NATIVE=ON
   -DBUILD_TESTING=OFF
+  -DOBS_BUNDLE_PATH="${OBS_BUNDLE_PATH}"
 )
 if [[ -n "${DEPS_PREFIX}" ]]; then
   CMAKE_ARGS+=(

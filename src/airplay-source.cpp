@@ -98,7 +98,7 @@ static bool reset_server_name_clicked(obs_properties_t* props, obs_property_t* p
 
 obs_properties_t* airplay_source_get_properties(void* data)
 {
-    auto* airplay_src = static_cast<AirPlaySource*>(data);
+    UNUSED_PARAMETER(data);
 
     obs_properties_t* props = obs_properties_create();
 

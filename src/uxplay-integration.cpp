@@ -355,14 +355,14 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         };
         
         // Set video and audio processing callbacks
-        callbacks.video_process = [](void* cls, raop_ntp_t* ntp, video_decode_struct* data) {
+        callbacks.video_process = [](void* cls, raop_ntp_t*, video_decode_struct* data) {
             if (cls && data) {
                 auto* self = static_cast<UxPlayIntegration*>(cls);
                 self->processVideoData(data);
             }
         };
         
-        callbacks.audio_process = [](void* cls, raop_ntp_t* ntp, audio_decode_struct* data) {
+        callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) {
             if (cls && data) {
                 auto* self = static_cast<UxPlayIntegration*>(cls);
                 self->processAudioData(data);
@@ -545,7 +545,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }
         
         // Set log callback to redirect UxPlay logs to OBS
-        raop_set_log_callback(m_raop, [](void* cls, int level, const char* msg) {
+        raop_set_log_callback(m_raop, [](void*, int level, const char* msg) {
             int obs_level;
             switch (level) {
                 case 0: // LOGGER_EMERG
