@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -749,6 +750,19 @@ struct PictureView {
     }
 };
 
+// Proof that the caller holds a lock. A function that must run with a mutex
+// held takes one of these, made from the caller's lock, so it cannot be
+// called without one in scope (CODE-4). Which mutex is named by the
+// function's parameter name.
+class HeldLock {
+public:
+    explicit HeldLock(const std::lock_guard<std::mutex>&) {}
+    explicit HeldLock(const std::unique_lock<std::mutex>& lock) {
+        assert(lock.owns_lock());
+        (void)lock;
+    }
+};
+
 // Read access to a VideoToolbox frame's 8-bit NV12 planes in place, for as
 // long as this object lives (the decoded AVFrame keeps the buffer itself).
 class LockedPixelBuffer {
@@ -841,7 +855,7 @@ public:
         // thread, the UxPlay mirror thread, the deferred-clear thread and the
         // OBS main thread; `worker` is only touched under it.
         std::lock_guard<std::mutex> control(control_mutex);
-        stopLocked();
+        stopLocked(HeldLock(control));
         // The start position comes from the sender: +inf survives max(0, x)
         // and converting it to int64_t is undefined.
         if (!std::isfinite(start_position)) start_position = 0.0;
@@ -883,10 +897,10 @@ public:
     void stop()
     {
         std::lock_guard<std::mutex> control(control_mutex);
-        stopLocked();
+        stopLocked(HeldLock(control));
     }
 
-    void stopLocked()
+    void stopLocked(HeldLock /*control_mutex*/)
     {
         {
             // Stored under state_mutex so the worker cannot miss the wake-up
@@ -931,7 +945,7 @@ public:
             if (info.ended && !current_location.empty()) {
                 restart_location = current_location;
             } else {
-                seekLocked(position);
+                seekLocked(position, HeldLock(lock));
                 return;
             }
         }
@@ -940,7 +954,7 @@ public:
         play(restart_location, position, 0.0f);
     }
 
-    void seekLocked(double position)
+    void seekLocked(double position, HeldLock /*state_mutex*/)
     {
         // Senders that keep a local player in sync send small corrective
         // scrubs while playing. A re-seek restarts decoding from a keyframe
@@ -1411,16 +1425,16 @@ private:
         // must not let the video frames it skipped be shown in a burst.
         bool& catching_up = is_video ? catching_up_video : catching_up_audio;
         if (catching_up) {
-            if (followsSenderClock() &&
-                position + std::max(0.0, shown_for) + kFrameTolerance < catchUpPositionLocked()) {
+            if (followsSenderClock(HeldLock(lock)) &&
+                position + std::max(0.0, shown_for) + kFrameTolerance < catchUpPositionLocked(HeldLock(lock))) {
                 if (is_video) ++skipped_video_frames;
                 return true;
             }
-            if (is_video && followsSenderClock()) {
+            if (is_video && followsSenderClock(HeldLock(lock))) {
                 // How well the output starts in step, for the log.
                 blog(LOG_INFO, "[MEDIA] in step with the sender: picture at %.3fs, sender at "
                      "%.3fs, %.0f ms after its command (%u frames skipped)",
-                     position, senderPositionLocked(),
+                     position, senderPositionLocked(HeldLock(lock)),
                      std::chrono::duration<double, std::milli>(
                          std::chrono::steady_clock::now() - anchor_wall_time).count(),
                      skipped_video_frames);
@@ -1479,7 +1493,7 @@ private:
             const auto now = std::chrono::steady_clock::now();
             if (!clock_initialized) {
                 clock_initialized = true;
-                if (followsSenderClock()) {
+                if (followsSenderClock(HeldLock(lock))) {
                     // Timed from the sender's command, not from this frame.
                     clock_media_position = anchor_position;
                     clock_wall_time = anchor_wall_time;
@@ -2446,15 +2460,14 @@ private:
     double anchor_position = 0.0;
     std::chrono::steady_clock::time_point anchor_wall_time;
 
-    // Both need state_mutex held.
-    bool followsSenderClock() const
+    bool followsSenderClock(HeldLock /*state_mutex*/) const
     {
         // (An item of unknown length is left as it was: there is no telling
         // how much of it may be skipped.)
         return anchor_valid && info.rate > 0.0f && info.duration_known && info.duration > 0.0 &&
                g_follow_sender_clock.load(std::memory_order_relaxed);
     }
-    double senderPositionLocked() const
+    double senderPositionLocked(HeldLock /*state_mutex*/) const
     {
         return anchor_position + std::chrono::duration<double>(
             std::chrono::steady_clock::now() - anchor_wall_time).count() * info.rate;
@@ -2464,13 +2477,13 @@ private:
     // took to open (a still clip on a slow network, a start close to the end)
     // still shows its last frame, also when that frame's own length isn't
     // known. With no known duration nothing is skipped.
-    double catchUpPositionLocked() const
+    double catchUpPositionLocked(HeldLock held) const
     {
         if (!info.duration_known || info.duration <= 0.0) {
             return anchor_position;
         }
         constexpr double kKeptAtEnd = 0.25;
-        return std::min(senderPositionLocked(),
+        return std::min(senderPositionLocked(held),
                         std::max(anchor_position, info.duration - kKeptAtEnd));
     }
     // A stream is still skipping to the sender's position (see shouldDiscard).

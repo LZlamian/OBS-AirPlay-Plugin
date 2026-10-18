@@ -6,6 +6,13 @@
 #include <memory>
 #include <string>
 
+// Frame lifetime: the planes of a MediaVideoFrame and the samples of a
+// MediaAudioFrame belong to the player (a decoded AVFrame, a locked
+// VideoToolbox pixel buffer or a reused conversion buffer). They are valid
+// only for the duration of the callback that receives the frame; a callback
+// that needs them later must copy them. The plugin's callbacks pass them to
+// obs_source_output_video()/obs_source_output_audio(), which copy before
+// returning.
 struct MediaVideoFrame {
     const uint8_t* data[3] = {nullptr, nullptr, nullptr};
     int linesize[3] = {0, 0, 0};
@@ -43,6 +50,8 @@ struct MediaPlaybackInfo {
     bool ended = false;
 };
 
+// Called on the player's presenter (video) and worker (audio) threads, never
+// under the caller's locks. See the frame lifetime note above.
 using MediaVideoCallback = std::function<void(const MediaVideoFrame&)>;
 using MediaAudioCallback = std::function<void(const MediaAudioFrame&)>;
 

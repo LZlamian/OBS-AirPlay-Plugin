@@ -16,8 +16,10 @@ struct DecodedVideoFrame {
     int height = 0;
     int linesize[3] = {0, 0, 0};
     // Pointers reference data owned by the decoder (its AVFrame, or a locked
-    // VideoToolbox pixel buffer). Valid only until the next decode()/flush()
-    // call on the same decoder.
+    // VideoToolbox pixel buffer), not copied. Valid only until the next
+    // decode(), flush() or releaseFrame() call on the same decoder, or its
+    // destruction. Callers hand the planes to obs_source_output_video(),
+    // which copies them before returning, and must not keep the pointers.
     uint8_t* data[3] = {nullptr, nullptr, nullptr};
     // false: I420 (three planes). true: NV12 (Y plane + interleaved UV plane),
     // as produced by hardware decoding.

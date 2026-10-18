@@ -20,6 +20,10 @@ public:
     AudioDecoder();
     ~AudioDecoder();
 
+    // Decodes one AirPlay audio packet of codec type `ct` into planar float
+    // stereo. `left`/`right` are owned by the caller and reused between calls
+    // (resized, not reallocated when large enough). Returns false with no
+    // output for a packet that does not decode.
     bool decode(const uint8_t* data, size_t size, uint8_t ct,
                 std::vector<float>& left, std::vector<float>& right,
                 int& sample_rate);

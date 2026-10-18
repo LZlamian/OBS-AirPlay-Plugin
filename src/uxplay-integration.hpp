@@ -29,10 +29,12 @@ typedef struct raop_s raop_t;
 struct raop_callbacks_s;
 typedef struct raop_ntp_s raop_ntp_t;
 
-// Video frame callback
+// Video frame callback: one compressed access unit. `data` belongs to UxPlay
+// and is valid only during the call; copy it to keep it.
 typedef std::function<void(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)> VideoFrameCallback;
 
-// Raw compressed AirPlay audio payload callback
+// Raw compressed AirPlay audio payload callback; `data` is valid only during
+// the call.
 typedef std::function<void(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)> AudioDataCallback;
 
 // Connection reset callback (called when AirPlay client disconnects/reconnects)
