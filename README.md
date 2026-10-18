@@ -2,7 +2,13 @@
 
 A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
 
-Current release: **v2.5.1** — the source goes empty when a device disconnects, instead of keeping its last frame ([release notes](RELEASE_NOTES_v2.5.1.md)).
+Current release: **v2.5.2** — security and stability hotfix; v2.5.1 and earlier can be crashed by a single request from the local network, so please update ([release notes](RELEASE_NOTES_v2.5.2.md)).
+
+## What's new in v2.5.2
+
+- Fixes a crash that any device on the local network could trigger in v2.5.1 and earlier with one malformed request; no pairing needed
+- One stalled connection can no longer freeze mirroring and AirPlay video for every device
+- Fixes a possible crash when the receiver is renamed, and a possible hang when AirPlay video is stopped while paused or as OBS quits
 
 ## What's new in v2.5.1
 
