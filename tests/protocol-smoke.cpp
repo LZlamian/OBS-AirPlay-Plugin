@@ -506,6 +506,7 @@ int main(int argc, char** argv)
     // Wi-Fi) while another connection polls /playback-info: the receiver's
     // single HTTP thread must keep answering it during and after the transfer.
     std::string blob_action_response;
+    bool large_transfer_ok = true;
     double worst_poll_ms = 0.0;
     int polls = 0;
     if (large_blob) {
@@ -542,6 +543,7 @@ int main(int argc, char** argv)
         free(body);
         std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms -> %s\n",
                     body_size, polls, worst_poll_ms, worst_poll_ms < 100.0 ? "ok" : "SLOW");
+        large_transfer_ok = worst_poll_ms < 100.0 && polls > 10;
     } else {
         blob_action_response = binaryPlistExchange(port, "/action", session, blob_action);
     }
@@ -856,7 +858,7 @@ int main(int argc, char** argv)
         std::fabs(state.start_position) < 0.001f &&
         std::fabs(state.playback_rate - 0.5f) < 0.001f &&
         std::fabs(state.scrub_position - 80.5f) < 0.001f &&
-        state.stop_count == 6 && state.playback_info_count == 2 &&
+        state.stop_count == 6 && state.playback_info_count == 2 + polls &&
         state.play_count == 11;
     std::printf("sender_hosted=%s hosted_url=%s hosted_start=%.3f reject_keeps_connection=%s\n",
                 hosted_ok ? "ok" : "failed", hosted_location.c_str(), hosted_start,
@@ -1247,5 +1249,5 @@ int main(int argc, char** argv)
     raop_destroy(raop);
     dnssd_destroy(dnssd);
     return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok &&
-        oversized_ok && budget_ok && nonreader_ok && binding_ok && features_ok ? 0 : 1;
+        oversized_ok && budget_ok && nonreader_ok && binding_ok && features_ok && large_transfer_ok ? 0 : 1;
 }

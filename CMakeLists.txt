@@ -7,6 +7,12 @@ endif()
 
 project(obs-airplay VERSION 2.5.2)
 
+# A plain `cmake ..` used to build without optimisation.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message(STATUS "No build type given; using Release")
+endif()
+
 # The only place the version is set: both bundles' Info.plists are generated
 # from it, and scripts/package-macos.sh reads it and checks the result.
 set(OBS_AIRPLAY_COPYRIGHT "Copyright © 2025-2026 LZlamian and contributors. GPL-3.0-or-later.")
@@ -433,6 +439,16 @@ if(APPLE)
         ${CORE_VIDEO_LIBRARY}
     )
     
+    # Export only what libobs looks up (obs_module_*): the statically
+    # linked UxPlay, OpenSSL and libplist symbols stay private, and unused
+    # code is stripped.
+    target_compile_options(obs-airplay PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
+    target_link_options(obs-airplay PRIVATE
+        -Wl,-dead_strip
+        "-Wl,-exported_symbols_list,${CMAKE_SOURCE_DIR}/src/obs-airplay.exports")
+    set_property(TARGET obs-airplay APPEND PROPERTY
+        LINK_DEPENDS "${CMAKE_SOURCE_DIR}/src/obs-airplay.exports")
+
     # Set macOS bundle properties
     set_target_properties(obs-airplay PROPERTIES
         PREFIX ""
