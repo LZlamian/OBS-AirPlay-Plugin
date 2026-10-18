@@ -83,6 +83,9 @@ static void status_thread_func()
 {
     // The update helper never prompts while an output is active.
     int outputs_active = -1;
+    // The helper's Bluetooth state goes into the OBS log when it changes.
+    std::string bluetooth_state;
+    int ticks = 0;
     std::unique_lock<std::mutex> lock(g_status_mutex);
     while (!g_status_quit) {
         g_status_cv.wait_for(lock, std::chrono::seconds(1));
@@ -95,6 +98,19 @@ static void status_thread_func()
         if (active != outputs_active) {
             outputs_active = active;
             set_helper_obs_outputs_active(active != 0);
+        }
+        if (++ticks % 5 == 0) {
+            const std::string state = read_helper_bluetooth_state();
+            if (!state.empty() && state != bluetooth_state) {
+                bluetooth_state = state;
+                if (state == "unauthorized") {
+                    blog(LOG_WARNING, "[BLE] OBS AirPlay Discovery is not allowed to use Bluetooth: "
+                                      "allow it in System Settings > Privacy & Security > Bluetooth "
+                                      "(devices then find the receiver faster; AirPlay works without)");
+                } else {
+                    blog(LOG_INFO, "[BLE] discovery helper Bluetooth state: %s", state.c_str());
+                }
+            }
         }
         lock.lock();
     }

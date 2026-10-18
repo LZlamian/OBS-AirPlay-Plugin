@@ -8,6 +8,8 @@
 
 #include <cerrno>
 #include <csignal>
+#include <libproc.h>
+#include <sys/proc_info.h>
 #include <cstdlib>
 #include <unistd.h>
 
@@ -29,9 +31,33 @@ NSString *const kLatestReleasePage =
     @"https://github.com/LZlamian/OBS-AirPlay-Plugin/releases/latest";
 constexpr NSTimeInterval kUpdateCheckInterval = 24.0 * 60.0 * 60.0;
 
+// When OBS started, to tell it from a later process that reuses its PID
+// (the helper must not prompt for, or install, an update after OBS quit).
+uint64_t gParentStartMicros = 0;
+
+uint64_t processStartMicros(pid_t pid)
+{
+    struct proc_bsdinfo info = {};
+    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != (int)sizeof(info))
+        return 0;
+    return info.pbi_start_tvsec * 1000000ull + info.pbi_start_tvusec;
+}
+
 bool parentIsAlive(pid_t parentPID)
 {
-    return kill(parentPID, 0) == 0 || errno != ESRCH;
+    if (kill(parentPID, 0) != 0 && errno == ESRCH)
+        return false;
+    return !gParentStartMicros || processStartMicros(parentPID) == gParentStartMicros;
+}
+
+// Read by the plugin and written to the OBS log (this helper's own log goes
+// only to the system log): why discovery over Bluetooth is not active.
+NSString *const kBluetoothStateKey = @"OBS-AirPlay-BluetoothState";
+
+void reportBluetoothState(NSString *state)
+{
+    [[NSUserDefaults standardUserDefaults] setObject:state forKey:kBluetoothStateKey];
+    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
 }
 
 // The plugin this helper belongs to, when it can be updated in place.
@@ -341,14 +367,34 @@ void checkForUpdates(pid_t parentPID)
 
 - (void)peripheralManagerDidUpdateState:(CBPeripheralManager *)peripheral
 {
-    if (peripheral.state == CBManagerStatePoweredOn && !self.advertisingRequested) {
-        self.advertisingRequested = YES;
-        // This intentionally mirrors AirServer's observed advertisement: an
-        // always-on, nameless peripheral advertisement with no service data.
-        [peripheral startAdvertising:@{}];
-        NSLog(@"[OBS AirPlay BLE] advertising requested");
-    } else if (peripheral.state != CBManagerStatePoweredOn) {
+    switch (peripheral.state) {
+    case CBManagerStatePoweredOn:
+        // Also after Bluetooth was turned off and on again: the system drops
+        // the advertisement with the power, so it is requested again.
+        if (!self.advertisingRequested || !peripheral.isAdvertising) {
+            self.advertisingRequested = YES;
+            // This intentionally mirrors AirServer's observed advertisement:
+            // an always-on, nameless peripheral advertisement with no
+            // service data.
+            [peripheral startAdvertising:@{}];
+            NSLog(@"[OBS AirPlay BLE] advertising requested");
+        }
+        reportBluetoothState(@"on");
+        break;
+    case CBManagerStateUnauthorized:
+        self.advertisingRequested = NO;
+        NSLog(@"[OBS AirPlay BLE] Bluetooth access denied");
+        reportBluetoothState(@"unauthorized");
+        break;
+    case CBManagerStatePoweredOff:
+        self.advertisingRequested = NO;
+        NSLog(@"[OBS AirPlay BLE] Bluetooth is off");
+        reportBluetoothState(@"off");
+        break;
+    default:
         NSLog(@"[OBS AirPlay BLE] unavailable, state=%ld", (long)peripheral.state);
+        reportBluetoothState([NSString stringWithFormat:@"unavailable (%ld)", (long)peripheral.state]);
+        break;
     }
 }
 
@@ -387,9 +433,13 @@ int main(int argc, const char *argv[])
             OBSAirPlayForgetPreviousVersion(gPluginURL);
         gAlertIcon = alertIcon(parentPID);
 
-        __strong AirPlayBLEDelegate *delegate = [[AirPlayBLEDelegate alloc] init];
+        gParentStartMicros = processStartMicros(parentPID);
+        // Precise lifetime: ARC may otherwise release these after their last
+        // use here, while the managers keep only weak references.
+        __attribute__((objc_precise_lifetime)) AirPlayBLEDelegate *delegate =
+            [[AirPlayBLEDelegate alloc] init];
         (void)delegate;
-        __strong UpdateNotificationDelegate *notificationDelegate =
+        __attribute__((objc_precise_lifetime)) UpdateNotificationDelegate *notificationDelegate =
             [[UpdateNotificationDelegate alloc] init];
         [UNUserNotificationCenter currentNotificationCenter].delegate = notificationDelegate;
 
@@ -398,7 +448,7 @@ int main(int argc, const char *argv[])
         NSTimer *parentWatch = [NSTimer timerWithTimeInterval:1.0
                                                       repeats:YES
                                                         block:^(__unused NSTimer *timer) {
-            if (kill(parentPID, 0) != 0 && errno == ESRCH) {
+            if (!parentIsAlive(parentPID)) {
                 installStagedUpdateAfterOBS();
                 exit(0);
             }

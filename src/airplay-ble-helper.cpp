@@ -34,6 +34,23 @@ void set_helper_obs_outputs_active(bool active)
     set_helper_preference(CFSTR("OBS-AirPlay-OutputActive"), active);
 }
 
+std::string read_helper_bluetooth_state()
+{
+    const CFStringRef domain = CFSTR("com.lzlamian.obs-airplay.discovery");
+    CFPreferencesAppSynchronize(domain);
+    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("OBS-AirPlay-BluetoothState"), domain);
+    std::string state;
+    if (value && CFGetTypeID(value) == CFStringGetTypeID()) {
+        char buffer[64] = {};
+        if (CFStringGetCString(static_cast<CFStringRef>(value), buffer, sizeof(buffer),
+                               kCFStringEncodingUTF8)) {
+            state = buffer;
+        }
+    }
+    if (value) CFRelease(value);
+    return state;
+}
+
 bool start_airplay_ble_helper()
 {
     if (g_helper_started)
