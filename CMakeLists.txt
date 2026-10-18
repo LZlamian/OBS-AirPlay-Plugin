@@ -499,6 +499,7 @@ if(BUILD_TESTING)
         set(F "file://${OBS_AIRPLAY_FIXTURES}")
         set(OBS_AIRPLAY_MEDIA_TESTS
             "media-play|${F}/clip8.mp4"
+            "media-rotated|${F}/rot90.mp4"
             "media-require-audio|--require-audio^${F}/clip8.mp4"
             "media-startup|--startup^${F}/clip.mp4"
             "media-seek-sync|--seek-sync^${F}/clip.mp4"

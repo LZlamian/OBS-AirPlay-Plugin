@@ -1592,6 +1592,92 @@ private:
         return rate.num > 0 && rate.den > 0 ? av_q2d(av_inv_q(rate)) : 0.0;
     }
 
+    // Converts a picture OBS cannot take as it is (10-bit, 4:2:2, ...) to
+    // I420 in out->i420. swscale converts full-range (YUVJ) layouts to video
+    // range, so `full_range` may change.
+    bool convertToI420(VideoOutput* out, PictureView& picture, bool& full_range)
+    {
+        // swscale converts full-range (YUVJ) layouts to video range and
+        // leaves the range of everything else untouched.
+        const AVPixFmtDescriptor* descriptor =
+            av_pix_fmt_desc_get(static_cast<AVPixelFormat>(picture.format));
+        if (descriptor && std::strncmp(descriptor->name, "yuvj", 4) == 0) {
+            full_range = false;
+        }
+        out->scaler = sws_getCachedContext(
+            out->scaler, picture.width, picture.height,
+            static_cast<AVPixelFormat>(picture.format),
+            picture.width, picture.height, AV_PIX_FMT_YUV420P,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!out->scaler) {
+            blog(LOG_ERROR, "[MEDIA] failed to create video converter");
+            return false;
+        }
+        AVFrame* i420_frame = out->i420;
+        if (i420_frame->width != picture.width || i420_frame->height != picture.height ||
+            i420_frame->format != AV_PIX_FMT_YUV420P) {
+            av_frame_unref(i420_frame);
+            i420_frame->format = AV_PIX_FMT_YUV420P;
+            i420_frame->width = picture.width;
+            i420_frame->height = picture.height;
+            if (av_frame_get_buffer(i420_frame, 32) < 0) {
+                av_frame_unref(i420_frame);
+                blog(LOG_ERROR, "[MEDIA] failed to allocate converted video frame");
+                return false;
+            }
+        }
+        if (av_frame_make_writable(i420_frame) < 0) {
+            return false;
+        }
+        sws_scale(out->scaler, picture.data, picture.linesize, 0, picture.height,
+                  i420_frame->data, i420_frame->linesize);
+        picture = PictureView::of(i420_frame);
+        return true;
+    }
+
+    // Turns the picture upright (out->turns quarter turns) into out->rotated.
+    bool rotateUpright(VideoOutput* out, PictureView& picture, bool nv12)
+    {
+        const int width = picture.width;
+        const int height = picture.height;
+        const int rotated_width = out->turns == 2 ? width : height;
+        const int rotated_height = out->turns == 2 ? height : width;
+        const AVPixelFormat layout = nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+        AVFrame* rotated = out->rotated;
+        if (rotated->width != rotated_width || rotated->height != rotated_height ||
+            rotated->format != layout) {
+            av_frame_unref(rotated);
+            rotated->format = layout;
+            rotated->width = rotated_width;
+            rotated->height = rotated_height;
+            if (av_frame_get_buffer(rotated, 32) < 0) {
+                av_frame_unref(rotated);
+                blog(LOG_ERROR, "[MEDIA] failed to allocate rotated video frame");
+                return false;
+            }
+        }
+        if (av_frame_make_writable(rotated) < 0) {
+            return false;
+        }
+        const int chroma_width = (width + 1) / 2;
+        const int chroma_height = (height + 1) / 2;
+        rotate_plane(picture.data[0], picture.linesize[0], width, height, 1,
+                     out->turns, rotated->data[0], rotated->linesize[0]);
+        if (nv12) {
+            rotate_plane(picture.data[1], picture.linesize[1], chroma_width,
+                         chroma_height, 2, out->turns, rotated->data[1],
+                         rotated->linesize[1]);
+        } else {
+            for (int plane = 1; plane <= 2; ++plane) {
+                rotate_plane(picture.data[plane], picture.linesize[plane],
+                             chroma_width, chroma_height, 1, out->turns,
+                             rotated->data[plane], rotated->linesize[plane]);
+            }
+        }
+        picture = PictureView::of(rotated);
+        return true;
+    }
+
     void emitVideo(AVFrame* decoded, AVStream* stream, double format_start_seconds,
                    VideoOutput* out)
     {
@@ -1653,82 +1739,13 @@ private:
                  out->turns ? ", rotated upright" : "",
                  locked.held() ? ", zero-copy" : "");
         }
-        if (!nv12 && !i420) {
-            // swscale converts full-range (YUVJ) layouts to video range and
-            // leaves the range of everything else untouched.
-            const AVPixFmtDescriptor* descriptor =
-                av_pix_fmt_desc_get(static_cast<AVPixelFormat>(picture.format));
-            if (descriptor && std::strncmp(descriptor->name, "yuvj", 4) == 0) {
-                full_range = false;
-            }
-            out->scaler = sws_getCachedContext(
-                out->scaler, picture.width, picture.height,
-                static_cast<AVPixelFormat>(picture.format),
-                picture.width, picture.height, AV_PIX_FMT_YUV420P,
-                SWS_BILINEAR, nullptr, nullptr, nullptr);
-            if (!out->scaler) {
-                blog(LOG_ERROR, "[MEDIA] failed to create video converter");
-                return;
-            }
-            AVFrame* i420_frame = out->i420;
-            if (i420_frame->width != picture.width || i420_frame->height != picture.height ||
-                i420_frame->format != AV_PIX_FMT_YUV420P) {
-                av_frame_unref(i420_frame);
-                i420_frame->format = AV_PIX_FMT_YUV420P;
-                i420_frame->width = picture.width;
-                i420_frame->height = picture.height;
-                if (av_frame_get_buffer(i420_frame, 32) < 0) {
-                    av_frame_unref(i420_frame);
-                    blog(LOG_ERROR, "[MEDIA] failed to allocate converted video frame");
-                    return;
-                }
-            }
-            if (av_frame_make_writable(i420_frame) < 0) {
-                return;
-            }
-            sws_scale(out->scaler, picture.data, picture.linesize, 0, picture.height,
-                      i420_frame->data, i420_frame->linesize);
-            picture = PictureView::of(i420_frame);
+        if (!nv12 && !i420 && !convertToI420(out, picture, full_range)) {
+            return;
         }
-
         if (out->turns) {
-            const int width = picture.width;
-            const int height = picture.height;
-            const int rotated_width = out->turns == 2 ? width : height;
-            const int rotated_height = out->turns == 2 ? height : width;
-            const AVPixelFormat layout = nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-            AVFrame* rotated = out->rotated;
-            if (rotated->width != rotated_width || rotated->height != rotated_height ||
-                rotated->format != layout) {
-                av_frame_unref(rotated);
-                rotated->format = layout;
-                rotated->width = rotated_width;
-                rotated->height = rotated_height;
-                if (av_frame_get_buffer(rotated, 32) < 0) {
-                    av_frame_unref(rotated);
-                    blog(LOG_ERROR, "[MEDIA] failed to allocate rotated video frame");
-                    return;
-                }
-            }
-            if (av_frame_make_writable(rotated) < 0) {
+            if (!rotateUpright(out, picture, nv12)) {
                 return;
             }
-            const int chroma_width = (width + 1) / 2;
-            const int chroma_height = (height + 1) / 2;
-            rotate_plane(picture.data[0], picture.linesize[0], width, height, 1,
-                         out->turns, rotated->data[0], rotated->linesize[0]);
-            if (nv12) {
-                rotate_plane(picture.data[1], picture.linesize[1], chroma_width,
-                             chroma_height, 2, out->turns, rotated->data[1],
-                             rotated->linesize[1]);
-            } else {
-                for (int plane = 1; plane <= 2; ++plane) {
-                    rotate_plane(picture.data[plane], picture.linesize[plane],
-                                 chroma_width, chroma_height, 1, out->turns,
-                                 rotated->data[plane], rotated->linesize[plane]);
-                }
-            }
-            picture = PictureView::of(rotated);
             locked.unlock();
         }
 
@@ -1914,54 +1931,64 @@ private:
         }
     }
 
-    void run(std::string location, double start_position)
-    {
-        static std::once_flag network_once;
-        std::call_once(network_once, [] { avformat_network_init(); });
-        first_video_logged.store(false);
-        first_audio_logged.store(false);
-        pause_before_first_frame_logged.store(false);
+    // Everything an item needs while it plays. The destructor releases the
+    // decoders and frames, then the demuxer, then its custom input (MEM-7:
+    // no early return can leak one).
+    struct Item {
+        std::unique_ptr<ResilientHttpIo> resilient_io;
+        AVFormatContext* format = nullptr;
+        bool format_opened = false;
+        AVCodecContext* video_decoder = nullptr;
+        AVCodecContext* audio_decoder = nullptr;
+        VideoOutput video_output;
+        int video_index = -1;
+        int audio_index = -1;
+        bool duration_known = false;
+        double duration = 0.0;
+        double format_start_seconds = 0.0;
+        double seek_preroll = 0.0;
 
-        const std::string log_location = safe_location_for_log(location);
-        blog(LOG_INFO, "[MEDIA] opening Safari media URL: %s", log_location.c_str());
-        const bool http_item = is_http_url(location);
-        const std::string refused = http_item ? media_url_policy::checkItem(location)
-                                              : media_url_policy::checkLocalFile(location);
-        if (!refused.empty()) {
-            markOpenFailure(("media URL refused: " + refused).c_str());
-            return;
-        }
-        policy_item_url = location;
-        const std::string playback_location = resolveHlsVariant(location);
-        if (stop_requested.load(std::memory_order_acquire)) {
-            return;
-        }
-        if (playback_location != location) {
-            const std::string variant_refused =
-                media_url_policy::checkNested(playback_location, location);
-            if (!variant_refused.empty()) {
-                markOpenFailure(("HLS rendition URL refused: " + variant_refused).c_str());
-                return;
+        Item() = default;
+        Item(const Item&) = delete;
+        Item& operator=(const Item&) = delete;
+        ~Item()
+        {
+            if (video_output.scaler) sws_freeContext(video_output.scaler);
+            av_frame_free(&video_output.rotated);
+            av_frame_free(&video_output.transfer);
+            av_frame_free(&video_output.i420);
+            avcodec_free_context(&audio_decoder);
+            avcodec_free_context(&video_decoder);
+            if (format) {
+                if (format_opened) avformat_close_input(&format);
+                else avformat_free_context(format);
             }
         }
-        if (const int delay = g_open_delay_for_testing_ms.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-        }
+    };
+
+    // Opens the item: demuxer, streams, decoders, the initial seek. False
+    // (after markOpenFailure, unless stopping) when it cannot be played.
+    bool openItem(const std::string& playback_location, bool http_item, double start_position,
+                  Item& item)
+    {
+        AVFormatContext*& format = item.format;
+        std::unique_ptr<ResilientHttpIo>& resilient_io = item.resilient_io;
+        AVCodecContext*& video_decoder = item.video_decoder;
+        AVCodecContext*& audio_decoder = item.audio_decoder;
+        VideoOutput& video_output = item.video_output;
+        int& video_index = item.video_index;
+        int& audio_index = item.audio_index;
+        bool& duration_known = item.duration_known;
+        double& duration = item.duration;
+        double& format_start_seconds = item.format_start_seconds;
+        double& seek_preroll = item.seek_preroll;
+
         const auto open_started = std::chrono::steady_clock::now();
-        AVFormatContext* format = avformat_alloc_context();
+        format = avformat_alloc_context();
         if (!format) {
             markOpenFailure("could not allocate demuxer");
-            return;
+            return false;
         }
-        // Every FFmpeg object of the item is released when run() returns,
-        // whichever way: (MEM-7) no early return can leak one. Declared
-        // after resilient_io, so the demuxer closes before its custom input.
-        bool format_opened = false;
-        ScopeExit release_format{[&] {
-            if (!format) return;
-            if (format_opened) avformat_close_input(&format);
-            else avformat_free_context(format);
-        }};
         format->interrupt_callback.callback = &Impl::interruptCallback;
         format->interrupt_callback.opaque = this;
         if (http_item) {
@@ -1976,7 +2003,6 @@ private:
         // known by its .m3u8 name or, for token-style URLs, by the server's
         // content type.
         bool hls_input = looks_like_hls_url(playback_location);
-        std::unique_ptr<ResilientHttpIo> resilient_io;
         if (is_http_url(playback_location) && !hls_input) {
             resilient_io = std::make_unique<ResilientHttpIo>(
                 playback_location, AVIOInterruptCB{&Impl::interruptCallback, this});
@@ -2017,9 +2043,9 @@ private:
             if (!stop_requested.load()) {
                 markOpenFailure(("URL open failed: " + ffmpeg_error(result)).c_str());
             }
-            return;
+            return false;
         }
-        format_opened = true;
+        item.format_opened = true;
 
         const auto transport_opened = std::chrono::steady_clock::now();
         const double transport_ms = std::chrono::duration<double, std::milli>(
@@ -2039,31 +2065,20 @@ private:
         result = avformat_find_stream_info(format, nullptr);
         if (result < 0) {
             markOpenFailure(("stream discovery failed: " + ffmpeg_error(result)).c_str());
-            return;
+            return false;
         }
 
-        const int video_index = selected_program
+        video_index = selected_program
             ? find_program_stream(format, selected_program, AVMEDIA_TYPE_VIDEO)
             : av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        const int audio_index = selected_program
+        audio_index = selected_program
             ? find_program_stream(format, selected_program, AVMEDIA_TYPE_AUDIO)
             : av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
         if (video_index < 0 && audio_index < 0) {
             markOpenFailure("URL contains no decodable audio or video streams");
-            return;
+            return false;
         }
 
-        AVCodecContext* video_decoder = nullptr;
-        AVCodecContext* audio_decoder = nullptr;
-        VideoOutput video_output;
-        ScopeExit release_decoders{[&] {
-            if (video_output.scaler) sws_freeContext(video_output.scaler);
-            av_frame_free(&video_output.rotated);
-            av_frame_free(&video_output.transfer);
-            av_frame_free(&video_output.i420);
-            avcodec_free_context(&audio_decoder);
-            avcodec_free_context(&video_decoder);
-        }};
         if (video_index >= 0 &&
             !openDecoder(format, video_index, &video_decoder, true, &video_output.hardware)) {
             blog(LOG_WARNING, "[MEDIA] video stream will be skipped");
@@ -2076,14 +2091,13 @@ private:
         }
         if (!video_decoder && !audio_decoder) {
             markOpenFailure("no advertised stream could be decoded");
-            return;
+            return false;
         }
 
-        const bool duration_known = format->duration != AV_NOPTS_VALUE &&
-                                    format->duration > 0;
-        const double duration = duration_known
+        duration_known = format->duration != AV_NOPTS_VALUE && format->duration > 0;
+        duration = duration_known
             ? format->duration / static_cast<double>(AV_TIME_BASE) : 0.0;
-        const double format_start_seconds = format->start_time != AV_NOPTS_VALUE
+        format_start_seconds = format->start_time != AV_NOPTS_VALUE
             ? format->start_time / static_cast<double>(AV_TIME_BASE) : 0.0;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
@@ -2105,7 +2119,7 @@ private:
              format->iformat && format->iformat->name ? format->iformat->name : "unknown",
              video_name, audio_name, duration);
 
-        const double seek_preroll = seekPreroll(format, video_index);
+        seek_preroll = seekPreroll(format, video_index);
         if (start_position > 0.0) {
             const int64_t target = static_cast<int64_t>(
                 (std::max(0.0, start_position - seek_preroll) + format_start_seconds) * AV_TIME_BASE);
@@ -2113,6 +2127,25 @@ private:
                 blog(LOG_WARNING, "[MEDIA] initial seek to %.3fs was not available", start_position);
             }
         }
+
+        return true;
+    }
+
+    // Demuxes and decodes the item until its end, a stop or a fatal error;
+    // video goes to the presenter thread, audio is presented here.
+    void playItem(Item& item)
+    {
+        AVFormatContext* format = item.format;
+        AVCodecContext*& video_decoder = item.video_decoder;
+        AVCodecContext*& audio_decoder = item.audio_decoder;
+        VideoOutput& video_output = item.video_output;
+        const int video_index = item.video_index;
+        const int audio_index = item.audio_index;
+        const bool duration_known = item.duration_known;
+        const double duration = item.duration;
+        const double format_start_seconds = item.format_start_seconds;
+        const double seek_preroll = item.seek_preroll;
+        int result = 0;
 
         AVPacket* packet = av_packet_alloc();
         AVFrame* decoded = av_frame_alloc();
@@ -2320,10 +2353,49 @@ private:
         }
         if (presenter.joinable()) presenter.join();
         clearVideoQueue();
+    }
 
-        if (resilient_io && resilient_io->reopens() > 0) {
+    void run(std::string location, double start_position)
+    {
+        static std::once_flag network_once;
+        std::call_once(network_once, [] { avformat_network_init(); });
+        first_video_logged.store(false);
+        first_audio_logged.store(false);
+        pause_before_first_frame_logged.store(false);
+
+        const std::string log_location = safe_location_for_log(location);
+        blog(LOG_INFO, "[MEDIA] opening Safari media URL: %s", log_location.c_str());
+        const bool http_item = is_http_url(location);
+        const std::string refused = http_item ? media_url_policy::checkItem(location)
+                                              : media_url_policy::checkLocalFile(location);
+        if (!refused.empty()) {
+            markOpenFailure(("media URL refused: " + refused).c_str());
+            return;
+        }
+        policy_item_url = location;
+        const std::string playback_location = resolveHlsVariant(location);
+        if (stop_requested.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (playback_location != location) {
+            const std::string variant_refused =
+                media_url_policy::checkNested(playback_location, location);
+            if (!variant_refused.empty()) {
+                markOpenFailure(("HLS rendition URL refused: " + variant_refused).c_str());
+                return;
+            }
+        }
+        if (const int delay = g_open_delay_for_testing_ms.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        }
+        Item item;
+        if (!openItem(playback_location, http_item, start_position, item)) {
+            return;
+        }
+        playItem(item);
+        if (item.resilient_io && item.resilient_io->reopens() > 0) {
             blog(LOG_INFO, "[MEDIA] media server responses ended early %d time(s); "
-                 "continued with fresh range requests", resilient_io->reopens());
+                 "continued with fresh range requests", item.resilient_io->reopens());
         }
     }
 

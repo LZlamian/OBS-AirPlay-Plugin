@@ -21,6 +21,8 @@ gen clip-g300.mp4 "${AV[@]}" -t 60 -c:v libx264 -pix_fmt yuv420p -g 300 -keyint_
   -sc_threshold 0 -c:a aac -movflags +faststart
 # 90 s: --follow-clock
 gen clip90.mp4 "${AV[@]}" -t 90 -c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac -movflags +faststart
+# Portrait recording (rotation in the metadata): played upright
+[[ -s rot90.mp4 ]] || "${FFMPEG}" -v error -y -display_rotation 90 -i clip8.mp4 -c copy rot90.mp4
 # MPEG-TS starting at 10 s: --ts-seek
 gen clip-ts.ts -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440:sample_rate=48000 \
   -t 30 -c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac -output_ts_offset 10 -f mpegts
