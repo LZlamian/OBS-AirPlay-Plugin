@@ -7,6 +7,7 @@
 #include <plist/plist.h>
 
 #include <chrono>
+#include <csignal>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
@@ -132,6 +133,24 @@ int connectLocal(unsigned short port)
     return fd;
 }
 
+// The same receiver seen from a different peer address (::1).
+int connectLocal6(unsigned short port)
+{
+    const int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_in6 address = {};
+    address.sin6_family = AF_INET6;
+    address.sin6_port = htons(port);
+    address.sin6_addr = in6addr_loopback;
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+        close(fd);
+        return -1;
+    }
+    timeval timeout = {10, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    return fd;
+}
+
 bool sendAll(int fd, const void* data, size_t size)
 {
     const auto* bytes = static_cast<const char*>(data);
@@ -207,6 +226,8 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "usage: %s [--large-blob]\n", argv[0]);
         return 2;
     }
+    // A peer the receiver drops must fail the test, not kill it.
+    signal(SIGPIPE, SIG_IGN);
     TestState state;
     raop_callbacks_t callbacks = {};
     callbacks.cls = &state;
@@ -974,6 +995,76 @@ int main(int argc, char** argv)
     policy_ok = policy_ok && classic_refused.find("400 Bad Request") != std::string::npos;
     std::printf("url_policy=%s\n", policy_ok ? "enforced" : "FAILED");
 
+    // The session belongs to the peer whose /play started it: another peer
+    // (here ::1) cannot stop, pause, scrub or edit it.
+    const auto exchange6 = [&](const std::string& request) {
+        const int fd = connectLocal6(port);
+        std::string response;
+        if (fd >= 0 && sendAll(fd, request.data(), request.size())) response = receiveResponse(fd);
+        if (fd >= 0) close(fd);
+        return response;
+    };
+    // The owner keeps its AirPlay connection open, as a sender does.
+    const int owner_fd = connectLocal(port);
+    std::string owned_response;
+    {
+        plist_t root = plist_new_dict();
+        plist_dict_set_item(root, "Content-Location", plist_new_string("http://10.1.2.3/owned.mp4"));
+        char* body = nullptr;
+        uint32_t body_size = 0;
+        plist_to_bin(root, &body, &body_size);
+        plist_free(root);
+        const std::string headers = std::string("POST /play HTTP/1.1\r\n") +
+            "Host: 127.0.0.1\r\n" + "X-Apple-Session-ID: " + session + "\r\n" +
+            "Content-Type: application/x-apple-binary-plist\r\n" +
+            "Content-Length: " + std::to_string(body_size) + "\r\n\r\n";
+        if (owner_fd >= 0 && sendAll(owner_fd, headers.data(), headers.size()) &&
+            sendAll(owner_fd, body, body_size)) {
+            owned_response = receiveResponse(owner_fd);
+        }
+        free(body);
+    }
+    const char* owned_status = owned_response.find("200 OK") != std::string::npos ? "200" : "other";
+    int stops_before_foreign = 0;
+    float rate_before_foreign = 0.0f;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        stops_before_foreign = state.stop_count;
+        rate_before_foreign = state.playback_rate;
+    }
+    const std::string foreign_stop = exchange6(control_request("POST", "/stop"));
+    const std::string foreign_rate = exchange6(control_request("POST", "/rate?value=0.25"));
+    const std::string foreign_scrub = exchange6(control_request("POST", "/scrub?position=3"));
+    int stops_after_foreign = 0;
+    float rate_after_foreign = 0.0f;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        stops_after_foreign = state.stop_count;
+        rate_after_foreign = state.playback_rate;
+    }
+    std::string owner_stop;
+    {
+        const std::string request = control_request("POST", "/stop");
+        if (owner_fd >= 0 && sendAll(owner_fd, request.data(), request.size())) {
+            owner_stop = receiveResponse(owner_fd);
+        }
+        if (owner_fd >= 0) close(owner_fd);
+        usleep(100000);
+    }
+    // With the session over, any peer may control again.
+    const std::string later_stop = exchange6(control_request("POST", "/stop"));
+    const bool binding_ok = std::strcmp(owned_status, "200") == 0 &&
+        foreign_stop.find("403") != std::string::npos &&
+        foreign_rate.find("403") != std::string::npos &&
+        foreign_scrub.find("403") != std::string::npos &&
+        stops_after_foreign == stops_before_foreign &&
+        rate_after_foreign == rate_before_foreign &&
+        owner_stop.find("200 OK") != std::string::npos &&
+        later_stop.find("200 OK") != std::string::npos;
+    std::printf("session_binding=%s owned=%.12s foreign_stop=%.12s owner_stop=%.12s later_stop=%.12s\n",
+                binding_ok ? "enforced" : "FAILED", owned_response.c_str(), foreign_stop.c_str(),
+                owner_stop.c_str(), later_stop.c_str());
+
     // Bodies are capped (16 MiB unless a reverse fetch is pending) and share
     // one buffer budget across connections; over either limit the request
     // is answered 413 and its buffer released.
@@ -1083,5 +1174,5 @@ int main(int argc, char** argv)
     raop_destroy(raop);
     dnssd_destroy(dnssd);
     return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok &&
-        oversized_ok && budget_ok && nonreader_ok ? 0 : 1;
+        oversized_ok && budget_ok && nonreader_ok && binding_ok ? 0 : 1;
 }
