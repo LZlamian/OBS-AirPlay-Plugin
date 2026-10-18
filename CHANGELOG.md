@@ -38,6 +38,9 @@ Performance:
 - Release builds are smaller (dead-stripped, only module entry points exported).
 
 Project:
+- The UxPlay fork is rebased onto the UxPlay v1.73.7 release (iOS 27
+  mirroring-stop fix and other upstream changes); two upstream crashes on a
+  missing optional callback or an early `/action` are guarded.
 - GPL-3.0-or-later with all third-party licenses shipped; CTest runs every
   smoke; CI on Apple silicon and Intel; presets for sanitizer builds; unit
   tests and fuzz targets for network-facing parsers.

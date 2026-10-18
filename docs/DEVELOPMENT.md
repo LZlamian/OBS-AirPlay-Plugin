@@ -104,6 +104,15 @@ and the fork branch is pushed before this repository's branch, so every commit
 here points at a fork commit that exists on GitHub. Keep the fork's diff to
 upstream small and each change attributable; prefer porting upstream commits.
 
+The fork is based on the UxPlay v1.73.7 release (branch
+`obs-airplay-rebase-1.73.7`, one commit per change on top of the tag).
+To move it to a newer upstream release: `git rebase <tag>` in `uxplay/`, then
+build and run every test. Upstream changes to watch for in this receiver:
+callbacks the plugin relies on that upstream does not use (`conn_teardown`,
+`conn_request_timing`, `mirror_connection_timing`), optional callbacks
+called without a NULL check, asserts on request paths, and the shape of
+`httpd_thread` (the fork's staged first read and dead-connection sweep).
+
 ## Releasing
 
 1. Set the version in `CMakeLists.txt` (`project(obs-airplay VERSION X.Y.Z)`);
