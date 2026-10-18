@@ -390,6 +390,10 @@ bool H264Decoder::outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_fra
             m_frame_i420->width = frame->width;
             m_frame_i420->height = frame->height;
             if (av_frame_get_buffer(m_frame_i420, 32) < 0) {
+                // av_frame_get_buffer needs the geometry set beforehand; clear
+                // it again so the next frame retries the allocation instead of
+                // matching it and scaling into NULL planes.
+                av_frame_unref(m_frame_i420);
                 blog(LOG_ERROR, "Failed to allocate I420 frame buffer");
                 return false;
             }
