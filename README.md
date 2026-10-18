@@ -107,7 +107,7 @@ and carries only the plugin version in its User-Agent.
 Quit OBS and delete `~/Library/Application Support/obs-studio/plugins/obs-airplay.plugin`
 (and, if present, `.obs-airplay.update` and `.obs-airplay.previous` in the same
 folder). The plugin's settings are in
-`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`; its
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay.so/`; its
 helper's preferences can be removed with
 `defaults delete com.lzlamian.obs-airplay.discovery`.
 
@@ -172,7 +172,7 @@ All AirPlay sources share these settings (there is one receiver per OBS):
 - **Check for plugin updates once a day**.
 
 For troubleshooting, two switches are files in
-`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay.so/`
 (restart OBS after creating or deleting them): `obs-airplay-software-decode`
 forces software decoding (or start OBS with `OBS_AIRPLAY_HW_DECODE=0`), and
 `obs-airplay-media-trace` logs the AirPlay video protocol as `[MEDIA-TRACE]`

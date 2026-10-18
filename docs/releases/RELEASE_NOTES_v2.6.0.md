@@ -73,7 +73,7 @@ from the sending device**).
   `.pkg` installer, run it, and reopen OBS.
 
 The plugin's settings move to
-`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`; the
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay.so/`; the
 troubleshooting flag files in their old place still work.
 
 ## Compatibility

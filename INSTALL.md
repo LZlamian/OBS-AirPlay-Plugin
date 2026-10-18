@@ -27,7 +27,7 @@ prompt (see the README); turn the daily check off in the source's properties.
 Quit OBS, then delete from `~/Library/Application Support/obs-studio/plugins/`:
 `obs-airplay.plugin`, and `.obs-airplay.update` / `.obs-airplay.previous` if
 they exist (hidden: press Cmd-Shift-. in Finder). Settings are in
-`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`; the
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay.so/`; the
 helper's preferences go with `defaults delete com.lzlamian.obs-airplay.discovery`.
 Versions before 2.6 also installed a copy in
 `/Library/Application Support/obs-studio/plugins/`: delete it too.

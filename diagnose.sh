@@ -15,7 +15,7 @@ OBS_BUNDLE_PATH="${OBS_BUNDLE_PATH:-/Applications/OBS.app}"
 OBS_SUPPORT="${HOME}/Library/Application Support/obs-studio"
 PLUGIN="${OBS_SUPPORT}/plugins/obs-airplay.plugin"
 LEGACY_PLUGIN="/Library/Application Support/obs-studio/plugins/obs-airplay.plugin"
-SETTINGS="${OBS_SUPPORT}/plugin_config/obs-airplay/settings.json"
+SETTINGS="${OBS_SUPPORT}/plugin_config/obs-airplay.so/settings.json"
 ISSUES="https://github.com/LZlamian/OBS-AirPlay-Plugin/issues"
 
 errors=0
