@@ -6,6 +6,8 @@
 #include "airplay-ble-helper.hpp"
 #include "media-player.hpp"
 #include "module-settings.hpp"
+#include "hardware-decode-option.hpp"
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -107,8 +109,20 @@ static uint64_t                g_debounce_gen  = 0;
 static bool                    g_debounce_quit = false;
 static std::thread             g_debounce_thread;
 
+// "aa:bb:cc:dd:ee:ff": six hex pairs separated by colons.
+static bool valid_mac(const std::string& mac)
+{
+    if (mac.size() != 17) return false;
+    for (size_t i = 0; i < mac.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(mac[i]);
+        if (i % 3 == 2 ? c != ':' : !std::isxdigit(c)) return false;
+    }
+    return true;
+}
+
 // Persist the receiver identity so Bonjour caches and the advertised public
-// key remain stable across OBS restarts.
+// key remain stable across OBS restarts. A damaged file is replaced: the
+// receiver and its Bonjour records must use the same identity.
 static std::string load_or_persist_mac(const std::string& generated_mac)
 {
     char* path = obs_module_config_path("mac_address.txt");
@@ -125,11 +139,12 @@ static std::string load_or_persist_mac(const std::string& generated_mac)
             std::string mac(buf);
             while (!mac.empty() && (mac.back() == '\n' || mac.back() == '\r'))
                 mac.pop_back();
-            if (mac.size() == 17) {
+            if (valid_mac(mac)) {
                 bfree(path);
                 blog(LOG_INFO, "Loaded persisted AirPlay MAC: %s", mac.c_str());
                 return mac;
             }
+            blog(LOG_WARNING, "Saved AirPlay MAC \"%s\" is not valid; replacing it", mac.c_str());
         } else {
             fclose(f);
         }
@@ -351,6 +366,11 @@ bool obs_module_load(void)
 {
     blog(LOG_INFO, "OBS AirPlay Plugin loaded (version " PLUGIN_VERSION ")");
 
+    if (char* config_dir = obs_module_config_path("")) {
+        set_flag_file_directory(config_dir);
+        bfree(config_dir);
+    }
+
     {
         bool found = false;
         ModuleSettings settings = module_settings_load(&found);
@@ -481,8 +501,16 @@ bool obs_module_load(void)
         }
         
     } catch (const std::exception& e) {
+        // Threads are running and the source type is registered: returning
+        // false would make libobs unload the module without calling
+        // obs_module_unload. Stay loaded with the receiver stopped; the
+        // panel shows it is not running.
         blog(LOG_ERROR, "Failed to start AirPlay server: %s", e.what());
-        return false;
+        std::lock_guard<std::mutex> lock(g_uxplay_mutex);
+        if (g_uxplay_integration) {
+            g_uxplay_integration->stop();
+        }
+        return true;
     }
 }
 

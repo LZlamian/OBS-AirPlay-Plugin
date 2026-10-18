@@ -441,7 +441,7 @@ tail -f ~/Library/Application\ Support/obs-studio/logs/$(ls -t ~/Library/Applica
    - Run OBS and watch for messages
 
 3. **AirPlay video protocol trace**
-   - Create `~/Library/Application Support/obs-studio/obs-airplay-media-trace` (or start OBS with `OBS_AIRPLAY_MEDIA_TRACE=1`) and restart OBS
+   - Create `~/Library/Application Support/obs-studio/plugin_config/obs-airplay/obs-airplay-media-trace` (or start OBS with `OBS_AIRPLAY_MEDIA_TRACE=1`) and restart OBS; the older location `~/Library/Application Support/obs-studio/obs-airplay-media-trace` still works
    - The OBS log then shows every AirPlay video request and response (`/play`, `/action`, `/scrub`, `/rate`, `/stop`, `/playback-info`, reverse-HTTP) as `[MEDIA-TRACE]` lines, plus UxPlay's `[MEDIA]` lines
    - Delete the file and restart OBS to turn it off; the trace is verbose
 

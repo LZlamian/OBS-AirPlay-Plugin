@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "uxplay-integration.hpp"
 #include "media-url-policy.hpp"
+#include "hardware-decode-option.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <algorithm>
@@ -55,20 +56,16 @@ void boost_caller_thread_qos_once(const char* tag)
 
 // The AirPlay video protocol trace ([MEDIA-TRACE] lines: /play, /reverse,
 // FCUP, playback controls) is off by default.  Enable it with the
-// OBS_AIRPLAY_MEDIA_TRACE=1 environment variable or by creating the file
-// ~/Library/Application Support/obs-studio/obs-airplay-media-trace
+// OBS_AIRPLAY_MEDIA_TRACE=1 environment variable or a file named
+// obs-airplay-media-trace in the plugin's config folder (read when the
+// receiver starts: restart OBS after creating it).
 bool media_trace_requested()
 {
     if (const char* env = std::getenv("OBS_AIRPLAY_MEDIA_TRACE")) {
         return env[0] && std::strcmp(env, "0") != 0;
     }
-    if (const char* home = std::getenv("HOME")) {
-        const std::string flag = std::string(home) +
-            "/Library/Application Support/obs-studio/obs-airplay-media-trace";
-        struct stat st {};
-        if (stat(flag.c_str(), &st) == 0) {
-            return true;
-        }
+    if (flag_file_exists("obs-airplay-media-trace")) {
+        return true;
     }
     return OBS_AIRPLAY_MEDIA_TRACE_DEFAULT != 0;
 }
@@ -193,6 +190,7 @@ void UxPlayIntegration::deferredClearLoop()
 bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                               const std::string& server_name)
 {
+    std::lock_guard<std::mutex> lifecycle(m_lifecycle_mutex);
     blog(LOG_INFO, "=== Starting UxPlay Integration ===");
     blog(LOG_INFO, "Requested port: %d", port);
     
@@ -770,14 +768,16 @@ void UxPlayIntegration::disableInternalMDNS()
 
 void UxPlayIntegration::updateServerName(const std::string& name)
 {
+    // Not while start() or stop() replace m_raop / m_dnssd.
+    std::lock_guard<std::mutex> lifecycle(m_lifecycle_mutex);
     // Hold m_mutex only for the running/raop check; release before calling
     // into UxPlay/DNS-SD to avoid deadlock with audio/video callback threads.
     raop_t* raop_ref = nullptr;
     dnssd_t* old_dnssd = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (!m_raop) {
-            // UxPlay not yet started — update the pending name so start() picks it up.
+        if (!m_raop || !m_running) {
+            // UxPlay not (yet) running: keep the name for start().
             m_server_name = name.empty() ? "OBS AirPlay" : name;
             return;
         }
@@ -921,6 +921,7 @@ std::string UxPlayIntegration::getPK() const
 
 void UxPlayIntegration::stop()
 {
+    std::lock_guard<std::mutex> lifecycle(m_lifecycle_mutex);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running) {

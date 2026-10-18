@@ -145,6 +145,10 @@ private:
     void deferredClearLoop();
     void stopDeferredClearThread();
 
+    // Held for the whole of start(), stop() and updateServerName(), which
+    // replace m_raop / m_dnssd (OBS main thread, name debounce thread).
+    // Never taken on UxPlay's threads.
+    std::mutex m_lifecycle_mutex;
     mutable std::mutex m_status_mutex;   // leaf lock
     std::string m_last_error;            // under m_status_mutex
     std::string m_last_state;            // under m_status_mutex
