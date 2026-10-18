@@ -484,7 +484,82 @@ if(BUILD_TESTING)
     target_link_libraries(obs-airplay-protocol-smoke PRIVATE
         airplay
     )
-    add_test(NAME obs-airplay-protocol-smoke
-        COMMAND obs-airplay-protocol-smoke
-    )
+    # ---- CTest: every smoke, with media generated at test time ----------
+    add_test(NAME protocol COMMAND obs-airplay-protocol-smoke)
+    add_test(NAME protocol-large-blob COMMAND obs-airplay-protocol-smoke --large-blob)
+
+    find_program(OBS_AIRPLAY_FFMPEG ffmpeg)
+    set(OBS_AIRPLAY_FIXTURES "${CMAKE_BINARY_DIR}/test-fixtures")
+    if(OBS_AIRPLAY_FFMPEG)
+        add_test(NAME fixtures
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/make-fixtures.sh" "${OBS_AIRPLAY_FFMPEG}"
+                    "${OBS_AIRPLAY_FIXTURES}")
+        set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP media TIMEOUT 600)
+
+        set(F "file://${OBS_AIRPLAY_FIXTURES}")
+        set(OBS_AIRPLAY_MEDIA_TESTS
+            "media-play|${F}/clip8.mp4"
+            "media-require-audio|--require-audio^${F}/clip8.mp4"
+            "media-startup|--startup^${F}/clip.mp4"
+            "media-seek-sync|--seek-sync^${F}/clip.mp4"
+            "media-seek-sync-preroll|--seek-sync^${F}/clip-g300.mp4"
+            "media-scrub-drag|--scrub-drag^${F}/clip.mp4"
+            "media-scrub-latency|--scrub-latency^${F}/clip.mp4"
+            "media-paused-audio|--paused-audio^${F}/clip.mp4"
+            "media-sparse-clip|--sparse-clip^${F}/sparse.mp4"
+            "media-follow-clock|--follow-clock^${F}/clip90.mp4"
+            "media-follow-clock-short|--follow-clock-short^${F}/still2.mp4"
+            "media-follow-clock-quick|--follow-clock-short-quick^${F}/still2.mp4"
+            "media-stop-race|--stop-race^${F}/clip.mp4"
+            "media-ts-seek|--ts-seek^${F}/clip-ts.ts"
+            "media-after-end|--after-end^${F}/clip8.mp4")
+        foreach(entry ${OBS_AIRPLAY_MEDIA_TESTS})
+            # name|arg^arg (';' would split the list itself)
+            string(REPLACE "|" ";" parts "${entry}")
+            string(REPLACE "^" ";" parts "${parts}")
+            list(GET parts 0 name)
+            list(REMOVE_AT parts 0)
+            add_test(NAME ${name} COMMAND obs-airplay-media-smoke ${parts})
+            set_tests_properties(${name} PROPERTIES FIXTURES_REQUIRED media TIMEOUT 180)
+        endforeach()
+        add_test(NAME media-url-policy COMMAND obs-airplay-media-smoke --url-policy)
+
+        # Local HTTP(S) servers on fixed ports: one test at a time.
+        add_test(NAME media-nested-policy
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+                    "$<TARGET_FILE:obs-airplay-media-smoke>" --nested-policy
+                    http://127.0.0.1:18901/same.m3u8 http://127.0.0.1:18901/cross.m3u8)
+        add_test(NAME media-tls-verify
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+                    "$<TARGET_FILE:obs-airplay-media-smoke>" --tls-verify
+                    https://localhost:18443/clip.mp4)
+        set_tests_properties(media-nested-policy media-tls-verify PROPERTIES
+            FIXTURES_REQUIRED media RESOURCE_LOCK media-servers TIMEOUT 120)
+
+        add_test(NAME decoder
+            COMMAND obs-airplay-decoder-smoke "${OBS_AIRPLAY_FIXTURES}/clip.mp4"
+                    "${OBS_AIRPLAY_FIXTURES}/clip709.mp4")
+        add_test(NAME decoder-two-au
+            COMMAND obs-airplay-decoder-smoke --two-au "${OBS_AIRPLAY_FIXTURES}/clip709.mp4")
+        add_test(NAME decoder-colorspace
+            COMMAND obs-airplay-decoder-smoke --colorspace "${OBS_AIRPLAY_FIXTURES}/clip601.mp4"
+                    "${OBS_AIRPLAY_FIXTURES}/clip709.mp4")
+        set_tests_properties(decoder decoder-two-au decoder-colorspace PROPERTIES
+            FIXTURES_REQUIRED media TIMEOUT 300)
+    else()
+        message(WARNING "ffmpeg not found: media and decoder tests are not registered")
+    endif()
+
+    if(TARGET obs-airplay-updater-smoke)
+        # Test signing keys need OpenSSL 3 (macOS's /usr/bin/openssl is LibreSSL).
+        find_program(OBS_AIRPLAY_OPENSSL3 openssl
+            PATHS /opt/homebrew/opt/openssl@3/bin /usr/local/opt/openssl@3/bin NO_DEFAULT_PATH)
+        add_test(NAME updater
+            COMMAND obs-airplay-updater-smoke "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
+                    "${CMAKE_BINARY_DIR}/test-scratch")
+        if(OBS_AIRPLAY_OPENSSL3)
+            set_tests_properties(updater PROPERTIES ENVIRONMENT "OPENSSL=${OBS_AIRPLAY_OPENSSL3}")
+        endif()
+        set_tests_properties(updater PROPERTIES TIMEOUT 300)
+    endif()
 endif()
