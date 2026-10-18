@@ -49,4 +49,14 @@ if [[ ! -s tls/cert.pem ]]; then
     -days 30 -subj /CN=localhost 2>/dev/null
 fi
 cp -f clip8.mp4 tls/clip.mp4
+# Fuzz seeds (OBS_AIRPLAY_FUZZ): a few Annex B access units, behind the
+# byte that picks the codec (0: H.264, 1: HEVC)
+if [[ ! -s fuzz-h264.bin ]]; then
+  { printf '\x00'; "${FFMPEG}" -v error -i clip601.mp4 -frames:v 3 -c copy \
+      -bsf:v h264_mp4toannexb -f h264 -; } > fuzz-h264.bin
+fi
+if [[ ! -s fuzz-hevc.bin ]]; then
+  { printf '\x01'; "${FFMPEG}" -v error -f lavfi -i testsrc=size=320x240:rate=30 -frames:v 3 \
+      -c:v libx265 -x265-params log-level=error -f hevc -; } > fuzz-hevc.bin
+fi
 echo "fixtures ready in ${OUT}"

@@ -1,0 +1,3 @@
+GET /info HTTP/1.1
+X-Apple-ProtocolVersion: 1
+

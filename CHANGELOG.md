@@ -12,6 +12,8 @@ Security and network hardening:
 - Request bodies are limited (16 MiB, or 129 MiB for a reverse-fetch reply),
   with a 256 MiB shared budget and a 512 MiB spool budget; 413 when over.
 - A peer that stops reading cannot block the receiver; no SIGPIPE.
+- The request parser no longer reads past received data for the protocol
+  (found by fuzzing).
 - Only the device that started AirPlay video can control or end it.
 - The media trace redacts URL query strings and credentials.
 - Updates require an Ed25519 signature (`<zip>.sig`) and are re-checked in
@@ -37,4 +39,5 @@ Performance:
 
 Project:
 - GPL-3.0-or-later with all third-party licenses shipped; CTest runs every
-  smoke; CI on Apple silicon and Intel; presets for sanitizer builds.
+  smoke; CI on Apple silicon and Intel; presets for sanitizer builds; unit
+  tests and fuzz targets for network-facing parsers.

@@ -27,7 +27,7 @@ git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git
 brew install cmake pkg-config ffmpeg libplist openssl@3   # and OBS in /Applications
 cmake --preset release            # also: debug, asan, tsan
 cmake --build --preset release
-ctest --preset release            # 25 tests, about 40 s; generates its media first
+ctest --preset release            # 28 tests, about 40 s; generates its media first
 ```
 
 The plugin bundle is `build-release/obs-airplay.plugin`; copy it into
@@ -44,6 +44,21 @@ The smokes can also be run by hand (see the usage line of each):
   `--first-decode`: the mirror decoder in hardware and software.
 - `obs-airplay-updater-smoke BUNDLE SCRATCH`, `--verify-release ZIP`: the
   updater on scratch copies (absolute paths).
+- `obs-airplay-unit-tests`: the HLS playlist reader, the media port list and
+  the audio decoder, without network or OBS.
+
+`media-resilient-http` plays through `tests/truncating-server.py`, which cuts
+every response short, as some sender media servers do.
+
+Fuzzing: configure with `--preset asan -DOBS_AIRPLAY_FUZZ=ON` for
+`obs-airplay-fuzz-hls`, `-fuzz-h264` (mirror access units into the software
+decoder) and `-fuzz-http-request` (the fork's request parser), each with a
+short `fuzz-*` CTest run. With a clang that has libFuzzer's runtime (not
+Apple's) they are libFuzzer binaries; otherwise `tests/fuzz/fuzz-driver.cpp`
+runs seeded random mutations: `obs-airplay-fuzz-hls -runs=1000000 -seed=7
+tests/fuzz/seeds/master.m3u8`. UBSan reports `__builtin_ctzll(0)` in the
+bundled llhttp's NEON code; it is harmless on arm64 (the result is 64, as the
+code expects) and left as generated.
 
 Leak check: `MallocStackLogging=1 leaks --atExit -- <smoke> <args>`. Note that
 `leaks` exits 0 even when the program fails: take the result from a plain run.

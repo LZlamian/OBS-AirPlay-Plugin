@@ -1,0 +1,7 @@
+POST /play HTTP/1.1
+Content-Type: application/x-apple-binary-plist
+Content-Length: 11
+X-Apple-Session-ID: 6a1f3c0e-2b6e-4c2b-9d3f-0c7c3c9e1a2b
+User-Agent: AirPlay/890.79.5
+
+bplist00

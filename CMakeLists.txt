@@ -503,6 +503,58 @@ if(BUILD_TESTING)
     target_link_libraries(obs-airplay-protocol-smoke PRIVATE
         airplay
     )
+    # Fuzz targets for input from the network: HLS playlists, mirror access
+    # units, HTTP requests. With libFuzzer's runtime they are libFuzzer
+    # binaries; otherwise (Apple's clang) tests/fuzz/fuzz-driver.cpp runs
+    # seeded random mutations. Configure with the asan preset so bad
+    # inputs are caught.
+    option(OBS_AIRPLAY_FUZZ "Build the fuzz targets and register short fuzz runs" OFF)
+    if(OBS_AIRPLAY_FUZZ)
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_LINK_OPTIONS -fsanitize=fuzzer)
+        check_cxx_source_compiles(
+            "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }"
+            OBS_AIRPLAY_HAVE_LIBFUZZER)
+        unset(CMAKE_REQUIRED_LINK_OPTIONS)
+        function(obs_airplay_fuzz_target name)
+            add_executable(${name} ${ARGN})
+            if(OBS_AIRPLAY_HAVE_LIBFUZZER)
+                target_compile_options(${name} PRIVATE -fsanitize=fuzzer)
+                target_link_options(${name} PRIVATE -fsanitize=fuzzer)
+            else()
+                target_sources(${name} PRIVATE tests/fuzz/fuzz-driver.cpp)
+            endif()
+            target_compile_options(${name} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+        endfunction()
+
+        obs_airplay_fuzz_target(obs-airplay-fuzz-hls tests/fuzz/fuzz-hls.cpp src/hls-playlist.cpp)
+        target_include_directories(obs-airplay-fuzz-hls PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+        obs_airplay_fuzz_target(obs-airplay-fuzz-h264 tests/fuzz/fuzz-h264.cpp src/h264-decoder.cpp)
+        target_include_directories(obs-airplay-fuzz-h264 PRIVATE
+            ${CMAKE_SOURCE_DIR}/src ${OBS_INCLUDE_DIR} ${FFMPEG_INCLUDE_DIRS})
+        target_link_directories(obs-airplay-fuzz-h264 PRIVATE ${FFMPEG_LIBRARY_DIRS})
+        target_link_libraries(obs-airplay-fuzz-h264 PRIVATE ${FFMPEG_LIBRARIES})
+        if(APPLE)
+            target_link_libraries(obs-airplay-fuzz-h264 PRIVATE "-framework CoreVideo")
+        endif()
+
+        obs_airplay_fuzz_target(obs-airplay-fuzz-http-request tests/fuzz/fuzz-http-request.c)
+        target_include_directories(obs-airplay-fuzz-http-request PRIVATE ${CMAKE_SOURCE_DIR}/uxplay/lib)
+        target_link_libraries(obs-airplay-fuzz-http-request PRIVATE airplay)
+
+        set(FUZZ_SEEDS "${CMAKE_SOURCE_DIR}/tests/fuzz/seeds")
+        if(OBS_AIRPLAY_HAVE_LIBFUZZER)
+            set(FUZZ_RUNS -runs=20000)
+        else()
+            set(FUZZ_RUNS -runs=20000 -seed=1)
+        endif()
+        add_test(NAME fuzz-hls COMMAND obs-airplay-fuzz-hls ${FUZZ_RUNS} "${FUZZ_SEEDS}/master.m3u8")
+        add_test(NAME fuzz-http-request COMMAND obs-airplay-fuzz-http-request ${FUZZ_RUNS}
+                 "${FUZZ_SEEDS}/play-request.bin" "${FUZZ_SEEDS}/info-request.bin")
+        set_tests_properties(fuzz-hls fuzz-http-request PROPERTIES TIMEOUT 300)
+    endif()
+
     # ---- CTest: every smoke, with media generated at test time ----------
     add_test(NAME unit COMMAND obs-airplay-unit-tests)
     add_test(NAME protocol COMMAND obs-airplay-protocol-smoke)
@@ -571,6 +623,12 @@ if(BUILD_TESTING)
                     "${OBS_AIRPLAY_FIXTURES}/clip709.mp4")
         set_tests_properties(decoder decoder-two-au decoder-colorspace PROPERTIES
             FIXTURES_REQUIRED media TIMEOUT 300)
+        if(OBS_AIRPLAY_FUZZ)
+            add_test(NAME fuzz-h264
+                COMMAND obs-airplay-fuzz-h264 -runs=3000 "${OBS_AIRPLAY_FIXTURES}/fuzz-h264.bin"
+                        "${OBS_AIRPLAY_FIXTURES}/fuzz-hevc.bin")
+            set_tests_properties(fuzz-h264 PROPERTIES FIXTURES_REQUIRED media TIMEOUT 600)
+        endif()
     else()
         message(WARNING "ffmpeg not found: media and decoder tests are not registered")
     endif()
