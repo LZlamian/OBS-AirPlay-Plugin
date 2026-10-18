@@ -2,7 +2,7 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
-## Unreleased
+## 2.6.0 (2026-10-18)
 
 Security and network hardening:
 - AirPlay video URLs are checked: no loopback, link-local (except the sender),

@@ -4,10 +4,10 @@ A native macOS plugin for OBS Studio: your Mac appears as an AirPlay receiver,
 and an iPhone, iPad or Mac that mirrors its screen to it, or sends a video with
 AirPlay, appears in OBS as a source.
 
-Current release: **v2.5.2**, a security and stability hotfix. v2.5.1 and earlier
-can be crashed by a single request from the local network, so please update
-([release notes](docs/releases/RELEASE_NOTES_v2.5.2.md)). Changes since then are
-in the [changelog](CHANGELOG.md).
+Current release: **v2.6.0**: network hardening, signed updates, and faster,
+lighter mirroring and AirPlay video ([release notes](docs/releases/RELEASE_NOTES_v2.6.0.md),
+[changelog](CHANGELOG.md)). v2.5.1 and earlier can be crashed by a single
+request from the local network, so please update.
 
 ## Features
 
