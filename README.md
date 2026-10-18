@@ -13,7 +13,7 @@ request from the local network, so please update.
 
 - ✅ Native Bonjour/mDNS advertising (shows up in iOS Screen Mirroring)
 - ✅ AirPlay protocol support
-- ✅ **Safari Media AirPlay** — play website MP4 and HLS video directly in OBS (turn on under **AirPlay video** in the source properties; off by default)
+- ✅ **Safari Media AirPlay** — play website MP4 and HLS video directly in OBS (set **AirPlay video** to **From any web address** in the source properties; by default only video from the sending device plays)
 - ✅ **Page-local video support** — Safari `blob:` MP4 media is fetched over AirPlay's reverse channel
 - ✅ **iOS AirPlay video from native apps** — AVPlayer local-file playback (`mediaType=file`) is fetched from the sender's media server, with play/pause, seek, and item switches
 - ✅ **Sender-local media support** — stateful `file:` and `blob:` media URLs are fetched over AirPlay's reverse channel, including senders that establish `/reverse` after `/play`
@@ -149,18 +149,21 @@ All AirPlay sources share these settings (there is one receiver per OBS):
 - **Status**: what the receiver is doing, and why it is not working when it is
   not (for example, both ports in use), and the last AirPlay video it refused
   and why.
-- **AirPlay video**: AirPlay video (the AirPlay button in Safari, YouTube and
-  other apps) hands OBS a web address that this Mac then downloads from.
-  Screen mirroring is not affected by this setting.
-  - **Off (screen mirroring only)** (the default): every AirPlay video is
-    refused; the device then plays the video itself or shows an error.
-  - **From any web address**: videos from websites play, as on an Apple TV.
-    Private LAN addresses and internet hosts on web ports are allowed.
-  - **Only from the sending device**: only video the device serves from its
-    own address plays (its own files, video local to the page). Links to
-    other hosts, redirects to them and HLS playlists that point at them are
-    refused, so apps that stream from a website (YouTube, most video sites)
-    will not play.
+- **AirPlay video**: when you AirPlay a video (the AirPlay button in Safari,
+  YouTube and other apps, rather than screen mirroring), the device sends
+  this Mac an address and the Mac downloads the video from there. Screen
+  mirroring is not affected by this setting.
+  - **Only from the sending device (no internet downloads)** (the default):
+    the Mac downloads only from the iPhone, iPad or Mac that sent the video,
+    never from the internet. Videos stored on the device or playing inside a
+    page work. Links to other hosts, redirects to them and HLS playlists that
+    point at them are refused, so video from websites (YouTube, most video
+    sites) does not play.
+  - **From any web address (downloads from the internet)**: website video
+    plays too, as on an Apple TV. Private LAN addresses and internet hosts on
+    web ports are allowed.
+  - **Off (screen mirroring only)**: every AirPlay video is refused; the
+    device then plays the video itself or shows an error.
 
   Any device on the network can send AirPlay video without a password; each
   refusal is logged with its reason.

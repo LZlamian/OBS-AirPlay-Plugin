@@ -31,9 +31,11 @@ ModuleSettings module_settings_load(bool* found)
     settings.follow_sender_clock = obs_data_get_bool(data, "follow_sender_clock");
     settings.log_latency_telemetry = obs_data_get_bool(data, "log_latency_telemetry");
     settings.allow_self_signed_media = obs_data_get_bool(data, "allow_self_signed_media");
-    settings.accept_airplay_video = obs_data_has_user_value(data, "accept_airplay_video") &&
+    // Unsaved: AirPlay video only from the sending device.
+    settings.accept_airplay_video = !obs_data_has_user_value(data, "accept_airplay_video") ||
                                     obs_data_get_bool(data, "accept_airplay_video");
-    settings.media_sender_only = obs_data_get_bool(data, "media_sender_only");
+    settings.media_sender_only = !obs_data_has_user_value(data, "media_sender_only") ||
+                                 obs_data_get_bool(data, "media_sender_only");
     settings.check_for_updates = !obs_data_has_user_value(data, "check_for_updates") ||
                                  obs_data_get_bool(data, "check_for_updates");
     obs_data_release(data);
