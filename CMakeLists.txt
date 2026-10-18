@@ -345,10 +345,50 @@ if(APPLE)
     find_library(COCOA_LIBRARY Cocoa REQUIRED)
     find_library(CORE_BLUETOOTH_LIBRARY CoreBluetooth REQUIRED)
 
+    # Update signatures are checked with CryptoKit, which has only a Swift
+    # API. The one Swift file is compiled to an object here so any generator
+    # (including Unix Makefiles) can link it; the Swift runtime is part of
+    # macOS 12.
+    if(CMAKE_OSX_ARCHITECTURES)
+        list(LENGTH CMAKE_OSX_ARCHITECTURES OBS_AIRPLAY_ARCH_COUNT)
+        if(OBS_AIRPLAY_ARCH_COUNT GREATER 1)
+            message(FATAL_ERROR "Build one architecture at a time (CMAKE_OSX_ARCHITECTURES)")
+        endif()
+        set(OBS_AIRPLAY_SWIFT_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+    else()
+        set(OBS_AIRPLAY_SWIFT_ARCH "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif()
+    find_program(XCRUN xcrun REQUIRED)
+    set(OBS_AIRPLAY_SIGNATURE_OBJECT "${CMAKE_BINARY_DIR}/update-signature.o")
+    add_custom_command(
+        OUTPUT "${OBS_AIRPLAY_SIGNATURE_OBJECT}"
+        COMMAND ${XCRUN} swiftc -parse-as-library -O -whole-module-optimization
+                -target "${OBS_AIRPLAY_SWIFT_ARCH}-apple-macos${CMAKE_OSX_DEPLOYMENT_TARGET}"
+                -module-name OBSAirPlayUpdateSignature
+                -emit-object "${CMAKE_SOURCE_DIR}/src/update-signature.swift"
+                -o "${OBS_AIRPLAY_SIGNATURE_OBJECT}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/src/update-signature.swift"
+        COMMENT "Compiling update-signature.swift"
+        VERBATIM
+    )
+    set_source_files_properties("${OBS_AIRPLAY_SIGNATURE_OBJECT}" PROPERTIES
+        EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    execute_process(COMMAND ${XCRUN} --show-sdk-path
+                    OUTPUT_VARIABLE OBS_AIRPLAY_SDK_PATH OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND ${XCRUN} -f swiftc
+                    OUTPUT_VARIABLE OBS_AIRPLAY_SWIFTC OUTPUT_STRIP_TRAILING_WHITESPACE)
+    get_filename_component(OBS_AIRPLAY_SWIFT_TOOLCHAIN "${OBS_AIRPLAY_SWIFTC}" DIRECTORY)
+    set(OBS_AIRPLAY_SWIFT_LINK_OPTIONS
+        "-L${OBS_AIRPLAY_SDK_PATH}/usr/lib/swift"
+        "-L${OBS_AIRPLAY_SWIFT_TOOLCHAIN}/../lib/swift/macosx"
+        "-Wl,-rpath,/usr/lib/swift")
+
     add_executable(obs-airplay-ble-discovery MACOSX_BUNDLE
         src/airplay-ble-discovery.mm
         src/plugin-updater.mm
+        "${OBS_AIRPLAY_SIGNATURE_OBJECT}"
     )
+    target_link_options(obs-airplay-ble-discovery PRIVATE ${OBS_AIRPLAY_SWIFT_LINK_OPTIONS})
     target_compile_definitions(obs-airplay-ble-discovery PRIVATE
         PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
     )
@@ -487,7 +527,9 @@ if(BUILD_TESTING)
         add_executable(obs-airplay-updater-smoke
             tests/updater-smoke.mm
             src/plugin-updater.mm
+            "${OBS_AIRPLAY_SIGNATURE_OBJECT}"
         )
+        target_link_options(obs-airplay-updater-smoke PRIVATE ${OBS_AIRPLAY_SWIFT_LINK_OPTIONS})
         target_include_directories(obs-airplay-updater-smoke PRIVATE
             ${CMAKE_SOURCE_DIR}/src
         )

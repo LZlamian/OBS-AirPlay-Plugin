@@ -371,6 +371,17 @@ rm -f "${DIST_DIR}/${ZIP_NAME}"
   /usr/bin/ditto -c -k --norsrc --keepParent "${PLUGIN_NAME}" "${DIST_DIR}/${ZIP_NAME}"
 )
 
+# The self-updater (v2.6.0+) installs only a zip with a valid <zip>.sig.
+SIGNING_KEY="${OBS_AIRPLAY_SIGNING_KEY:-${HOME}/.obs-airplay-release-signing/ed25519.pem}"
+rm -f "${DIST_DIR}/${ZIP_NAME}.sig"
+if [[ -f "${SIGNING_KEY}" ]]; then
+  echo "==> Signing zip for the self-updater"
+  OBS_AIRPLAY_SIGNING_KEY="${SIGNING_KEY}" "${ROOT_DIR}/scripts/sign-release.sh" "${DIST_DIR}/${ZIP_NAME}"
+else
+  echo "warning: no signing key at ${SIGNING_KEY}; the zip is unsigned and the"
+  echo "         self-updater in v2.6.0 and later will not install it"
+fi
+
 echo "==> Creating pkg staging layout"
 rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}${INSTALL_BASE}"
@@ -442,6 +453,7 @@ fi
 echo
 echo "Artifacts created:"
 echo "  ${DIST_DIR}/${ZIP_NAME}"
+[[ -f "${DIST_DIR}/${ZIP_NAME}.sig" ]] && echo "  ${DIST_DIR}/${ZIP_NAME}.sig  (upload with the zip)"
 echo "  ${DIST_DIR}/${PKG_NAME}"
 echo
 echo "Install notes:"

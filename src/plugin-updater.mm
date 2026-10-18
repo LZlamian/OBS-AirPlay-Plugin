@@ -2,6 +2,16 @@
 
 #import <CommonCrypto/CommonDigest.h>
 
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+// update-signature.swift (CryptoKit)
+extern "C" int obs_airplay_ed25519_verify(const uint8_t *public_key, const uint8_t *message,
+                                          long message_length, const uint8_t *signature);
+
 NSString *const OBSAirPlayUpdaterErrorDomain = @"com.lzlamian.obs-airplay.updater";
 
 @implementation OBSAirPlayReleaseAsset
@@ -14,8 +24,22 @@ NSString *const kPluginBundleName = @"obs-airplay.plugin";
 // and not a "*.plugin" entry, so OBS never tries to load it.
 NSString *const kStagingFolderName = @".obs-airplay.update";
 NSString *const kIncomingFolderName = @"incoming";
-NSString *const kPreviousBundleName = @"previous.plugin";
+// The version an update replaced, kept until a newer plugin has started.
+NSString *const kPreviousFolderName = @".obs-airplay.previous";
+NSString *const kLockName = @".obs-airplay.update.lock";
+NSString *const kDownloadPathPrefix = @"/LZlamian/OBS-AirPlay-Plugin/releases/download/";
 constexpr unsigned long long kMaxUpdateSize = 200ull * 1024 * 1024;
+constexpr unsigned long long kMaxSignatureSize = 4096;
+
+// Ed25519 public keys whose signatures make a release installable. The
+// private key is held by the maintainer outside the repository
+// (scripts/sign-release.sh). To rotate, ship a release signed by the old
+// key that lists both, then drop the old one a release later.
+const char *const kTrustedUpdateKeys[] = {
+    "ca4d3512515ca43033f9994d36fe58c0dac5da39ede4f645a375f740310372af",
+};
+NSArray<NSData *> *gTrustedKeysForTesting = nil;
+NSString *gUpdateRootForTesting = nil;
 
 NSError *updaterError(NSString *description)
 {
@@ -117,6 +141,105 @@ NSURL *stagedBundle(NSURL *pluginURL)
                                                      isDirectory:YES];
 }
 
+NSURL *previousBundle(NSURL *pluginURL)
+{
+    return [[[pluginURL URLByDeletingLastPathComponent]
+        URLByAppendingPathComponent:kPreviousFolderName isDirectory:YES]
+        URLByAppendingPathComponent:kPluginBundleName isDirectory:YES];
+}
+
+NSData *dataFromHex(NSString *hex)
+{
+    if (hex.length % 2)
+        return nil;
+    NSMutableData *data = [NSMutableData dataWithCapacity:hex.length / 2];
+    for (NSUInteger i = 0; i < hex.length; i += 2) {
+        unsigned int byte = 0;
+        NSScanner *scanner = [NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(i, 2)]];
+        if (![scanner scanHexInt:&byte])
+            return nil;
+        const unsigned char value = (unsigned char)byte;
+        [data appendBytes:&value length:1];
+    }
+    return data;
+}
+
+NSArray<NSData *> *trustedKeys()
+{
+    if (gTrustedKeysForTesting)
+        return gTrustedKeysForTesting;
+    NSMutableArray<NSData *> *keys = [NSMutableArray array];
+    for (const char *hex : kTrustedUpdateKeys) {
+        NSData *key = dataFromHex(@(hex));
+        if (key.length == 32)
+            [keys addObject:key];
+    }
+    return keys;
+}
+
+bool isProjectDownloadURL(NSURL *url)
+{
+    return [url.scheme isEqualToString:@"https"] && [url.host isEqualToString:@"github.com"] &&
+           [url.path hasPrefix:kDownloadPathPrefix] && !url.query && !url.user;
+}
+
+// A folder only this user can read or change.
+bool isPrivateFolder(NSURL *folder)
+{
+    struct stat info = {};
+    return lstat(folder.fileSystemRepresentation, &info) == 0 && S_ISDIR(info.st_mode) &&
+           info.st_uid == getuid() && (info.st_mode & 077) == 0;
+}
+
+bool ownedByUser(NSURL *url)
+{
+    struct stat info = {};
+    return lstat(url.fileSystemRepresentation, &info) == 0 && info.st_uid == getuid();
+}
+
+// O_EXCL lock file beside the plugin, held while staging or swapping, so two
+// helpers (two OBS instances, or a crash and relaunch) never interleave. A
+// lock whose process has gone is taken over.
+class UpdateLock {
+public:
+    explicit UpdateLock(NSURL *pluginURL)
+        : m_path([[pluginURL URLByDeletingLastPathComponent]
+              URLByAppendingPathComponent:kLockName].path)
+    {
+        for (int attempt = 0; attempt < 2 && m_fd < 0; ++attempt) {
+            m_fd = open(m_path.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW,
+                        0600);
+            if (m_fd >= 0) {
+                const char *pid = [NSString stringWithFormat:@"%d\n", getpid()].UTF8String;
+                (void)write(m_fd, pid, strlen(pid));
+                return;
+            }
+            if (errno != EEXIST)
+                return;
+            NSString *text = [NSString stringWithContentsOfFile:m_path encoding:NSUTF8StringEncoding
+                                                          error:nil];
+            const pid_t owner = (pid_t)text.intValue;
+            if (owner > 0 && (kill(owner, 0) == 0 || errno != ESRCH))
+                return; // held by a live process
+            unlink(m_path.fileSystemRepresentation);
+        }
+    }
+    ~UpdateLock()
+    {
+        if (m_fd >= 0) {
+            close(m_fd);
+            unlink(m_path.fileSystemRepresentation);
+        }
+    }
+    UpdateLock(const UpdateLock &) = delete;
+    UpdateLock &operator=(const UpdateLock &) = delete;
+    bool held() const { return m_fd >= 0; }
+
+private:
+    NSString *m_path;
+    int m_fd = -1;
+};
+
 NSDictionary *infoDictionary(NSURL *bundleURL)
 {
     NSURL *plist = [bundleURL URLByAppendingPathComponent:@"Contents/Info.plist"];
@@ -130,10 +253,10 @@ NSString *infoString(NSURL *bundleURL, NSString *key)
     return [value isKindOfClass:[NSString class]] ? value : nil;
 }
 
-// The staged bundle must be this plugin, at the announced version, able to
+// The staged bundle must be this plugin, at the expected version, able to
 // run here, and exactly as it was signed (an ad-hoc seal still shows whether
 // any file in the bundle was changed, added or removed after packaging).
-bool checkStagedBundle(NSURL *staged, OBSAirPlayReleaseAsset *asset, NSURL *pluginURL,
+bool checkStagedBundle(NSURL *staged, NSString *expectedVersion, NSURL *pluginURL,
                        NSError **error)
 {
     NSString *identifier = infoString(staged, @"CFBundleIdentifier");
@@ -142,7 +265,7 @@ bool checkStagedBundle(NSURL *staged, OBSAirPlayReleaseAsset *asset, NSURL *plug
         return fail(error, @"The download is not the OBS AirPlay plugin.");
 
     NSString *version = plainVersion(infoString(staged, @"CFBundleShortVersionString"));
-    if (!version || ![version isEqualToString:asset.version])
+    if (!version || ![version isEqualToString:expectedVersion])
         return fail(error, @"The download is not the announced version.");
 
     NSString *minimumSystem = infoString(staged, @"LSMinimumSystemVersion");
@@ -172,6 +295,52 @@ bool checkStagedBundle(NSURL *staged, OBSAirPlayReleaseAsset *asset, NSURL *plug
 }
 
 } // namespace
+
+NSString *OBSAirPlayUpdateSignedMessage(OBSAirPlayReleaseAsset *asset)
+{
+    return [NSString stringWithFormat:
+        @"obs-airplay-update-v1\nname=%@\nversion=%@\nsize=%llu\nsha256=%@\n",
+        asset.name, asset.version, asset.size, asset.sha256];
+}
+
+// The .sig asset is two lines:
+//   obs-airplay-update-signature-v1
+//   sig: <base64 Ed25519 signature of OBSAirPlayUpdateSignedMessage>
+BOOL OBSAirPlayVerifyUpdateSignature(OBSAirPlayReleaseAsset *asset)
+{
+    if (!asset.signature || asset.signature.length > kMaxSignatureSize || !asset.name ||
+        !asset.version || !asset.sha256)
+        return NO;
+    NSString *text = [[NSString alloc] initWithData:asset.signature encoding:NSUTF8StringEncoding];
+    NSArray<NSString *> *lines = [text componentsSeparatedByCharactersInSet:
+        [NSCharacterSet newlineCharacterSet]];
+    if (lines.count < 2 || ![lines[0] isEqualToString:@"obs-airplay-update-signature-v1"] ||
+        ![lines[1] hasPrefix:@"sig: "])
+        return NO;
+    NSData *signature = [[NSData alloc] initWithBase64EncodedString:[lines[1] substringFromIndex:5]
+                                                            options:0];
+    if (signature.length != 64)
+        return NO;
+    NSData *message = [OBSAirPlayUpdateSignedMessage(asset) dataUsingEncoding:NSUTF8StringEncoding];
+    for (NSData *key in trustedKeys()) {
+        if (obs_airplay_ed25519_verify(static_cast<const uint8_t *>(key.bytes),
+                                       static_cast<const uint8_t *>(message.bytes),
+                                       (long)message.length,
+                                       static_cast<const uint8_t *>(signature.bytes)))
+            return YES;
+    }
+    return NO;
+}
+
+void OBSAirPlaySetTrustedUpdateKeysForTesting(NSArray<NSData *> *keys)
+{
+    gTrustedKeysForTesting = [keys copy];
+}
+
+void OBSAirPlaySetUpdateRootForTesting(NSString *root)
+{
+    gUpdateRootForTesting = [root copy];
+}
 
 NSString *OBSAirPlayUpdaterArchitecture(void)
 {
@@ -209,6 +378,23 @@ OBSAirPlayReleaseAsset *OBSAirPlayInstallableAsset(NSDictionary *release, NSStri
 
     NSString *expectedName = [NSString stringWithFormat:
         @"obs-airplay-v%@-macos-%@.zip", version, architecture];
+    NSString *signatureName = [expectedName stringByAppendingString:@".sig"];
+    NSURL *signatureURL = nil;
+    for (NSDictionary *entry in assets) {
+        if (![entry isKindOfClass:[NSDictionary class]] ||
+            ![entry[@"name"] isKindOfClass:[NSString class]] ||
+            ![entry[@"name"] isEqualToString:signatureName] ||
+            ![entry[@"browser_download_url"] isKindOfClass:[NSString class]] ||
+            ![entry[@"size"] isKindOfClass:[NSNumber class]])
+            continue;
+        NSURL *url = [NSURL URLWithString:entry[@"browser_download_url"]];
+        if (isProjectDownloadURL(url) && [entry[@"size"] unsignedLongLongValue] > 0 &&
+            [entry[@"size"] unsignedLongLongValue] <= kMaxSignatureSize)
+            signatureURL = url;
+    }
+    // Releases from 2.6.0 on are signed; an unsigned one is not installed.
+    if (!signatureURL)
+        return nil;
     for (NSDictionary *entry in assets) {
         if (![entry isKindOfClass:[NSDictionary class]] ||
             ![entry[@"name"] isKindOfClass:[NSString class]] ||
@@ -224,7 +410,7 @@ OBSAirPlayReleaseAsset *OBSAirPlayInstallableAsset(NSDictionary *release, NSStri
             return nil;
 
         NSURL *url = [NSURL URLWithString:address];
-        if (![url.scheme isEqualToString:@"https"] || ![url.host isEqualToString:@"github.com"])
+        if (!isProjectDownloadURL(url))
             return nil;
 
         NSString *prefix = @"sha256:";
@@ -238,6 +424,8 @@ OBSAirPlayReleaseAsset *OBSAirPlayInstallableAsset(NSDictionary *release, NSStri
         asset.downloadURL = url;
         asset.sha256 = [digest substringFromIndex:prefix.length].lowercaseString;
         asset.size = size.unsignedLongLongValue;
+        asset.name = expectedName;
+        asset.signatureURL = signatureURL;
         return asset;
     }
     return nil;
@@ -256,9 +444,19 @@ NSURL *OBSAirPlayPluginURLForHelper(NSURL *helperBundleURL)
 
 BOOL OBSAirPlayCanReplacePlugin(NSURL *pluginURL)
 {
+    // Only a plugin in this user's own folder: one in a shared location such
+    // as /Library may be writable by others, who could plant the staged
+    // update another user's helper installs.
+    NSString *root = gUpdateRootForTesting ?: NSHomeDirectory();
+    NSString *resolvedRoot = [root stringByResolvingSymlinksInPath];
+    NSString *resolvedPlugin = pluginURL.URLByResolvingSymlinksInPath.path;
+    if (![resolvedPlugin hasPrefix:[resolvedRoot stringByAppendingString:@"/"]])
+        return NO;
+    NSURL *plugins = pluginURL.URLByDeletingLastPathComponent;
     NSFileManager *files = [NSFileManager defaultManager];
-    return [files isWritableFileAtPath:pluginURL.path] &&
-           [files isWritableFileAtPath:pluginURL.URLByDeletingLastPathComponent.path];
+    return ownedByUser(pluginURL) && ownedByUser(plugins) &&
+           [files isWritableFileAtPath:pluginURL.path] &&
+           [files isWritableFileAtPath:plugins.path];
 }
 
 NSURL *OBSAirPlayStageUpdate(NSURL *zipURL, OBSAirPlayReleaseAsset *asset, NSURL *pluginURL,
@@ -270,15 +468,30 @@ NSURL *OBSAirPlayStageUpdate(NSURL *zipURL, OBSAirPlayReleaseAsset *asset, NSURL
         fail(error, @"The download does not match the published release.");
         return nil;
     }
+    if (!OBSAirPlayVerifyUpdateSignature(asset)) {
+        fail(error, @"The download is not signed by the OBS AirPlay project.");
+        return nil;
+    }
 
+    UpdateLock lock(pluginURL);
+    if (!lock.held()) {
+        fail(error, @"Another update is being prepared or installed.");
+        return nil;
+    }
     NSFileManager *files = [NSFileManager defaultManager];
     NSURL *folder = stagingFolder(pluginURL);
     [files removeItemAtURL:folder error:nil];
     NSError *folderError = nil;
-    if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO attributes:nil
+    if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO
+                          attributes:@{NSFilePosixPermissions : @0700}
                                error:&folderError]) {
         if (error)
             *error = folderError;
+        return nil;
+    }
+    if (!isPrivateFolder(folder)) {
+        [files removeItemAtURL:folder error:nil];
+        fail(error, @"The update folder could not be made private.");
         return nil;
     }
 
@@ -301,7 +514,7 @@ NSURL *OBSAirPlayStageUpdate(NSURL *zipURL, OBSAirPlayReleaseAsset *asset, NSURL
         if (!ok)
             fail(error, @"The download is not the OBS AirPlay plugin.");
         else
-            ok = checkStagedBundle(unpacked, asset, pluginURL, error);
+            ok = checkStagedBundle(unpacked, asset.version, pluginURL, error);
     }
     if (ok && ![files moveItemAtURL:unpacked toURL:staged error:nil])
         ok = fail(error, @"The update could not be prepared.");
@@ -314,8 +527,10 @@ NSURL *OBSAirPlayStageUpdate(NSURL *zipURL, OBSAirPlayReleaseAsset *asset, NSURL
     return staged;
 }
 
-void OBSAirPlayDownloadAndStageUpdate(OBSAirPlayReleaseAsset *asset, NSURL *pluginURL,
-                                      NSString *userAgent, void (^completion)(NSError *error))
+namespace {
+
+void downloadAndStage(OBSAirPlayReleaseAsset *asset, NSURL *pluginURL, NSString *userAgent,
+                      void (^completion)(NSError *error))
 {
     NSMutableURLRequest *request = [NSMutableURLRequest
         requestWithURL:asset.downloadURL
@@ -339,6 +554,40 @@ void OBSAirPlayDownloadAndStageUpdate(OBSAirPlayReleaseAsset *asset, NSURL *plug
     [task resume];
 }
 
+} // namespace
+
+void OBSAirPlayDownloadAndStageUpdate(OBSAirPlayReleaseAsset *asset, NSURL *pluginURL,
+                                      NSString *userAgent, void (^completion)(NSError *error))
+{
+    if (!asset.signatureURL) {
+        completion(updaterError(@"The release is not signed."));
+        return;
+    }
+    // The signature first: it is small, and without it the zip is useless.
+    NSMutableURLRequest *request = [NSMutableURLRequest
+        requestWithURL:asset.signatureURL
+           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+       timeoutInterval:30.0];
+    [request setValue:userAgent forHTTPHeaderField:@"User-Agent"];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:request
+          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        if (error || ![httpResponse isKindOfClass:[NSHTTPURLResponse class]] ||
+            httpResponse.statusCode != 200 || !data || data.length > kMaxSignatureSize) {
+            completion(error ?: updaterError(@"The release signature could not be downloaded."));
+            return;
+        }
+        asset.signature = data;
+        if (!OBSAirPlayVerifyUpdateSignature(asset)) {
+            completion(updaterError(@"The release is not signed by the OBS AirPlay project."));
+            return;
+        }
+        downloadAndStage(asset, pluginURL, userAgent, completion);
+    }];
+    [task resume];
+}
+
 NSString *OBSAirPlayStagedUpdateVersion(NSURL *pluginURL)
 {
     return plainVersion(infoString(stagedBundle(pluginURL), @"CFBundleShortVersionString"));
@@ -351,32 +600,66 @@ void OBSAirPlayDiscardStagedUpdate(NSURL *pluginURL)
 
 BOOL OBSAirPlayInstallStagedUpdate(NSURL *pluginURL, NSError **error)
 {
+    UpdateLock lock(pluginURL);
+    if (!lock.held())
+        return fail(error, @"Another update is being installed.");
+
     NSFileManager *files = [NSFileManager defaultManager];
     NSURL *staged = stagedBundle(pluginURL);
-    if (!OBSAirPlayStagedUpdateVersion(pluginURL))
+    NSString *stagedVersion = OBSAirPlayStagedUpdateVersion(pluginURL);
+    if (!stagedVersion)
         return fail(error, @"No update is waiting to be installed.");
 
-    // The seal is checked again: the update may have waited here for days.
-    if (!runTool(@"/usr/bin/codesign", @[@"--verify", @"--deep", @"--strict", staged.path])) {
+    // Everything is checked again: the update may have waited here for days,
+    // and only a folder this user alone controls is trusted.
+    NSString *installedVersion = infoString(pluginURL, @"CFBundleShortVersionString");
+    if (!isPrivateFolder(stagingFolder(pluginURL)) || !OBSAirPlayCanReplacePlugin(pluginURL) ||
+        !OBSAirPlayIsNewerVersion(stagedVersion, installedVersion) ||
+        !checkStagedBundle(staged, stagedVersion, pluginURL, error)) {
         OBSAirPlayDiscardStagedUpdate(pluginURL);
-        return fail(error, @"The update is damaged.");
+        if (error && !*error)
+            *error = updaterError(@"The waiting update cannot be installed.");
+        return NO;
     }
 
-    NSURL *previous = [stagingFolder(pluginURL) URLByAppendingPathComponent:kPreviousBundleName
-                                                                isDirectory:YES];
-    [files removeItemAtURL:previous error:nil];
+    // The replaced version stays beside the plugin until a newer one has
+    // started (OBSAirPlayForgetPreviousVersion).
+    NSURL *previous = previousBundle(pluginURL);
+    NSURL *previousFolder = previous.URLByDeletingLastPathComponent;
+    [files removeItemAtURL:previousFolder error:nil];
     NSError *moveError = nil;
-    if (![files moveItemAtURL:pluginURL toURL:previous error:&moveError]) {
+    if (![files createDirectoryAtURL:previousFolder withIntermediateDirectories:NO
+                          attributes:@{NSFilePosixPermissions : @0700}
+                               error:&moveError] ||
+        ![files moveItemAtURL:pluginURL toURL:previous error:&moveError]) {
+        [files removeItemAtURL:previousFolder error:nil];
         if (error)
             *error = moveError;
         return NO;
     }
     if (![files moveItemAtURL:staged toURL:pluginURL error:&moveError]) {
         [files moveItemAtURL:previous toURL:pluginURL error:nil];
+        [files removeItemAtURL:previousFolder error:nil];
         if (error)
             *error = moveError;
         return NO;
     }
     OBSAirPlayDiscardStagedUpdate(pluginURL);
     return YES;
+}
+
+NSString *OBSAirPlayPreviousVersion(NSURL *pluginURL)
+{
+    return plainVersion(infoString(previousBundle(pluginURL), @"CFBundleShortVersionString"));
+}
+
+void OBSAirPlayForgetPreviousVersion(NSURL *pluginURL)
+{
+    NSString *previous = OBSAirPlayPreviousVersion(pluginURL);
+    NSString *current = infoString(pluginURL, @"CFBundleShortVersionString");
+    // Only once the plugin that replaced it is the one running.
+    if (previous && OBSAirPlayIsNewerVersion(current, previous))
+        [[NSFileManager defaultManager]
+            removeItemAtURL:previousBundle(pluginURL).URLByDeletingLastPathComponent
+                      error:nil];
 }

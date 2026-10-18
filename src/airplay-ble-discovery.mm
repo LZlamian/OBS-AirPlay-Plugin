@@ -292,6 +292,10 @@ int main(int argc, const char *argv[])
         if (pluginURL && OBSAirPlayCanReplacePlugin(pluginURL))
             gPluginURL = pluginURL;
         tidyStagedUpdate();
+        // This helper runs because the plugin loaded: the version an update
+        // replaced is no longer needed for a rollback.
+        if (gPluginURL)
+            OBSAirPlayForgetPreviousVersion(gPluginURL);
         gAlertIcon = alertIcon(parentPID);
 
         __strong AirPlayBLEDelegate *delegate = [[AirPlayBLEDelegate alloc] init];
