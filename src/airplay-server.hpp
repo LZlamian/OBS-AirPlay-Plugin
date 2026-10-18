@@ -8,7 +8,10 @@
 #include "media-player.hpp"
 #include <memory>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 #include <cstddef>
@@ -51,13 +54,37 @@ public:
     std::string getMACAddress() const { return m_mac_address; }
     void setMACAddress(const std::string& mac) { m_mac_address = mac; }
 
-    // Feed encoded video from UxPlay and output decoded frames to registered OBS sources.
+    // Feed encoded video from UxPlay. The payload is copied and decoded on
+    // the server's own decode thread, so UxPlay's TCP receive thread never
+    // waits for a decoder or for OBS.
     void ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
     void ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts);
     void outputMediaVideoFrame(const MediaVideoFrame& decoded);
     void outputMediaAudioFrame(const MediaAudioFrame& decoded);
     
 private:
+    void decodeAndOutputVideo(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
+    void videoDecodeLoop();
+    void stopVideoThread();
+
+    // Compressed mirror payloads waiting for the decode thread, in order
+    // (every one is needed: a P-frame refers to the ones before it). If the
+    // decoder falls a second behind, the backlog is dropped and decoding
+    // resumes at the next keyframe.
+    struct PendingVideo {
+        std::vector<uint8_t> data;
+        uint64_t pts = 0;
+        bool is_h265 = false;
+    };
+    static constexpr size_t kMaxQueuedVideo = 60;
+    std::mutex m_video_queue_mutex;
+    std::condition_variable m_video_queue_cv;
+    std::deque<PendingVideo> m_video_queue;          // under m_video_queue_mutex
+    std::vector<std::vector<uint8_t>> m_spare_video_buffers;  // under m_video_queue_mutex
+    bool m_video_thread_quit = false;                // under m_video_queue_mutex
+    bool m_waiting_for_keyframe = false;             // under m_video_queue_mutex
+    std::thread m_video_thread;
+
     std::function<void()> m_mirror_frame_output_callback;
     // Registered sources (weak refs — do not prevent source destruction)
     std::mutex m_sources_mutex;

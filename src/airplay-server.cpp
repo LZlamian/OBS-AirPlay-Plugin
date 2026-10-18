@@ -18,11 +18,104 @@ AirPlayServer::AirPlayServer()
     m_h264_decoder = std::make_unique<H264Decoder>();
     m_h265_decoder = std::make_unique<H264Decoder>(AV_CODEC_ID_HEVC);
     m_audio_decoder = std::make_unique<AudioDecoder>();
+    m_video_thread = std::thread(&AirPlayServer::videoDecodeLoop, this);
 }
 
 AirPlayServer::~AirPlayServer()
 {
     stop();
+    stopVideoThread();
+}
+
+void AirPlayServer::stopVideoThread()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_video_queue_mutex);
+        m_video_thread_quit = true;
+    }
+    m_video_queue_cv.notify_all();
+    if (m_video_thread.joinable()) m_video_thread.join();
+}
+
+namespace {
+// A payload a decoder can start from: one with a sequence parameter set or
+// an IDR/IRAP picture.
+bool starts_decodable_stream(const uint8_t* data, size_t size, bool is_h265)
+{
+    for (size_t i = 0; i + 3 < size; ++i) {
+        if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1) continue;
+        const uint8_t header = data[i + 3];
+        if (is_h265) {
+            const int type = (header >> 1) & 0x3f;
+            if (type == 33 || (type >= 16 && type <= 21)) return true;  // SPS, IRAP
+            if (type < 32) return false;  // a non-IRAP slice comes first
+        } else {
+            const int type = header & 0x1f;
+            if (type == 7 || type == 5) return true;  // SPS, IDR
+            if (type >= 1 && type <= 4) return false;
+        }
+        i += 3;
+    }
+    return false;
+}
+} // namespace
+
+void AirPlayServer::videoDecodeLoop()
+{
+    std::unique_lock<std::mutex> lock(m_video_queue_mutex);
+    for (;;) {
+        m_video_queue_cv.wait(lock, [&] { return m_video_thread_quit || !m_video_queue.empty(); });
+        if (m_video_thread_quit) break;
+        PendingVideo pending = std::move(m_video_queue.front());
+        m_video_queue.pop_front();
+        lock.unlock();
+        decodeAndOutputVideo(pending.data.data(), pending.data.size(), pending.pts,
+                             pending.is_h265);
+        lock.lock();
+        // The buffer is used again for a later payload.
+        if (m_spare_video_buffers.size() < 4) {
+            pending.data.clear();
+            m_spare_video_buffers.push_back(std::move(pending.data));
+        }
+    }
+}
+
+void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)
+{
+    if (!data || size == 0) {
+        return;
+    }
+    const bool keyframe = starts_decodable_stream(data, size, is_h265);
+    {
+        std::lock_guard<std::mutex> lock(m_video_queue_mutex);
+        if (m_video_thread_quit) return;
+        if (m_video_queue.size() >= kMaxQueuedVideo && !m_waiting_for_keyframe) {
+            blog(LOG_WARNING, "[MIRROR] decoding fell %zu frames behind; dropping them and "
+                              "continuing at the next keyframe", m_video_queue.size());
+            for (PendingVideo& dropped : m_video_queue) {
+                if (m_spare_video_buffers.size() < 4) {
+                    dropped.data.clear();
+                    m_spare_video_buffers.push_back(std::move(dropped.data));
+                }
+            }
+            m_video_queue.clear();
+            m_waiting_for_keyframe = true;
+        }
+        if (m_waiting_for_keyframe) {
+            if (!keyframe) return;
+            m_waiting_for_keyframe = false;
+        }
+        PendingVideo pending;
+        if (!m_spare_video_buffers.empty()) {
+            pending.data = std::move(m_spare_video_buffers.back());
+            m_spare_video_buffers.pop_back();
+        }
+        pending.data.assign(data, data + size);
+        pending.pts = pts;
+        pending.is_h265 = is_h265;
+        m_video_queue.push_back(std::move(pending));
+    }
+    m_video_queue_cv.notify_one();
 }
 
 std::string AirPlayServer::generateMACAddress()
@@ -42,6 +135,12 @@ std::string AirPlayServer::generateMACAddress()
 
 void AirPlayServer::resetDecoders(bool clear_output, bool flush_decoders)
 {
+    if (flush_decoders) {
+        // Payloads of the stream that ended are not decoded any more.
+        std::lock_guard<std::mutex> queue_lock(m_video_queue_mutex);
+        m_video_queue.clear();
+        m_waiting_for_keyframe = false;
+    }
     std::lock_guard<std::mutex> lock(m_decoder_mutex);
     if (flush_decoders) {
         if (m_h264_decoder) m_h264_decoder->flush();
@@ -157,12 +256,9 @@ void AirPlayServer::unregisterSource(obs_source_t* source)
     }
 }
 
-void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265)
+void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint64_t pts,
+                                         bool is_h265)
 {
-    if (!data || size == 0) {
-        return;
-    }
-
     H264Decoder* decoder = is_h265 ? m_h265_decoder.get() : m_h264_decoder.get();
     if (!decoder) {
         static bool logged_decoder_missing = false;
