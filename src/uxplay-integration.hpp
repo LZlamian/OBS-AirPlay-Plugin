@@ -57,6 +57,15 @@ public:
     // Get the actual port UxPlay is running on
     uint16_t getActualPort() const { return m_actual_port; }
 
+    // Why start() failed, or what is wrong with the running receiver (not
+    // advertised); empty when all is well. For the source panel.
+    std::string lastError() const;
+    // "Waiting for a device", "Device connected", "Screen mirroring" or
+    // "Playing AirPlay video".
+    std::string connectionState() const;
+    // Called, from any thread, when connectionState() has changed.
+    void setStateChangedCallback(std::function<void()> callback);
+
     // Get the Public Key string from UxPlay
     std::string getPK() const;
     
@@ -135,4 +144,11 @@ private:
     void cancelDeferredClear();
     void deferredClearLoop();
     void stopDeferredClearThread();
+
+    mutable std::mutex m_status_mutex;   // leaf lock
+    std::string m_last_error;            // under m_status_mutex
+    std::string m_last_state;            // under m_status_mutex
+    std::function<void()> m_state_changed;  // under m_status_mutex
+    void setLastError(std::string error);
+    void notifyStateChanged();
 };

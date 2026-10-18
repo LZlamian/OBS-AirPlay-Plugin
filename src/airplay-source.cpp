@@ -115,14 +115,24 @@ obs_properties_t* airplay_source_get_properties(void* data)
         "Your device should appear in the screen mirroring list on iOS devices.",
         OBS_TEXT_INFO);
     
+    // Live state; the panel is refreshed when it changes.
     auto uxplay = get_uxplay_integration();
+    std::string server_info;
     if (uxplay && uxplay->isRunning()) {
-        std::string server_info = "Status: Running\n";
-        server_info += "Port: " + std::to_string(uxplay->getActualPort());
-        obs_properties_add_text(props, "server_info", server_info.c_str(), OBS_TEXT_INFO);
+        server_info = "Status: " + uxplay->connectionState() + " (port " +
+                      std::to_string(uxplay->getActualPort()) + ")";
     } else {
-        obs_properties_add_text(props, "server_info",
-            "Status: Server not running", OBS_TEXT_INFO);
+        server_info = "Status: Not running";
+    }
+    const std::string error = uxplay ? uxplay->lastError() : std::string();
+    if (!error.empty()) server_info += "\n" + error;
+    else if (!uxplay || !uxplay->isRunning()) server_info += "\nSee the OBS log for details.";
+    const std::string name_error = get_server_name_error();
+    if (!name_error.empty()) server_info += "\n" + name_error;
+    obs_property_t* status = obs_properties_add_text(props, "server_info", server_info.c_str(),
+                                                     OBS_TEXT_INFO);
+    if (!error.empty() || !name_error.empty()) {
+        obs_property_text_set_info_type(status, OBS_TEXT_INFO_WARNING);
     }
 
     obs_property_t* follow = obs_properties_add_bool(props, "follow_sender_clock",

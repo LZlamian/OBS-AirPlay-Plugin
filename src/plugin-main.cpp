@@ -7,6 +7,7 @@
 #include "media-player.hpp"
 #include "module-settings.hpp"
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <condition_variable>
@@ -41,6 +42,40 @@ static ModuleSettings g_module_settings;
 // False until settings.json exists or the first source's settings were taken.
 static bool g_module_settings_known = false;
 static std::string g_server_name_error;
+
+// Status thread: refreshes open AirPlay source panels after the receiver's
+// state changed (at most once a second, from a thread of its own, since the
+// change is reported on UxPlay's threads).
+static std::mutex              g_status_mutex;
+static std::condition_variable g_status_cv;
+static bool                    g_status_quit = false;
+static std::atomic<bool>       g_status_dirty{false};
+static std::thread             g_status_thread;
+
+static void refresh_airplay_source_panels()
+{
+    obs_enum_sources([](void*, obs_source_t* source) {
+        const char* id = obs_source_get_unversioned_id(source);
+        if (id && strcmp(id, "airplay_source") == 0) {
+            obs_source_update_properties(source);
+        }
+        return true;
+    }, nullptr);
+}
+
+static void status_thread_func()
+{
+    std::unique_lock<std::mutex> lock(g_status_mutex);
+    while (!g_status_quit) {
+        g_status_cv.wait_for(lock, std::chrono::seconds(1));
+        if (g_status_quit) break;
+        if (g_status_dirty.exchange(false)) {
+            lock.unlock();
+            refresh_airplay_source_panels();
+            lock.lock();
+        }
+    }
+}
 
 // Debounce: defer mDNS name updates until the user stops typing for 800ms.
 static std::mutex              g_debounce_mutex;
@@ -342,11 +377,9 @@ bool obs_module_load(void)
 
         // Start UxPlay integration for proper AirPlay protocol handling
         blog(LOG_INFO, "Starting UxPlay integration with MAC: %s", mac_address.c_str());
-        // AirServer starts an otherwise empty CoreBluetooth peripheral
-        // advertisement before any iPhone connection. Keep the equivalent
-        // discovery signal alive for the lifetime of this plugin.
-        start_airplay_ble_helper();
         g_uxplay_integration = std::make_shared<UxPlayIntegration>();
+        g_uxplay_integration->setStateChangedCallback([] { g_status_dirty.store(true); });
+        g_status_thread = std::thread(status_thread_func);
         std::string initial_name;
         {
             std::lock_guard<std::mutex> lock(g_server_name_mutex);
@@ -362,6 +395,11 @@ bool obs_module_load(void)
             return true;
         } else {
             blog(LOG_INFO, "UxPlay integration started successfully");
+
+            // AirServer starts an otherwise empty CoreBluetooth peripheral
+            // advertisement before any iPhone connection. Keep the
+            // equivalent discovery signal alive while the receiver runs.
+            start_airplay_ble_helper();
 
             g_uxplay_integration->setVideoCallback([](const uint8_t* data, size_t size, uint64_t pts, bool is_h265) {
                 if (!data || size == 0) {
@@ -430,6 +468,14 @@ void obs_module_unload(void)
     blog(LOG_INFO, "OBS AirPlay Plugin unloaded");
 
     stop_airplay_ble_helper();
+
+    {
+        std::lock_guard<std::mutex> lock(g_status_mutex);
+        g_status_quit = true;
+    }
+    g_status_cv.notify_all();
+    if (g_status_thread.joinable())
+        g_status_thread.join();
 
     // Shut down the debounce thread first so it doesn't race with cleanup below.
     {

@@ -141,7 +141,9 @@ void UxPlayIntegration::scheduleDeferredClear(const char* reason)
 
 void UxPlayIntegration::onMirrorFrameOutput()
 {
-    m_frame_shown.store(true, std::memory_order_relaxed);
+    if (!m_frame_shown.exchange(true, std::memory_order_relaxed)) {
+        notifyStateChanged();
+    }
     // Only a decoded picture counts; codec headers alone do not replace the
     // held frame (seen after iOS resumes an idle mirror stream).
     if (m_clear_pending) {
@@ -178,6 +180,7 @@ void UxPlayIntegration::deferredClearLoop()
             if (m_media_active.exchange(false) && m_media_player) {
                 m_media_player->stop();
             }
+            notifyStateChanged();
             processConnReset(true, true);
         } else {
             // The mirror stream may still be running; only the picture is cleared.
@@ -264,6 +267,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             auto* self = static_cast<UxPlayIntegration*>(cls);
             if (self) {
                 self->m_open_connections.fetch_add(1);
+                self->notifyStateChanged();
             }
             const uint64_t now = os_gettime_ns();
             bool expected = false;
@@ -289,6 +293,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                     self->scheduleDeferredClear("the last AirPlay connection closed");
                 }
             }
+            self->notifyStateChanged();
         };
         // A TEARDOWN that names no stream ends the device's whole mirroring
         // session (UxPlay reports a video reset only for a single stream).
@@ -419,6 +424,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             // mirroring without a new keyframe, so leave the mirror decoder.
             self->processConnReset(false, false);
             self->m_media_active.store(true);
+            self->notifyStateChanged();
             self->m_frame_shown.store(true);
             self->m_media_player->play(location, start_position);
         };
@@ -441,6 +447,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                 blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
                 self->m_media_player->stop();
                 self->m_media_active.store(false);
+                self->notifyStateChanged();
                 self->processConnReset(false, false);
                 self->scheduleDeferredClear();
             }
@@ -498,6 +505,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                      reset_type == RESET_TYPE_NOHOLD)) {
                     self->m_media_player->stop();
                     self->m_media_active.store(false);
+                    self->notifyStateChanged();
                     self->cancelDeferredClear();
                 }
                 // iOS tears down its (idle) mirror stream right after an
@@ -640,6 +648,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         blog(LOG_INFO, "Calling raop_init2 with Device ID: %s", device_id_str.c_str());
         if (raop_init2(m_raop, 1, device_id_str.c_str(), "") != 0) {
             blog(LOG_ERROR, "Failed to initialize RAOP with device ID");
+            setLastError("The AirPlay receiver could not be set up (see the OBS log).");
             raop_destroy(m_raop);
             dnssd_destroy(m_dnssd);
             m_raop = nullptr;
@@ -655,6 +664,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // Keep the advertised feature bits and the request handlers in sync.
         if (raop_set_plist(m_raop, "hls", 1) != 0) {
             blog(LOG_ERROR, "Failed to enable Safari Media AirPlay protocol mode");
+            setLastError("The AirPlay receiver could not be set up (see the OBS log).");
             raop_destroy(m_raop);
             dnssd_destroy(m_dnssd);
             m_raop = nullptr;
@@ -686,6 +696,10 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                     blog(LOG_ERROR, "Failed to start RAOP HTTP server on port %d, error code: %d",
                          actual_port, result);
                     blog(LOG_ERROR, "System errno: %d (%s)", errno, strerror(errno));
+                    setLastError("Ports 7000 and 7001 are both in use, so devices cannot connect. "
+                                 "macOS's own AirPlay Receiver uses port 7000: turn it off in "
+                                 "System Settings > General > AirDrop & Handoff, or quit the app "
+                                 "using the ports, then restart OBS.");
                     raop_destroy(m_raop);
                     dnssd_destroy(m_dnssd);
                     m_raop = nullptr;
@@ -694,6 +708,8 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                 }
                 blog(LOG_INFO, "UxPlay integration started successfully on port %d", actual_port);
             } else {
+                setLastError("Port " + std::to_string(port) + " is in use, so devices cannot "
+                             "connect. Quit the app using it, then restart OBS.");
                 raop_destroy(m_raop);
                 dnssd_destroy(m_dnssd);
                 m_raop = nullptr;
@@ -718,6 +734,15 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         int airplay_register_error = dnssd_register_airplay(m_dnssd, m_actual_port);
         if (airplay_register_error != DNSSD_ERROR_NOERROR) {
             blog(LOG_WARNING, "dnssd_register_airplay returned %d", airplay_register_error);
+        }
+        if (raop_register_error != DNSSD_ERROR_NOERROR ||
+            airplay_register_error != DNSSD_ERROR_NOERROR) {
+            setLastError("Running, but devices may not find it: Bonjour registration failed "
+                         "(error " + std::to_string(raop_register_error ? raop_register_error
+                                                                        : airplay_register_error) +
+                         "). Check that the name is unique on the network.");
+        } else {
+            setLastError({});
         }
         blog(LOG_INFO, "UxPlay device ID (RAOP): %s", hex_no_colon(normalized_device_id).c_str());
         
@@ -834,6 +859,56 @@ void UxPlayIntegration::updateServerName(const std::string& name)
     }
 
     blog(LOG_INFO, "UxPlay dnssd service name updated successfully");
+}
+
+void UxPlayIntegration::setLastError(std::string error)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        m_last_error = std::move(error);
+    }
+    std::function<void()> callback;
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        callback = m_state_changed;
+    }
+    if (callback) callback();
+}
+
+std::string UxPlayIntegration::lastError() const
+{
+    std::lock_guard<std::mutex> lock(m_status_mutex);
+    return m_last_error;
+}
+
+std::string UxPlayIntegration::connectionState() const
+{
+    if (m_media_active.load()) return "Playing AirPlay video";
+    if (m_open_connections.load() > 0) {
+        return m_frame_shown.load() ? "Screen mirroring" : "Device connected";
+    }
+    return "Waiting for a device";
+}
+
+void UxPlayIntegration::setStateChangedCallback(std::function<void()> callback)
+{
+    std::lock_guard<std::mutex> lock(m_status_mutex);
+    m_state_changed = std::move(callback);
+}
+
+// Calls the state-changed callback only when the summary actually changed
+// (iOS opens a connection for every GET /info while its menu is open).
+void UxPlayIntegration::notifyStateChanged()
+{
+    const std::string state = connectionState();
+    std::function<void()> callback;
+    {
+        std::lock_guard<std::mutex> lock(m_status_mutex);
+        if (state == m_last_state) return;
+        m_last_state = state;
+        callback = m_state_changed;
+    }
+    if (callback) callback();
 }
 
 std::string UxPlayIntegration::getPK() const
