@@ -513,6 +513,9 @@ if(BUILD_TESTING)
     target_link_libraries(obs-airplay-media-smoke PRIVATE
         ${FFMPEG_LIBRARIES}
     )
+    if(APPLE)
+        target_link_libraries(obs-airplay-media-smoke PRIVATE "-framework CoreVideo")
+    endif()
 
     # Mirror decoder: hardware vs software output, size changes, recovery.
     add_executable(obs-airplay-decoder-smoke

@@ -35,6 +35,10 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#if defined(__APPLE__)
+#include <CoreVideo/CoreVideo.h>
+#endif
+
 namespace {
 
 std::atomic<bool> g_allow_insecure_tls{false};
@@ -701,6 +705,95 @@ std::atomic<bool> g_follow_sender_clock{false};
 std::atomic<int> g_open_delay_for_testing_ms{0};
 }
 
+// Planes of a picture to hand on: an AVFrame's, or a locked pixel buffer's.
+struct PictureView {
+    const uint8_t* data[4] = {};
+    int linesize[4] = {};
+    int width = 0;
+    int height = 0;
+    int format = AV_PIX_FMT_NONE;
+
+    static PictureView of(const AVFrame* frame)
+    {
+        PictureView view;
+        for (int i = 0; i < 4; ++i) {
+            view.data[i] = frame->data[i];
+            view.linesize[i] = frame->linesize[i];
+        }
+        view.width = frame->width;
+        view.height = frame->height;
+        view.format = frame->format;
+        return view;
+    }
+};
+
+// Read access to a VideoToolbox frame's 8-bit NV12 planes in place, for as
+// long as this object lives (the decoded AVFrame keeps the buffer itself).
+class LockedPixelBuffer {
+public:
+    LockedPixelBuffer() = default;
+    LockedPixelBuffer(const LockedPixelBuffer&) = delete;
+    LockedPixelBuffer& operator=(const LockedPixelBuffer&) = delete;
+    ~LockedPixelBuffer() { unlock(); }
+
+    bool lock(const AVFrame* frame, PictureView* view)
+    {
+#if defined(__APPLE__)
+        auto buffer = static_cast<CVPixelBufferRef>(static_cast<void*>(frame->data[3]));
+        if (!buffer) return false;
+        const OSType type = CVPixelBufferGetPixelFormatType(buffer);
+        if ((type != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange &&
+             type != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) ||
+            CVPixelBufferGetPlaneCount(buffer) != 2 ||
+            CVPixelBufferLockBaseAddress(buffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+            return false;
+        }
+        m_buffer = buffer;
+        PictureView locked;
+        locked.width = std::min<int>(frame->width,
+                                     static_cast<int>(CVPixelBufferGetWidthOfPlane(buffer, 0)));
+        locked.height = std::min<int>(frame->height,
+                                      static_cast<int>(CVPixelBufferGetHeightOfPlane(buffer, 0)));
+        locked.format = AV_PIX_FMT_NV12;
+        for (size_t plane = 0; plane < 2; ++plane) {
+            locked.data[plane] =
+                static_cast<const uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(buffer, plane));
+            locked.linesize[plane] =
+                static_cast<int>(CVPixelBufferGetBytesPerRowOfPlane(buffer, plane));
+        }
+        if (!locked.data[0] || !locked.data[1]) {
+            unlock();
+            return false;
+        }
+        *view = locked;
+        return true;
+#else
+        (void)frame;
+        (void)view;
+        return false;
+#endif
+    }
+
+    void unlock()
+    {
+#if defined(__APPLE__)
+        if (m_buffer) {
+            CVPixelBufferUnlockBaseAddress(m_buffer, kCVPixelBufferLock_ReadOnly);
+            m_buffer = nullptr;
+        }
+#endif
+    }
+
+    bool held() const { return m_buffer != nullptr; }
+
+private:
+#if defined(__APPLE__)
+    CVPixelBufferRef m_buffer = nullptr;
+#else
+    void* m_buffer = nullptr;
+#endif
+};
+
 class MediaPlayer::Impl {
 public:
     ~Impl()
@@ -1366,62 +1459,70 @@ private:
             coarse_preview = true;
         }
 
-        AVFrame* picture = decoded;
+        // The picture as planes: the decoder's own, a locked VideoToolbox
+        // buffer's NV12 planes (no copy to memory: OBS copies them once), or
+        // a conversion target.
+        PictureView picture = PictureView::of(decoded);
+        LockedPixelBuffer locked;
         if (hardware_frame) {
-            av_frame_unref(out->transfer);
-            if (av_hwframe_transfer_data(out->transfer, decoded, 0) < 0) {
-                noteHardwareError(out, "could not read the decoded picture");
-                return;
+            if (!locked.lock(decoded, &picture)) {
+                // Not 8-bit NV12 (10-bit, 4:2:2): copy the surface out and
+                // convert it.
+                av_frame_unref(out->transfer);
+                if (av_hwframe_transfer_data(out->transfer, decoded, 0) < 0) {
+                    noteHardwareError(out, "could not read the decoded picture");
+                    return;
+                }
+                picture = PictureView::of(out->transfer);
             }
-            out->transfer->color_range = decoded->color_range;
-            out->transfer->colorspace = decoded->colorspace;
-            picture = out->transfer;
         }
         out->hardware_errors = 0;
 
         // NV12 (hardware) and I420 go to OBS as they are, in the stream's
         // own range; everything else (10-bit, 4:2:2, ...) is converted.
-        const bool nv12 = picture->format == AV_PIX_FMT_NV12;
-        const bool i420 = picture->format == AV_PIX_FMT_YUV420P ||
-                          picture->format == AV_PIX_FMT_YUVJ420P;
-        bool full_range = picture->color_range == AVCOL_RANGE_JPEG ||
-                          picture->format == AV_PIX_FMT_YUVJ420P;
-        const bool bt601 = picture->colorspace == AVCOL_SPC_SMPTE170M ||
-                           picture->colorspace == AVCOL_SPC_BT470BG;
+        const bool nv12 = picture.format == AV_PIX_FMT_NV12;
+        const bool i420 = picture.format == AV_PIX_FMT_YUV420P ||
+                          picture.format == AV_PIX_FMT_YUVJ420P;
+        bool full_range = decoded->color_range == AVCOL_RANGE_JPEG ||
+                          picture.format == AV_PIX_FMT_YUVJ420P;
+        const bool bt601 = decoded->colorspace == AVCOL_SPC_SMPTE170M ||
+                           decoded->colorspace == AVCOL_SPC_BT470BG;
         if (!out->mode_logged) {
             out->mode_logged = true;
-            blog(LOG_INFO, "[MEDIA] video %dx%d: %s decoding (%s, %s range%s)",
-                 picture->width, picture->height,
+            blog(LOG_INFO, "[MEDIA] video %dx%d: %s decoding (%s, %s range%s%s)",
+                 picture.width, picture.height,
                  hardware_frame ? "VideoToolbox hardware" : "software",
-                 av_get_pix_fmt_name(static_cast<AVPixelFormat>(picture->format)),
+                 av_get_pix_fmt_name(static_cast<AVPixelFormat>(picture.format)),
                  full_range ? "full" : "video",
-                 out->turns ? ", rotated upright" : "");
+                 out->turns ? ", rotated upright" : "",
+                 locked.held() ? ", zero-copy" : "");
         }
         if (!nv12 && !i420) {
             // swscale converts full-range (YUVJ) layouts to video range and
             // leaves the range of everything else untouched.
             const AVPixFmtDescriptor* descriptor =
-                av_pix_fmt_desc_get(static_cast<AVPixelFormat>(picture->format));
+                av_pix_fmt_desc_get(static_cast<AVPixelFormat>(picture.format));
             if (descriptor && std::strncmp(descriptor->name, "yuvj", 4) == 0) {
                 full_range = false;
             }
             out->scaler = sws_getCachedContext(
-                out->scaler, picture->width, picture->height,
-                static_cast<AVPixelFormat>(picture->format),
-                picture->width, picture->height, AV_PIX_FMT_YUV420P,
+                out->scaler, picture.width, picture.height,
+                static_cast<AVPixelFormat>(picture.format),
+                picture.width, picture.height, AV_PIX_FMT_YUV420P,
                 SWS_BILINEAR, nullptr, nullptr, nullptr);
             if (!out->scaler) {
                 blog(LOG_ERROR, "[MEDIA] failed to create video converter");
                 return;
             }
             AVFrame* i420_frame = out->i420;
-            if (i420_frame->width != picture->width || i420_frame->height != picture->height ||
+            if (i420_frame->width != picture.width || i420_frame->height != picture.height ||
                 i420_frame->format != AV_PIX_FMT_YUV420P) {
                 av_frame_unref(i420_frame);
                 i420_frame->format = AV_PIX_FMT_YUV420P;
-                i420_frame->width = picture->width;
-                i420_frame->height = picture->height;
+                i420_frame->width = picture.width;
+                i420_frame->height = picture.height;
                 if (av_frame_get_buffer(i420_frame, 32) < 0) {
+                    av_frame_unref(i420_frame);
                     blog(LOG_ERROR, "[MEDIA] failed to allocate converted video frame");
                     return;
                 }
@@ -1429,14 +1530,14 @@ private:
             if (av_frame_make_writable(i420_frame) < 0) {
                 return;
             }
-            sws_scale(out->scaler, picture->data, picture->linesize, 0, picture->height,
+            sws_scale(out->scaler, picture.data, picture.linesize, 0, picture.height,
                       i420_frame->data, i420_frame->linesize);
-            picture = i420_frame;
+            picture = PictureView::of(i420_frame);
         }
 
         if (out->turns) {
-            const int width = picture->width;
-            const int height = picture->height;
+            const int width = picture.width;
+            const int height = picture.height;
             const int rotated_width = out->turns == 2 ? width : height;
             const int rotated_height = out->turns == 2 ? height : width;
             const AVPixelFormat layout = nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
@@ -1448,6 +1549,7 @@ private:
                 rotated->width = rotated_width;
                 rotated->height = rotated_height;
                 if (av_frame_get_buffer(rotated, 32) < 0) {
+                    av_frame_unref(rotated);
                     blog(LOG_ERROR, "[MEDIA] failed to allocate rotated video frame");
                     return;
                 }
@@ -1457,20 +1559,21 @@ private:
             }
             const int chroma_width = (width + 1) / 2;
             const int chroma_height = (height + 1) / 2;
-            rotate_plane(picture->data[0], picture->linesize[0], width, height, 1,
+            rotate_plane(picture.data[0], picture.linesize[0], width, height, 1,
                          out->turns, rotated->data[0], rotated->linesize[0]);
             if (nv12) {
-                rotate_plane(picture->data[1], picture->linesize[1], chroma_width,
+                rotate_plane(picture.data[1], picture.linesize[1], chroma_width,
                              chroma_height, 2, out->turns, rotated->data[1],
                              rotated->linesize[1]);
             } else {
                 for (int plane = 1; plane <= 2; ++plane) {
-                    rotate_plane(picture->data[plane], picture->linesize[plane],
+                    rotate_plane(picture.data[plane], picture.linesize[plane],
                                  chroma_width, chroma_height, 1, out->turns,
                                  rotated->data[plane], rotated->linesize[plane]);
                 }
             }
-            picture = rotated;
+            picture = PictureView::of(rotated);
+            locked.unlock();
         }
 
         uint64_t timestamp_ns = 0;
@@ -1487,23 +1590,25 @@ private:
             callback = video_callback;
         }
         if (callback) {
+            // The planes are valid only during the call (a locked buffer is
+            // unlocked when emitVideo returns); OBS copies them synchronously.
             MediaVideoFrame frame;
-            frame.width = picture->width;
-            frame.height = picture->height;
+            frame.width = picture.width;
+            frame.height = picture.height;
             frame.timestamp_ns = timestamp_ns;
             frame.nv12 = nv12;
             frame.full_range = full_range;
             frame.bt601 = bt601;
             for (int i = 0; i < (nv12 ? 2 : 3); ++i) {
-                frame.data[i] = picture->data[i];
-                frame.linesize[i] = picture->linesize[i];
+                frame.data[i] = picture.data[i];
+                frame.linesize[i] = picture.linesize[i];
             }
             callback(frame);
         }
 
         if (!first_video_logged.exchange(true)) {
             blog(LOG_INFO, "[MEDIA] first decoded video frame (%dx%d, %.3fs)",
-                 picture->width, picture->height, position);
+                 picture.width, picture.height, position);
         }
     }
 
