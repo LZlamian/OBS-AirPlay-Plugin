@@ -8,6 +8,9 @@
 #include <plist/plist.h>
 
 #include <chrono>
+#include <algorithm>
+#include <thread>
+#include <atomic>
 #include <csignal>
 #include <cmath>
 #include <condition_variable>
@@ -499,8 +502,49 @@ int main(int argc, char** argv)
     plist_t blob_action = plist_new_dict();
     plist_dict_set_item(blob_action, "type", plist_new_string("unhandledURLResponse"));
     plist_dict_set_item(blob_action, "params", blob_params);
-    const std::string blob_action_response =
-        binaryPlistExchange(port, "/action", session, blob_action);
+    // With --large-blob the reply is sent in 1 MiB pieces (like a sender on
+    // Wi-Fi) while another connection polls /playback-info: the receiver's
+    // single HTTP thread must keep answering it during and after the transfer.
+    std::string blob_action_response;
+    double worst_poll_ms = 0.0;
+    int polls = 0;
+    if (large_blob) {
+        char* body = nullptr;
+        uint32_t body_size = 0;
+        plist_to_bin(blob_action, &body, &body_size);
+        std::atomic<bool> transfer_done{false};
+        std::thread poller([&] {
+            while (!transfer_done.load()) {
+                const auto started = std::chrono::steady_clock::now();
+                httpExchange(port, std::string("GET /playback-info HTTP/1.1\r\nHost: 127.0.0.1\r\n") +
+                                       "X-Apple-Session-ID: " + session + "\r\nContent-Length: 0\r\n\r\n");
+                worst_poll_ms = std::max(worst_poll_ms, std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started).count());
+                ++polls;
+                usleep(20000);
+            }
+        });
+        const std::string headers = std::string("POST /action HTTP/1.1\r\nHost: 127.0.0.1\r\n") +
+            "X-Apple-Session-ID: " + session + "\r\n" +
+            "Content-Type: application/x-apple-binary-plist\r\n" +
+            "Content-Length: " + std::to_string(body_size) + "\r\n\r\n";
+        const int fd = connectLocal(port);
+        bool sent = fd >= 0 && sendAll(fd, headers.data(), headers.size());
+        for (uint32_t offset = 0; sent && offset < body_size; offset += 1U << 20) {
+            sent = sendAll(fd, body + offset, std::min<uint32_t>(1U << 20, body_size - offset));
+            usleep(10000);
+        }
+        if (sent) blob_action_response = receiveResponse(fd);
+        if (fd >= 0) close(fd);
+        usleep(200000);
+        transfer_done.store(true);
+        poller.join();
+        free(body);
+        std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms -> %s\n",
+                    body_size, polls, worst_poll_ms, worst_poll_ms < 100.0 ? "ok" : "SLOW");
+    } else {
+        blob_action_response = binaryPlistExchange(port, "/action", session, blob_action);
+    }
     plist_free(blob_action);
 
     bool blob_spooled = false;
