@@ -40,6 +40,13 @@ void AirPlayServer::stopVideoThread()
 }
 
 namespace {
+// Telemetry windows: [latency] summaries cover this many frames (about two
+// seconds of 60 fps video; two to three seconds of audio packets), and an
+// "Output video frame" line is logged every this many frames.
+constexpr uint32_t kVideoTelemetryFrames = 120;
+constexpr uint32_t kAudioTelemetryFrames = 240;
+constexpr uint64_t kVideoFrameLogInterval = 120;
+
 // CPU time used so far by the calling thread.
 uint64_t thread_cpu_ns()
 {
@@ -469,7 +476,7 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
             m_v_window_started_ns = t_output_end;
             m_v_window_cpu_ns = cpu_now;
         }
-        if (m_v_window_count >= 120) {
+        if (m_v_window_count >= kVideoTelemetryFrames) {
             const double n = static_cast<double>(m_v_window_count);
             const double intervals_n = n > 1.0 ? n - 1.0 : 1.0;
             blog(LOG_INFO,
@@ -499,7 +506,7 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
         m_v_last_output_ns = 0;
     }
 
-    if ((m_video_frame_counter % 120) == 0) {
+    if ((m_video_frame_counter % kVideoFrameLogInterval) == 0) {
         blog(LOG_INFO, "Output video frame #%llu (%s, %ux%u)",
              static_cast<unsigned long long>(m_video_frame_counter),
              is_h265 ? "HEVC" : "H264",
@@ -563,7 +570,7 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
         m_a_output_ns_sum += output_ns;
         if (output_ns > m_a_output_ns_max) m_a_output_ns_max = output_ns;
         ++m_a_window_count;
-        if (m_a_window_count >= 240) {
+        if (m_a_window_count >= kAudioTelemetryFrames) {
             const double n = static_cast<double>(m_a_window_count);
             blog(LOG_INFO,
                  "[latency] audio N=%u  decode avg=%.2fms max=%.2fms  "

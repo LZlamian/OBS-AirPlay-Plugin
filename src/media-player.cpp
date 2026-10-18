@@ -2182,6 +2182,15 @@ private:
         // reports as end of file right after a seek.  A read that ends well
         // before the known duration re-seeks (a fresh request) instead.
         constexpr int kMaxReadRecoveries = 3;
+        // Output progress (seconds) past the last recovery point that counts
+        // as real progress and earns a fresh set of attempts.
+        constexpr double kRecoveryProgress = 0.5;
+        // An end of file this close to the stated duration (seconds) is the
+        // real end, not a dropped response.
+        constexpr double kEndTolerance = 1.0;
+        // Demuxed packets reaching this close to the duration cover it all
+        // (container durations are rounded).
+        constexpr double kDemuxedEndTolerance = 0.1;
         int read_recoveries = 0;
         double position_at_recovery = -1.0;
         uint64_t seek_generation_at_recovery = 0;
@@ -2218,7 +2227,7 @@ private:
                     // Only real progress earns a fresh set of attempts: the
                     // output moved on, or the sender asked for a new position.
                     // Re-showing the same frame after a re-request is not.
-                    if (info.position > position_at_recovery + 0.5 ||
+                    if (info.position > position_at_recovery + kRecoveryProgress ||
                         seek_generation != seek_generation_at_recovery) {
                         read_recoveries = 0;
                     }
@@ -2226,9 +2235,9 @@ private:
                     if (seek_pending) {
                         retry = true;  // the pending seek repositions the demuxer
                     } else if (!io_at_end && duration_known &&
-                               info.position < duration - 1.0 &&
+                               info.position < duration - kEndTolerance &&
                                !(demuxed_generation == seek_generation &&
-                                 demuxed_until >= duration - 0.1) &&
+                                 demuxed_until >= duration - kDemuxedEndTolerance) &&
                                read_recoveries < kMaxReadRecoveries) {
                         ++read_recoveries;
                         resume_at = info.position;

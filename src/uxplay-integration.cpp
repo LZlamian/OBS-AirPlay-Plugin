@@ -700,9 +700,9 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             int error_code = errno;
             blog(LOG_ERROR, "System errno: %d (%s)", error_code, strerror(error_code));
             
-            // Try a different port if 8000 is busy
-            if (port == 7000) {
-                actual_port = 7001;
+            // Try the fallback port if the default one is busy
+            if (port == kDefaultPort) {
+                actual_port = static_cast<unsigned short>(kFallbackPort);
                 blog(LOG_INFO, "Trying alternative port %d...", actual_port);
                 result = raop_start_httpd(m_raop, &actual_port);
                 if (result < 0) {

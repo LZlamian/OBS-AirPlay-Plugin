@@ -45,8 +45,14 @@ public:
     UxPlayIntegration();
     ~UxPlayIntegration();
     
+    // The AirPlay TCP port, and the one tried when it is taken (macOS's own
+    // AirPlay Receiver also listens on 7000). Senders find the port through
+    // Bonjour, so either works.
+    static constexpr int kDefaultPort = 7000;
+    static constexpr int kFallbackPort = 7001;
+
     // Start the UxPlay server
-    bool start(const std::string& device_id, int port = 7000,
+    bool start(const std::string& device_id, int port = kDefaultPort,
                const std::string& server_name = "OBS AirPlay");
     
     // Stop the server

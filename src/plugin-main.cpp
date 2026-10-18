@@ -117,6 +117,9 @@ static void status_thread_func()
 // Debounce: defer mDNS name updates until the user stops typing for 800ms.
 static std::mutex              g_debounce_mutex;
 static std::condition_variable g_debounce_cv;
+// How long the name must stay unchanged before it is re-advertised: long
+// enough to cover typing, short enough to feel immediate.
+static constexpr auto kNameDebounce = std::chrono::milliseconds(800);
 static std::string             g_debounce_pending;
 static uint64_t                g_debounce_gen  = 0;
 static bool                    g_debounce_quit = false;
@@ -221,18 +224,18 @@ static void name_debounce_thread_func()
             my_name = g_debounce_pending;
         }
 
-        // Wait 800ms. If a newer change arrives, restart the wait.
+        // Wait kNameDebounce. If a newer change arrives, restart the wait.
         {
             std::unique_lock<std::mutex> lock(g_debounce_mutex);
             bool superseded = g_debounce_cv.wait_for(
                 lock,
-                std::chrono::milliseconds(800),
+                kNameDebounce,
                 [my_gen] { return g_debounce_gen != my_gen || g_debounce_quit; });
             if (g_debounce_quit) break;
             if (superseded) continue; // Newer change came in — loop back and re-wait.
         }
 
-        // No newer change in 800ms — apply.
+        // No newer change within kNameDebounce — apply.
         apply_server_name(my_name);
 
         // Reset gen so the thread blocks until the next change.
@@ -449,7 +452,7 @@ bool obs_module_load(void)
             std::lock_guard<std::mutex> lock(g_server_name_mutex);
             initial_name = g_server_name;
         }
-        if (!g_uxplay_integration->start(mac_address, 7000, initial_name)) {
+        if (!g_uxplay_integration->start(mac_address, UxPlayIntegration::kDefaultPort, initial_name)) {
             blog(LOG_ERROR,
                  "Failed to start UxPlay integration; the AirPlay source will remain unavailable. "
                  "Check whether port 7000 is in use and review the preceding UxPlay log messages.");
