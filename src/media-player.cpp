@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -716,6 +717,15 @@ namespace {
 std::atomic<bool> g_follow_sender_clock{false};
 std::atomic<int> g_open_delay_for_testing_ms{0};
 }
+
+// Runs a cleanup when the scope ends (early returns included).
+struct ScopeExit {
+    std::function<void()> cleanup;
+    ~ScopeExit()
+    {
+        if (cleanup) cleanup();
+    }
+};
 
 // Planes of a picture to hand on: an AVFrame's, or a locked pixel buffer's.
 struct PictureView {
@@ -1943,6 +1953,15 @@ private:
             markOpenFailure("could not allocate demuxer");
             return;
         }
+        // Every FFmpeg object of the item is released when run() returns,
+        // whichever way: (MEM-7) no early return can leak one. Declared
+        // after resilient_io, so the demuxer closes before its custom input.
+        bool format_opened = false;
+        ScopeExit release_format{[&] {
+            if (!format) return;
+            if (format_opened) avformat_close_input(&format);
+            else avformat_free_context(format);
+        }};
         format->interrupt_callback.callback = &Impl::interruptCallback;
         format->interrupt_callback.opaque = this;
         if (http_item) {
@@ -1994,12 +2013,13 @@ private:
         int result = avformat_open_input(&format, playback_location.c_str(), nullptr, &options);
         av_dict_free(&options);
         if (result < 0) {
+            // avformat_open_input has freed the context and cleared `format`.
             if (!stop_requested.load()) {
                 markOpenFailure(("URL open failed: " + ffmpeg_error(result)).c_str());
             }
-            avformat_free_context(format);
             return;
         }
+        format_opened = true;
 
         const auto transport_opened = std::chrono::steady_clock::now();
         const double transport_ms = std::chrono::duration<double, std::milli>(
@@ -2019,7 +2039,6 @@ private:
         result = avformat_find_stream_info(format, nullptr);
         if (result < 0) {
             markOpenFailure(("stream discovery failed: " + ffmpeg_error(result)).c_str());
-            avformat_close_input(&format);
             return;
         }
 
@@ -2031,13 +2050,20 @@ private:
             : av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
         if (video_index < 0 && audio_index < 0) {
             markOpenFailure("URL contains no decodable audio or video streams");
-            avformat_close_input(&format);
             return;
         }
 
         AVCodecContext* video_decoder = nullptr;
         AVCodecContext* audio_decoder = nullptr;
         VideoOutput video_output;
+        ScopeExit release_decoders{[&] {
+            if (video_output.scaler) sws_freeContext(video_output.scaler);
+            av_frame_free(&video_output.rotated);
+            av_frame_free(&video_output.transfer);
+            av_frame_free(&video_output.i420);
+            avcodec_free_context(&audio_decoder);
+            avcodec_free_context(&video_decoder);
+        }};
         if (video_index >= 0 &&
             !openDecoder(format, video_index, &video_decoder, true, &video_output.hardware)) {
             blog(LOG_WARNING, "[MEDIA] video stream will be skipped");
@@ -2050,7 +2076,6 @@ private:
         }
         if (!video_decoder && !audio_decoder) {
             markOpenFailure("no advertised stream could be decoded");
-            avformat_close_input(&format);
             return;
         }
 
@@ -2105,6 +2130,17 @@ private:
         }
         SwrContext* resampler = nullptr;
         AVChannelLayout input_layout = {};
+        ScopeExit release_frames{[&] {
+            av_channel_layout_uninit(&input_layout);
+            swr_free(&resampler);
+            av_frame_free(&decoded);
+            av_packet_free(&packet);
+        }};
+        if (!packet || !decoded || !video_output.i420 || !video_output.transfer ||
+            !video_output.rotated) {
+            markOpenFailure("could not allocate decoding buffers");
+            return;
+        }
         int input_rate = 0;
         AVSampleFormat input_format = AV_SAMPLE_FMT_NONE;
 
@@ -2285,17 +2321,6 @@ private:
         if (presenter.joinable()) presenter.join();
         clearVideoQueue();
 
-        av_channel_layout_uninit(&input_layout);
-        swr_free(&resampler);
-        if (video_output.scaler) sws_freeContext(video_output.scaler);
-        av_frame_free(&video_output.rotated);
-        av_frame_free(&video_output.transfer);
-        av_frame_free(&video_output.i420);
-        av_frame_free(&decoded);
-        av_packet_free(&packet);
-        avcodec_free_context(&audio_decoder);
-        avcodec_free_context(&video_decoder);
-        avformat_close_input(&format);
         if (resilient_io && resilient_io->reopens() > 0) {
             blog(LOG_INFO, "[MEDIA] media server responses ended early %d time(s); "
                  "continued with fresh range requests", resilient_io->reopens());
