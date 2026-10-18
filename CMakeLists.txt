@@ -254,6 +254,14 @@ pkg_check_modules(FFMPEG REQUIRED
 )
 
 # Add UxPlay as subdirectory
+# The UxPlay fork is a git submodule; a plain clone or a release source
+# archive does not include it.
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/uxplay/lib/CMakeLists.txt")
+    message(FATAL_ERROR
+        "The uxplay submodule is missing. Run:\n"
+        "  git submodule update --init --recursive\n"
+        "(or clone with: git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git)")
+endif()
 add_subdirectory(uxplay/lib)
 
 # Plugin source files
