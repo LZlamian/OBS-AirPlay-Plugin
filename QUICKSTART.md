@@ -267,10 +267,17 @@ If you're still having issues:
 2. **Check System:**
    - macOS version: `sw_vers`
    - OBS version: About OBS
-   - WiFi network name
+   - Network type (home Wi-Fi, guest network, mesh, VLAN); the network name is not needed
    - iOS device model and version
 
 3. **Create GitHub Issue** with all the above information
+
+> **Before you post logs publicly:** OBS logs and `diagnose.sh` output can contain your
+> device names, local IP addresses and MAC-style device IDs. If you turned on the AirPlay
+> media trace (`OBS_AIRPLAY_MEDIA_TRACE=1`), the log also contains the addresses of the
+> videos you played and AirPlay session IDs; query strings and passwords in those URLs are
+> replaced with `[redacted]`, but the host and path remain. Read through what you paste,
+> remove anything you don't want public, and turn the trace off again afterwards.
 
 ## FAQ
 

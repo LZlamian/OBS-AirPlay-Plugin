@@ -276,6 +276,13 @@ Restart OBS.
 
 3. **Create GitHub issue** with diagnostics and logs
 
+> **Before you post logs publicly:** OBS logs and `diagnose.sh` output can contain your
+> device names, local IP addresses and MAC-style device IDs. If you turned on the AirPlay
+> media trace (`OBS_AIRPLAY_MEDIA_TRACE=1`), the log also contains the addresses of the
+> videos you played and AirPlay session IDs; query strings and passwords in those URLs are
+> replaced with `[redacted]`, but the host and path remain. Read through what you paste,
+> remove anything you don't want public, and turn the trace off again afterwards.
+
 ## Common Questions
 
 **Q: Do I need the OBS source code?**

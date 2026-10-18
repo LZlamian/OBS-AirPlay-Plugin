@@ -26,7 +26,8 @@ namespace {
 
 void receiverLog(void*, int level, const char* message)
 {
-    if (message && (level <= LOGGER_WARNING || std::strstr(message, "[MEDIA]")))
+    if (message && (level <= LOGGER_WARNING || std::strstr(message, "[MEDIA]") ||
+                    std::strstr(message, "[MEDIA-TRACE]")))
         std::fprintf(stderr, "[receiver:%d] %s\n", level, message);
 }
 
@@ -973,7 +974,7 @@ int main(int argc, char** argv)
         {"http://224.0.0.251/x.mp4", "400"},
         {"http://10.1.2.3:22/x.mp4", "400"},
         {"http://10.1.2.3/x.mp4", "200"},
-        {"https://media.example.test:8443/x.mp4", "200"},
+        {"https://user:hunter2@media.example.test:8443/x.mp4?token=SECRET123#frag", "200"},
     };
     bool policy_ok = true;
     for (const PolicyCase& c : policy_cases) {
