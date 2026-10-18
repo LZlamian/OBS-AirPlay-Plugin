@@ -303,9 +303,10 @@ ModuleSettings read_source_settings(obs_data_t* data)
     settings.follow_sender_clock = obs_data_get_bool(data, "follow_sender_clock");
     settings.log_latency_telemetry = obs_data_get_bool(data, "log_latency_telemetry");
     settings.allow_self_signed_media = obs_data_get_bool(data, "allow_self_signed_media");
-    // "anywhere" (the default), "sender" or "off".
+    // "off" (the default), "sender" or "anywhere"; anything else is off.
     const char* video = obs_data_get_string(data, "airplay_video");
-    settings.accept_airplay_video = !(video && strcmp(video, "off") == 0);
+    settings.accept_airplay_video =
+        video && (strcmp(video, "anywhere") == 0 || strcmp(video, "sender") == 0);
     settings.media_sender_only = video && strcmp(video, "sender") == 0;
     settings.check_for_updates = obs_data_get_bool(data, "check_for_updates");
     return settings;

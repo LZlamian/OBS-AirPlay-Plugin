@@ -4,8 +4,9 @@ Release notes for each version are in [docs/releases/](docs/releases/).
 
 ## 2.6.0 (2026-10-18)
 
-Receiver setting **AirPlay video** (From any web address / Only from the
-sending device / Off):
+Receiver setting **AirPlay video** (Off, the default / Only from the sending
+device / From any web address). AirPlay video, on in earlier versions, must
+now be turned on:
 - **Off**: POST /play (and an item swapped in with playlistInsert) is
   answered 400, so the device falls back or gives up; screen mirroring is
   unaffected.

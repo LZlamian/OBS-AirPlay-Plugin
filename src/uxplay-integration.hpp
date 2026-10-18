@@ -168,7 +168,7 @@ private:
     std::string m_last_state;            // under m_status_mutex
     std::function<void()> m_state_changed;  // under m_status_mutex
     std::string m_last_refusal;          // under m_status_mutex
-    std::atomic<bool> m_accept_video{true};
+    std::atomic<bool> m_accept_video{false};
     std::atomic<bool> m_sender_only{false};
     // Logs nothing (the refusing code has); records it for the panel.
     void recordRefusal(const std::string& reason);

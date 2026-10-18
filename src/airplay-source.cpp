@@ -68,7 +68,7 @@ void airplay_source_get_defaults(obs_data_t* settings)
     obs_data_set_default_bool(settings, "log_latency_telemetry", false);
     obs_data_set_default_bool(settings, "follow_sender_clock", false);
     obs_data_set_default_bool(settings, "allow_self_signed_media", false);
-    obs_data_set_default_string(settings, "airplay_video", "anywhere");
+    obs_data_set_default_string(settings, "airplay_video", "off");
     obs_data_set_default_bool(settings, "check_for_updates", true);
 }
 
@@ -145,9 +145,10 @@ obs_properties_t* airplay_source_get_properties(void* data)
     // AirPlay video" and "only from the sending device").
     obs_property_t* video = obs_properties_add_list(props, "airplay_video",
         obs_module_text("AirPlay.Video"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-    obs_property_list_add_string(video, obs_module_text("AirPlay.Video.Anywhere"), "anywhere");
-    obs_property_list_add_string(video, obs_module_text("AirPlay.Video.SenderOnly"), "sender");
+    // Least to most permissive; off is the default.
     obs_property_list_add_string(video, obs_module_text("AirPlay.Video.Off"), "off");
+    obs_property_list_add_string(video, obs_module_text("AirPlay.Video.SenderOnly"), "sender");
+    obs_property_list_add_string(video, obs_module_text("AirPlay.Video.Anywhere"), "anywhere");
     obs_property_set_long_description(video, obs_module_text("AirPlay.Video.Tooltip"));
 
     obs_property_t* self_signed = obs_properties_add_bool(props, "allow_self_signed_media",

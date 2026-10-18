@@ -19,11 +19,11 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
 - **You decide what AirPlay video may fetch.** With AirPlay video, the device
   sends the receiver a web address and your Mac downloads the video itself.
   The new **AirPlay video** setting in the source's properties controls that:
-  **From any web address** (as before), **Only from the sending device**
-  (videos played from the device's own apps and pages keep working, other
-  web addresses are refused), or **Off** (screen mirroring only). Each refused
-  video is named, with the reason, in the OBS log and on the source's Status
-  line.
+  **Off** (screen mirroring only, now the default), **Only from the sending
+  device** (videos played from the device's own apps and pages work, other
+  web addresses are refused), or **From any web address** (as in earlier
+  versions). Each refused video is named, with the reason, in the OBS log and
+  on the source's Status line.
 - **Only the device that started an AirPlay video can control or stop it.**
 - **Updates must be signed.** From this version on, an update is installed only
   if it carries a valid signature by the project's release key, in addition to
@@ -61,6 +61,11 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
 - The plugin is smaller.
 
 ## Updating
+
+**AirPlay video is now off by default.** Screen mirroring works as before. To
+send videos from Safari or apps to OBS again, open the AirPlay source's
+properties and set **AirPlay video** to **From any web address** (or **Only
+from the sending device**).
 
 - **From v2.4.0 or later:** click **Install Update** in the prompt, then quit
   OBS when it suits you. The plugin is replaced as OBS quits.

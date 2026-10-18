@@ -12,7 +12,7 @@ struct ModuleSettings {
     bool follow_sender_clock = false;
     bool log_latency_telemetry = false;
     bool allow_self_signed_media = false;
-    bool accept_airplay_video = true;
+    bool accept_airplay_video = false;  // AirPlay video is off until turned on
     bool media_sender_only = false;
     bool check_for_updates = true;
 
