@@ -14,6 +14,7 @@ extern "C" {
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 extern "C" void blog(int, const char* format, ...)
@@ -618,6 +619,98 @@ int tlsVerify(const char* location)
     return ok ? 0 : 1;
 }
 
+// A stream that does not start at 0 (MPEG-TS with -output_ts_offset 10):
+// a paused seek must land on its target without decoding from a point
+// start_time too early.
+int tsSeek(const char* location)
+{
+    std::atomic<unsigned int> frames{0};
+    std::atomic<int64_t> last_frame_ns{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0] && frame.width > 0) {
+            ++frames;
+            last_frame_ns.store(static_cast<int64_t>(os_gettime_ns()));
+        }
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play(location, 0.0);
+    for (int i = 0; i < 200 && frames.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    player.setRate(0.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    double worst_ms = 0.0;
+    double worst_error = 0.0;
+    bool all_shown = true;
+    for (const double target : {20.0, 5.0, 25.0}) {
+        const unsigned int before = frames.load();
+        const auto started = std::chrono::steady_clock::now();
+        player.seek(target);
+        while (frames.load() == before &&
+               std::chrono::steady_clock::now() - started < std::chrono::seconds(5)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const double position = player.getPlaybackInfo().position;
+        all_shown = all_shown && frames.load() > before;
+        worst_ms = std::max(worst_ms, ms);
+        worst_error = std::max(worst_error, std::fabs(position - target));
+        std::fprintf(stderr, "media-smoke: ts-seek target=%.3f position=%.3f preview_ms=%.1f\n",
+                     target, position, ms);
+    }
+    player.stop();
+    // One frame at 30 fps; a seek that starts 10 s early decodes 300 frames
+    // of 720p before the preview and takes several times longer.
+    const bool ok = all_shown && worst_error <= 1.0 / 30.0 + 1e-6 && worst_ms < 400.0;
+    std::fprintf(stderr, "media-smoke: ts-seek worst_error=%.4f worst_preview_ms=%.1f -> %s\n",
+                 worst_error, worst_ms, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+// After the end of an item, a resume is ignored and a scrub reopens the item
+// at that position (paused), instead of reporting a position nothing shows.
+int afterEnd(const char* location)
+{
+    std::atomic<unsigned int> frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0] && frame.width > 0) ++frames;
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play(location, 0.0);
+    MediaPlaybackInfo info;
+    for (int i = 0; i < 400; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        info = player.getPlaybackInfo();
+        if (info.ended) break;
+    }
+    const bool ended = info.ended;
+    player.setRate(1.0f);
+    const bool resume_ignored = player.getPlaybackInfo().rate == 0.0f &&
+                                player.getPlaybackInfo().ended;
+    const unsigned int before = frames.load();
+    player.seek(2.0);
+    for (int i = 0; i < 100 && frames.load() == before; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    info = player.getPlaybackInfo();
+    const bool reopened = frames.load() > before && !info.ended && info.rate == 0.0f &&
+                          std::fabs(info.position - 2.0) < 0.1;
+    // Non-finite values from a sender are refused.
+    player.seek(std::numeric_limits<double>::infinity());
+    const bool finite = std::isfinite(player.getPlaybackInfo().position);
+    player.stop();
+    const bool ok = ended && resume_ignored && reopened && finite;
+    std::fprintf(stderr, "media-smoke: after-end ended=%d resume_ignored=%d reopened=%d "
+                 "position=%.3f finite=%d -> %s\n", ended, resume_ignored, reopened,
+                 info.position, finite, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     // The smokes play local files and loopback servers; the policy itself is
@@ -632,6 +725,12 @@ int main(int argc, char** argv)
     }
     if (argc == 3 && std::strcmp(argv[1], "--tls-verify") == 0) {
         return tlsVerify(argv[2]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--ts-seek") == 0) {
+        return tsSeek(argv[2]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--after-end") == 0) {
+        return afterEnd(argv[2]);
     }
     if (argc == 3 && std::strcmp(argv[1], "--follow-clock") == 0) {
         return followClock(argv[2]);
@@ -683,7 +782,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --ts-seek TS_URL | --after-end SHORT_URL\n", argv[0]);
         return 2;
     }
 

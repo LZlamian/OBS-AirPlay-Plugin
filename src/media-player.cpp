@@ -103,6 +103,37 @@ std::string safe_location_for_log(std::string location)
     return location;
 }
 
+// One rendition is used for a whole HLS item (no adaptation), so prefer a
+// quick start over the largest one. Used by both the manifest preflight and
+// FFmpeg's program selection.
+constexpr int64_t kHlsTargetBitrate = 1500000;
+
+// Probe limits for HLS: consulted while the demuxer opens its first
+// segment and again by find_stream_info, so startup does not download
+// several whole segments to learn what the playlist already says.
+void apply_hls_probe_limits(AVFormatContext* format)
+{
+    format->probesize = 384 * 1024;
+    format->max_analyze_duration = 2 * AV_TIME_BASE;
+    format->max_probe_packets = 256;
+    format->skip_estimate_duration_from_pts = 1;
+}
+
+bool is_hls_mime_type(const std::string& type)
+{
+    std::string lower;
+    for (char c : type) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return lower.find("mpegurl") != std::string::npos;  // application/vnd.apple.mpegurl, audio/mpegurl
+}
+
+// Positions are relative to the stream's start; av_seek_frame takes the
+// container's absolute timestamps (MPEG-TS and HLS rarely start at 0).
+double stream_start_seconds(const AVFormatContext* format)
+{
+    return format && format->start_time != AV_NOPTS_VALUE
+        ? format->start_time / static_cast<double>(AV_TIME_BASE) : 0.0;
+}
+
 int64_t variant_bitrate(const AVFormatContext* format, const AVProgram* program)
 {
     if (!format || !program) {
@@ -158,9 +189,9 @@ AVProgram* select_hls_program(AVFormatContext* format, int64_t* selected_bitrate
     }
 
     // FFmpeg otherwise probes the first segments of every rendition in a
-    // multivariant playlist. Pick one balanced rendition before stream-info
-    // analysis; 3 Mbps normally maps to a good 720p starting point.
-    constexpr int64_t kTargetBitrate = 3000000;
+    // multivariant playlist. Pick one rendition before stream-info analysis,
+    // by the same rule as the manifest preflight (choose_hls_variant).
+    constexpr int64_t kTargetBitrate = kHlsTargetBitrate;
     AVProgram* best_under_target = nullptr;
     AVProgram* lowest_over_target = nullptr;
     int64_t best_under_bitrate = -1;
@@ -397,10 +428,7 @@ std::vector<HlsVariant> parse_hls_variants(const std::string& playlist)
 
 const HlsVariant* choose_hls_variant(const std::vector<HlsVariant>& variants)
 {
-    // Prefer quick startup over the largest rendition. This player currently
-    // uses one rendition for the session rather than adapting between all of
-    // them, so 1.5 Mbps is a practical quality/latency compromise.
-    constexpr int64_t kTargetBitrate = 1500000;
+    constexpr int64_t kTargetBitrate = kHlsTargetBitrate;
     const HlsVariant* best_under = nullptr;
     const HlsVariant* lowest_over = nullptr;
     for (const HlsVariant& variant : variants) {
@@ -540,6 +568,17 @@ public:
 
     AVIOContext* context() const { return m_context; }
     int64_t size() const { return m_size; }
+    // The server's Content-Type, as FFmpeg's HTTP input reports it.
+    std::string mimeType() const
+    {
+        uint8_t* type = nullptr;
+        std::string result;
+        if (m_inner && av_opt_get(m_inner, "mime_type", AV_OPT_SEARCH_CHILDREN, &type) >= 0 && type) {
+            result = reinterpret_cast<char*>(type);
+        }
+        av_free(type);
+        return result;
+    }
     int reopens() const { return m_reopens; }
 
 private:
@@ -681,19 +720,28 @@ public:
         audio_callback = std::move(callback);
     }
 
-    void play(const std::string& location, double start_position)
+    void play(const std::string& location, double start_position, float initial_rate = 1.0f)
     {
         // control_mutex serialises play() and stop(), which run on the HTTP
         // thread, the UxPlay mirror thread, the deferred-clear thread and the
         // OBS main thread; `worker` is only touched under it.
         std::lock_guard<std::mutex> control(control_mutex);
         stopLocked();
+        // The start position comes from the sender: +inf survives max(0, x)
+        // and converting it to int64_t is undefined.
+        if (!std::isfinite(start_position)) start_position = 0.0;
+        start_position = std::max(0.0, start_position);
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             info = {};
-            info.position = std::max(0.0, start_position);
-            info.rate = 1.0f;
-            anchor_valid = true;
+            current_location = location;
+            // Scrub-burst detection compares against the previous item's seeks.
+            seek_generation = 0;
+            last_seek_at = {};
+            coarse_preview_after = {};
+            info.position = start_position;
+            info.rate = initial_rate;
+            anchor_valid = initial_rate > 0.0f;
             anchor_position = info.position;
             anchor_wall_time = std::chrono::steady_clock::now();
             catching_up_video = catching_up_audio = true;
@@ -714,7 +762,7 @@ public:
             clock_initialized = false;
         }
         stop_requested.store(false, std::memory_order_release);
-        worker = std::thread(&Impl::run, this, location, std::max(0.0, start_position));
+        worker = std::thread(&Impl::run, this, location, start_position);
     }
 
     void stop()
@@ -747,7 +795,34 @@ public:
 
     void seek(double position)
     {
-        std::lock_guard<std::mutex> lock(state_mutex);
+        if (!std::isfinite(position)) {
+            blog(LOG_WARNING, "[MEDIA] scrub to a non-finite position ignored");
+            return;
+        }
+        position = std::max(0.0, position);
+        std::string restart_location;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            if (info.duration_known && info.duration > 0.0) {
+                position = std::min(position, info.duration);
+            }
+            // The worker has finished at the end of the item: nothing would
+            // act on a seek, yet /playback-info would report the new
+            // position. Start the item again there instead, paused.
+            if (info.ended && !current_location.empty()) {
+                restart_location = current_location;
+            } else {
+                seekLocked(position);
+                return;
+            }
+        }
+        blog(LOG_INFO, "[MEDIA] scrub to %.3fs after the end of the item; reopening it there",
+             position);
+        play(restart_location, position, 0.0f);
+    }
+
+    void seekLocked(double position)
+    {
         // Senders that keep a local player in sync send small corrective
         // scrubs while playing. A re-seek restarts decoding from a keyframe
         // (a visible hitch), so ignore corrections the output already meets.
@@ -804,6 +879,13 @@ public:
     void setRate(float rate)
     {
         std::lock_guard<std::mutex> lock(state_mutex);
+        if (!std::isfinite(rate)) rate = 0.0f;
+        // After the end nothing plays; resuming needs a scrub (which reopens
+        // the item) or a new /play.
+        if (info.ended && rate > 0.0f) {
+            blog(LOG_INFO, "[MEDIA] rate %.2f after the end of the item ignored", rate);
+            return;
+        }
         // Safari normally sends only 0 (pause) and 1 (play). Positive values
         // are still accepted so protocol diagnostics remain honest.
         const float previous_rate = info.rate;
@@ -1205,8 +1287,24 @@ private:
         return true;
     }
 
+    // How far before a target to seek in a container without a keyframe
+    // index (MPEG-TS): FFmpeg's timestamp search lands on any packet, and
+    // decoding then starts at the next keyframe, after the target. Seeking
+    // this much earlier (about a GOP) lets the discard logic stop exactly on
+    // the target. HLS segments and indexed containers start on keyframes.
+    static double seekPreroll(const AVFormatContext* format, int video_index)
+    {
+        constexpr double kUnindexedSeekPreroll = 2.0;
+        if (!format || video_index < 0 || !format->iformat || !format->iformat->name ||
+            std::strstr(format->iformat->name, "hls")) {
+            return 0.0;
+        }
+        return avformat_index_get_entries_count(format->streams[video_index]) > 0
+            ? 0.0 : kUnindexedSeekPreroll;
+    }
+
     bool handlePendingSeek(AVFormatContext* format, AVCodecContext* video_decoder,
-                           AVCodecContext* audio_decoder)
+                           AVCodecContext* audio_decoder, double preroll)
     {
         double target = 0.0;
         {
@@ -1219,7 +1317,8 @@ private:
             clock_initialized = false;
         }
 
-        const int64_t timestamp = static_cast<int64_t>(target * AV_TIME_BASE);
+        const int64_t timestamp = static_cast<int64_t>(
+            (std::max(0.0, target - preroll) + stream_start_seconds(format)) * AV_TIME_BASE);
         const int result = av_seek_frame(format, -1, timestamp, AVSEEK_FLAG_BACKWARD);
         if (result < 0) {
             blog(LOG_WARNING, "[MEDIA] seek to %.3fs failed: %s",
@@ -1583,27 +1682,29 @@ private:
             default_io_open = format->io_open;
             format->io_open = &Impl::policyIoOpen;
         }
-        if (looks_like_hls_url(playback_location)) {
-            // These limits are consulted while the HLS demuxer opens its
-            // first transport-stream segment, not only by find_stream_info().
-            format->probesize = 384 * 1024;
-            format->max_analyze_duration = 2 * AV_TIME_BASE;
-            format->max_probe_packets = 256;
-            format->skip_estimate_duration_from_pts = 1;
-        }
-
         // Progressive HTTP media goes through the byte-exact input layer;
-        // HLS and unsized responses keep FFmpeg's own HTTP input.
+        // HLS and unsized responses keep FFmpeg's own HTTP input. HLS is
+        // known by its .m3u8 name or, for token-style URLs, by the server's
+        // content type.
+        bool hls_input = looks_like_hls_url(playback_location);
         std::unique_ptr<ResilientHttpIo> resilient_io;
-        if (is_http_url(playback_location) && !looks_like_hls_url(playback_location)) {
+        if (is_http_url(playback_location) && !hls_input) {
             resilient_io = std::make_unique<ResilientHttpIo>(
                 playback_location, AVIOInterruptCB{&Impl::interruptCallback, this});
-            if (resilient_io->open()) {
+            if (resilient_io->open() && is_hls_mime_type(resilient_io->mimeType())) {
+                blog(LOG_INFO, "[MEDIA] the URL serves an HLS playlist (%s)",
+                     resilient_io->mimeType().c_str());
+                hls_input = true;
+                resilient_io.reset();
+            } else if (resilient_io->context()) {
                 format->pb = resilient_io->context();
                 format->flags |= AVFMT_FLAG_CUSTOM_IO;
             } else {
                 resilient_io.reset();
             }
+        }
+        if (hls_input) {
+            apply_hls_probe_limits(format);
         }
 
         AVDictionary* options = nullptr;
@@ -1639,11 +1740,7 @@ private:
         int64_t selected_bitrate = 0;
         AVProgram* selected_program = select_hls_program(format, &selected_bitrate);
         if (selected_program) {
-            // Bound HLS analysis so startup does not download multiple full
-            // segments merely to estimate properties already in the playlist.
-            format->probesize = 512 * 1024;
-            format->max_analyze_duration = 2 * AV_TIME_BASE;
-            format->max_probe_packets = 256;
+            apply_hls_probe_limits(format);
             blog(LOG_INFO,
                  "[MEDIA] selected one of %u HLS variants (bandwidth=%lld bps)",
                  format->nb_programs, static_cast<long long>(selected_bitrate));
@@ -1713,8 +1810,10 @@ private:
              format->iformat && format->iformat->name ? format->iformat->name : "unknown",
              video_name, audio_name, duration);
 
+        const double seek_preroll = seekPreroll(format, video_index);
         if (start_position > 0.0) {
-            const int64_t target = static_cast<int64_t>(start_position * AV_TIME_BASE);
+            const int64_t target = static_cast<int64_t>(
+                (std::max(0.0, start_position - seek_preroll) + format_start_seconds) * AV_TIME_BASE);
             if (av_seek_frame(format, -1, target, AVSEEK_FLAG_BACKWARD) < 0) {
                 blog(LOG_WARNING, "[MEDIA] initial seek to %.3fs was not available", start_position);
             }
@@ -1748,7 +1847,7 @@ private:
         bool demuxed_since_seek = false;
 
         while (!stop_requested.load(std::memory_order_acquire)) {
-            if (handlePendingSeek(format, video_decoder, audio_decoder)) {
+            if (handlePendingSeek(format, video_decoder, audio_decoder, seek_preroll)) {
                 demuxed_since_seek = false;
                 swr_free(&resampler);
                 av_channel_layout_uninit(&input_layout);
@@ -1928,6 +2027,8 @@ private:
     mutable std::mutex state_mutex;
     std::condition_variable state_cv;
     MediaPlaybackInfo info;
+    // The current item, for reopening it after its end (seek()).
+    std::string current_location;
     bool seek_pending = false;
     double seek_target = 0.0;
     uint64_t seek_generation = 0;
