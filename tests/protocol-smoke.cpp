@@ -1036,9 +1036,52 @@ int main(int argc, char** argv)
                 held_response[2].empty() ? "-" : held_response[2].substr(9, 3).c_str(),
                 released_response.c_str());
 
+    // A peer that keeps sending requests but never reads the responses
+    // fills the socket buffers; the receiver's send() must time out and drop
+    // it instead of blocking every other peer.
+    bool nonreader_ok = false;
+    long long nonreader_ms = 0;
+    {
+        const int flood_fd = socket(AF_INET, SOCK_STREAM, 0);
+        int small = 1024;
+        setsockopt(flood_fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+        sockaddr_in address = {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port);
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+        int flooded = 0;
+        if (connect(flood_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
+            timeval send_timeout = {0, 200000};
+            setsockopt(flood_fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+            int nosigpipe = 1;
+            setsockopt(flood_fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+            // ~1.5 KB per /info response; well past the socket buffers.
+            for (int i = 0; i < 1500; ++i) {
+                if (!sendAll(flood_fd, info_request.data(), info_request.size())) break;
+                ++flooded;
+                usleep(1000);
+            }
+        }
+        const auto started = std::chrono::steady_clock::now();
+        std::string response;
+        const int fd = connectLocal(port);
+        if (fd >= 0) {
+            timeval timeout = {6, 0};
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            if (sendAll(fd, info_request.data(), info_request.size())) response = receiveResponse(fd);
+            close(fd);
+        }
+        nonreader_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        close(flood_fd);
+        nonreader_ok = flooded > 0 && response.find("200 OK") != std::string::npos;
+        std::printf("non_reading_peer=%s requests=%d info_ms=%lld\n",
+                    nonreader_ok ? "dropped" : "FAILED", flooded, nonreader_ms);
+    }
+
     raop_stop_httpd(raop);
     raop_destroy(raop);
     dnssd_destroy(dnssd);
     return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && stall_ok && policy_ok &&
-        oversized_ok && budget_ok ? 0 : 1;
+        oversized_ok && budget_ok && nonreader_ok ? 0 : 1;
 }
