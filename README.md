@@ -1,52 +1,13 @@
 # OBS AirPlay Plugin
 
-A native macOS plugin for OBS Studio that enables AirPlay screen mirroring from iOS and macOS devices directly into OBS as a source.
+A native macOS plugin for OBS Studio: your Mac appears as an AirPlay receiver,
+and an iPhone, iPad or Mac that mirrors its screen to it, or sends a video with
+AirPlay, appears in OBS as a source.
 
-Current release: **v2.5.2** — security and stability hotfix; v2.5.1 and earlier can be crashed by a single request from the local network, so please update ([release notes](RELEASE_NOTES_v2.5.2.md)).
-
-## What's new in v2.5.2
-
-- Fixes a crash that any device on the local network could trigger in v2.5.1 and earlier with one malformed request; no pairing needed
-- One stalled connection can no longer freeze mirroring and AirPlay video for every device
-- Fixes a possible crash when the receiver is renamed, and a possible hang when AirPlay video is stopped while paused or as OBS quits
-
-## What's new in v2.5.1
-
-- When a device ends its AirPlay session or its connection closes, the source is cleared about half a second later; the last frame no longer stays frozen in OBS
-- A device that reconnects or switches items straight away still replaces the picture without an empty source in between
-
-## What's new in v2.5.0
-
-- New source option **Keep AirPlay video in step with the sending app** (off by default): playback is timed from the sender's play, seek or resume command, so OBS no longer runs behind by the time a file took to open
-- A `[MEDIA] in step with the sender` log line reports how closely each start matched
-
-## What's new in v2.4.0
-
-- **Install Update** in the update prompt: the new release is downloaded in the background and installed when you quit OBS, with no administrator password
-- Downloads are checked against the SHA-256 digest GitHub publishes, and the plugin's code seal is verified before anything is replaced
-- Nothing is downloaded or installed unless you click **Install Update**
-
-## What's new in v2.3.0
-
-- Hardware decoding for screen mirroring and AirPlay video, with automatic software fallback (force software with `OBS_AIRPLAY_HW_DECODE=0`)
-- Portrait recordings play upright in AirPlay video
-- OBS no longer goes black when an app cancels AirPlay video while mirroring
-- AirPlay video items swapped in while paused stay paused, and OBS follows scrubber drags while paused
-- A malformed request from the local network can no longer crash OBS
-- Safer renaming, shutdown and stream restarts; stale temporary media files are cleaned up
-
-## What's new in v2.2.0
-
-- iOS "AirPlay video" from native apps that play local files with AVPlayer (`allowsExternalPlayback`): OBS fetches the video from the sender's own media server
-- Item switches on the same player (`playlistRemove`/`playlistInsert`) play the new item instead of being rejected
-- Playback that follows the sender: no keyframe pre-roll after seeks, preview frames when seeking while paused, still clips, accurate `/playback-info`, hold on the last frame at item end
-- Paused items and still images (photos, PDF pages) always appear; no blank frames between items
-- Screen mirroring comes back after an app stops AirPlay video (previously OBS stayed black)
-- Robust transfers from the sender's media server: early-ended responses continue with fresh range requests instead of losing frames
-- A rejected `/play` no longer drops the AirPlay connection
-- Optional `[MEDIA-TRACE]` protocol trace for diagnosing AirPlay video senders
-
-See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) release notes for the complete summaries, and the [v2.1.0 release notes](RELEASE_NOTES_v2.1.0.md) for Safari Media AirPlay.
+Current release: **v2.5.2**, a security and stability hotfix. v2.5.1 and earlier
+can be crashed by a single request from the local network, so please update
+([release notes](docs/releases/RELEASE_NOTES_v2.5.2.md)). Changes since then are
+in the [changelog](CHANGELOG.md).
 
 ## Features
 
@@ -56,7 +17,7 @@ See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) 
 - ✅ **Page-local video support** — Safari `blob:` MP4 media is fetched over AirPlay's reverse channel
 - ✅ **iOS AirPlay video from native apps** — AVPlayer local-file playback (`mediaType=file`) is fetched from the sender's media server, with play/pause, seek, and item switches
 - ✅ **Sender-local media support** — stateful `file:` and `blob:` media URLs are fetched over AirPlay's reverse channel, including senders that establish `/reverse` after `/play`
-- ✅ RAOP (Remote Audio Output Protocol) for audio streaming
+- ✅ Audio with the mirrored screen
 - ✅ H.264 and HEVC video decoding
 - ✅ AAC audio decoding
 - ✅ No password required
@@ -74,19 +35,24 @@ See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) 
 
 ## Requirements
 
-### macOS
-- macOS 12 (Monterey) or later
-- OBS Studio 28.0 or later
-- Xcode Command Line Tools and Homebrew only when building from source
+- macOS 12 Monterey or later, Apple silicon (Intel builds are produced by CI
+  but not released yet)
+- OBS Studio 32 (the plugin is built against its headers; earlier versions are
+  untested)
+- The sending device and the Mac on the same network and VLAN, with multicast
+  (Bonjour) allowed between them
 
-### System Requirements
-- Your iOS device and Mac must be on the same network
-- Firewall should allow incoming connections on ports 7000 and 5000
-- Multicast DNS (mDNS) must be enabled on your network
+The receiver uses **TCP port 7000** (7001 if 7000 is taken), UDP ports chosen
+by macOS for audio and timing, and Bonjour (UDP 5353). macOS's own **AirPlay
+Receiver** also uses port 7000: if devices cannot connect, turn it off in
+**System Settings > General > AirDrop & Handoff**. If the macOS firewall is on,
+allow incoming connections for OBS when asked (or in **System Settings >
+Network > Firewall > Options**); you do not need to turn the firewall off.
 
 ## Installation
 
-### Before You Begin
+### Before you begin
+
 確保在安装前满足以下前提条件 / Ensure the following before installing:
 
 1. <img width="272" height="344" alt="1" src="https://github.com/user-attachments/assets/7b756c57-56e6-4f57-a043-5d5e2350fe5c" />
@@ -95,126 +61,60 @@ See the [v2.3.0](RELEASE_NOTES_v2.3.0.md) and [v2.2.0](RELEASE_NOTES_v2.2.0.md) 
 
 3. <img width="716" height="619" alt="3" src="https://github.com/user-attachments/assets/423eebf2-14db-4a28-9940-7b43c04ca840" />
 
-### macOS Security Warning
-When double clicking to install you may get a notice indicating it's not safe to install. **DO NOT move it to trash.** Click **Done**.  
-双击安装时，您可能会看到提示指出该安装程序不安全。**请勿移至废纸篓**，点击「完成」。
+### Install
 
-Next go to **Apple Menu () → System Settings → Privacy & Security**, scroll to the bottom and click **Open Anyway**. Proceed to install.  
-接下来前往 **Apple 菜单 () → 系统设置 → 隐私与安全性**，滚动到底部点击**「仍要打开」**，然后继续安装。
+Download the latest `.pkg` from the [Releases page](https://github.com/LZlamian/OBS-AirPlay-Plugin/releases)
+and open it. It installs the plugin for the logged-in user, in
+`~/Library/Application Support/obs-studio/plugins/obs-airplay.plugin` (and
+removes the system-wide copy that versions before 2.6 also installed). The
+package contains its own FFmpeg and other libraries; Homebrew is not needed.
+The `.zip` contains the same `obs-airplay.plugin`: copy it into that folder
+yourself if you prefer.
 
-On first launch, macOS may ask whether **OBS AirPlay Discovery** can use Bluetooth. Click **Allow**. Bluetooth is used only to advertise the nearby receiver for faster discovery; mirroring media still travels over your local network.
+**Signing:** releases are not signed with an Apple Developer ID or notarized,
+so macOS warns before opening the installer. Do not move it to the Trash: click
+**Done**, then go to **System Settings > Privacy & Security**, scroll down and
+click **Open Anyway**.  
+双击安装时可能会提示安装程序不安全：**请勿移至废纸篓**，点击「完成」，然后前往
+**系统设置 → 隐私与安全性**，滚动到底部点击「仍要打开」。
 
-### Quick Install (Recommended)
-
-Download the latest `.pkg` installer from the [Releases page](https://github.com/LZlamian/OBS-AirPlay-Plugin/releases) and double-click to install.
-
-The release package contains its runtime dependencies; Homebrew is not required
-to install it.
+When OBS first starts with the plugin, macOS may ask whether **OBS AirPlay
+Discovery** may use Bluetooth. Allowing it lets nearby devices find the receiver
+faster; mirroring itself always goes over the local network.
 
 ### Updates
 
-OBS AirPlay checks GitHub's stable-release endpoint at most once every 24 hours.
-When a newer version is available, **OBS AirPlay Discovery** offers to install
-it, show the release page, ask again later, or skip that version.
+Once a day the plugin's helper asks GitHub whether a newer release exists. If
+one does, it asks you (never while OBS is streaming or recording, and without
+taking the keyboard focus from OBS): **Install Update**, **View Release**,
+**Later** (asks again in a week) or **Skip This Version**.
 
-**Install Update** downloads the release zip in the background while OBS keeps
-running, and replaces the plugin when you quit OBS. The next time OBS starts it
-runs the new version. No administrator password is needed, because only the
-copy in your own `~/Library/Application Support/obs-studio/plugins` is replaced.
+**Install Update** downloads the release while OBS keeps running and replaces
+the plugin when you quit OBS; no administrator password is needed. A download
+is used only if it carries a valid signature by the project's release key, has
+the SHA-256 digest GitHub publishes, and is this plugin, at the announced
+version, built for your Mac and macOS version, with an intact code seal; it is
+checked again just before the swap. The replaced version is kept next to the
+plugin (`.obs-airplay.previous`) until the new one has started. Only a plugin
+in your own home folder updates itself.
 
-- Nothing is downloaded or installed unless you click **Install Update**.
-- The download must match the SHA-256 digest GitHub publishes for the release
-  file, must be this plugin at the announced version, and must be intact
-  (its code seal is checked after download and again before installing).
-  Anything else is discarded and the installed plugin is left as it is.
-- If the plugin is somewhere you cannot write to, or a release has no zip for
-  your Mac, the prompt offers only the release page, as before.
-- An update that is waiting can be cancelled by deleting the hidden folder
-  `.obs-airplay.update` next to the plugin.
+To make no update requests at all, turn off **Check for plugin updates once a
+day** in the AirPlay source's properties. The request goes to `api.github.com`
+and carries only the plugin version in its User-Agent.
 
-The check sends a standard HTTPS request to `api.github.com`. It contains the
-installed plugin version in its User-Agent and no OBS settings or AirPlay data.
-The download comes from `github.com`.
+### Uninstall
 
-### Build from source
-
-#### 1. Install build tools
-
-```bash
-# Install Xcode Command Line Tools
-xcode-select --install
-
-# Install Homebrew if you don't have it
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install required libraries
-brew install \
-    cmake \
-    pkg-config \
-    ffmpeg \
-    libplist \
-    openssl@3
-```
-
-Release packaging rejects dependencies built for a newer macOS version than
-the documented baseline. Run `scripts/build-macos-release-deps.sh` first and
-pass its printed `OBS_AIRPLAY_DEPS_PREFIX` value to `scripts/package-macos.sh`
-to build the pinned macOS 12 release dependencies. Set
-`OBS_AIRPLAY_CODESIGN_IDENTITY` and `OBS_AIRPLAY_INSTALLER_IDENTITY` to the
-appropriate Developer ID identities before running `scripts/package-macos.sh`.
-
-#### 2. Clone OBS Studio Source
-
-You need the OBS Studio source code to build plugins:
-
-```bash
-# Replace "30.2.0" with your installed OBS version
-# Check your version in OBS: Help -> About
-cd ~/Developer
-git clone --recursive --branch 30.2.0 https://github.com/obsproject/obs-studio.git
-```
-
-#### 3. Clone This Plugin
-
-```bash
-cd ~/Developer
-git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git
-cd obs-airplay-plugin
-```
-
-#### 4. Build the Plugin
-
-```bash
-mkdir build
-cd build
-
-# Configure CMake
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_PREFIX_PATH="/Applications/OBS.app/Contents/Resources" \
-    -DQT_VERSION=6
-
-# Build
-cmake --build . --config Release
-```
-
-#### 5. Install the Plugin
-
-```bash
-# Create the plugins directory if it doesn't exist
-mkdir -p ~/Library/Application\ Support/obs-studio/plugins
-
-# Copy the plugin
-cp -r obs-airplay.plugin ~/Library/Application\ Support/obs-studio/plugins/
-```
-
-#### 6. Restart OBS Studio
-
-Close and reopen OBS Studio to load the plugin.
+Quit OBS and delete `~/Library/Application Support/obs-studio/plugins/obs-airplay.plugin`
+(and, if present, `.obs-airplay.update` and `.obs-airplay.previous` in the same
+folder). The plugin's settings are in
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`; its
+helper's preferences can be removed with
+`defaults delete com.lzlamian.obs-airplay.discovery`.
 
 ## Usage
 
-### Setting Up in OBS
+### Set up in OBS
+
 安装完成后，请按照以下步骤操作 / Once installed follow the steps below:
 
 1. <img width="789" height="343" alt="Step 1" src="https://github.com/user-attachments/assets/29bc5a51-b681-4a4d-867b-8c7e86c99e16" />
@@ -223,7 +123,10 @@ Close and reopen OBS Studio to load the plugin.
 4. <img width="958" height="838" alt="Step 4" src="https://github.com/user-attachments/assets/9ed028ed-5354-4f8e-a112-a94bb3829d88" />
 5. <img width="959" height="828" alt="Step 5" src="https://github.com/user-attachments/assets/bd24e97b-d491-47f2-9117-2553a3484c54" />
 
-### Connect from iOS
+In OBS, click **+** in the Sources panel, choose **AirPlay** and give it a name.
+
+### Connect
+
 完成上述操作后，在您的 iPhone/iPad 上执行以下步骤 / After this, on your iPhone/iPad:
 
 1. ![Control Centre Screen Mirroring](https://github.com/user-attachments/assets/68b9ade9-0159-4835-9be7-2445a9dc31d9)
@@ -231,261 +134,73 @@ Close and reopen OBS Studio to load the plugin.
 
 现在，您应该可以看到您的设备已通过 AirPlay 镜像到 OBS 的「来源」中了！:)  
 You should now see your device mirrored through AirPlay as an OBS source 🎉
-   - In OBS, click the `+` button in the Sources panel
-   - Select "AirPlay" from the list
-   - Give it a name (e.g., "iPhone Screen")
-   - Click OK
+On the device, open Control Center, tap **Screen Mirroring** and choose
+**OBS AirPlay** (or the name you gave the receiver). To send only a video, tap
+the AirPlay control in Safari or in an app's player and choose the receiver.
+When the device stops, the source goes empty about half a second later.
 
-2. **Connect from iOS**
-   - On your iPhone/iPad, open Control Center (swipe down from top-right)
-   - Tap "Screen Mirroring"
-   - You should see "OBS AirPlay" in the list
-   - Tap it to connect
+### Settings
 
-   To send a website video instead of mirroring the whole screen, open a
-   compatible MP4 or HLS video in Safari, tap its AirPlay control, and select
-   the OBS receiver. Safari may take a few seconds to transfer or open the
-   media before the first frame appears.
+All AirPlay sources share these settings (there is one receiver per OBS):
 
-3. **Start Streaming**
-   - Your iOS screen should now appear in OBS
-   - The source will automatically adjust to the device resolution
+- **Server Name**: the name devices show. Applied about a second after you stop
+  typing; at most 63 bytes. Give each Mac a different name if several run the
+  plugin. **Reset to Default** restores "OBS AirPlay".
+- **Status**: what the receiver is doing, and why it is not working when it is
+  not (for example, both ports in use).
+- **Keep AirPlay video in step with the sending app**: for apps that also play
+  the video on the device; leave off for Safari.
+- **Allow self-signed media servers**: AirPlay video from HTTPS servers whose
+  certificate cannot be verified is refused unless this is on.
+- **Log latency telemetry**: timing figures in the OBS log, for diagnosing.
+- **Check for plugin updates once a day**.
 
-4. **Stop**
-   - When the device stops AirPlay, the source goes empty about half a second later
+For troubleshooting, two switches are files in
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`
+(restart OBS after creating or deleting them): `obs-airplay-software-decode`
+forces software decoding (or start OBS with `OBS_AIRPLAY_HW_DECODE=0`), and
+`obs-airplay-media-trace` logs the AirPlay video protocol as `[MEDIA-TRACE]`
+lines (or `OBS_AIRPLAY_MEDIA_TRACE=1`; URLs in it have their query strings
+removed). `OBS_AIRPLAY_MEDIA_PORTS="80,443,8080,8443"` sets the ports AirPlay
+video may fetch from on hosts other than the sending device.
 
-### Troubleshooting
+## Troubleshooting
 
-#### Device Not Showing Up in Screen Mirroring List
+Run `./diagnose.sh` from the source folder while OBS is open (no administrator
+rights needed). It checks the installation, ports, firewall, Bonjour
+advertisement and the OBS log, and says what to change.
 
-1. **Check Network Connection**
-   - Ensure your Mac and iOS device are on the same WiFi network
-   - Try disconnecting and reconnecting to WiFi on both devices
+- **The receiver is not in the Screen Mirroring list**: check the source's
+  Status line; make sure both devices are on the same network (not a guest
+  network, not split by a VPN); check `dns-sd -B _airplay._tcp` lists the name.
+- **It is listed but connecting fails**: port 7000 may be taken by macOS's
+  AirPlay Receiver (see Requirements), or the firewall blocks OBS.
+- **Stutter**: use 5 GHz Wi-Fi or Ethernet for the Mac; turn on latency
+  telemetry and look at the `[latency]` lines.
+- **AirPlay video does not play**: DRM-protected video cannot be received;
+  page-local Safari videos are transferred whole first (up to 128 MiB); videos
+  on hosts the receiver will not fetch from (loopback, link-local, unusual
+  ports) are refused, see the OBS log.
 
-2. **Check Firewall Settings**
-   ```bash
-   # Temporarily disable firewall to test
-   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
-   
-   # If this fixes it, add OBS to firewall exceptions:
-   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Applications/OBS.app
-   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS.app
-   
-   # Re-enable firewall
-   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
-   ```
+More in [INSTALL.md](INSTALL.md). Before posting logs or `diagnose.sh` output
+in an issue, read them: they name your network, devices and, with the media
+trace on, the addresses of the videos you played.
 
-3. **Check Plugin Logs**
-   - In OBS, go to Help -> Log Files -> View Current Log
-   - Look for "AirPlay" entries
-   - You should see:
-     ```
-     OBS AirPlay Plugin loaded
-     AirPlay server started successfully
-     mDNS advertising started for 'OBS AirPlay'
-     ```
-
-4. **Verify mDNS is Working**
-   ```bash
-   # Install dns-sd tool (comes with Xcode)
-   dns-sd -B _airplay._tcp
-   
-   # You should see "OBS AirPlay" listed
-   # Press Ctrl+C to stop
-   ```
-
-5. **Check Port Availability**
-   ```bash
-   # Check if ports are in use
-   lsof -i :7000
-   lsof -i :5000
-   
-   # If something else is using these ports, you'll need to change them
-   # or stop the conflicting application
-   ```
-
-#### Connection Drops or Stutters
-
-1. **Network Issues**
-   - Move closer to your WiFi router
-   - Reduce network congestion
-   - Use a 5GHz network if available
-
-2. **System Resources**
-   - Check Activity Monitor for high CPU usage
-   - Close unnecessary applications
-   - Lower OBS video resolution/quality settings
-
-#### No Video or Audio
-
-1. **Check OBS Audio Settings**
-   - Go to Settings -> Audio
-   - Ensure monitoring is set correctly
-   - Check the audio mixer levels
-
-2. **Check Source Settings**
-   - Right-click the AirPlay source -> Properties
-   - Verify the server is running
-
-3. **Safari Media AirPlay**
-   - Public media must be reachable by the Mac running OBS
-   - Page-local videos are transferred completely before playback begins
-   - DRM-protected and encrypted MediaSource content is not supported
-   - Reverse-fetched `blob:` MP4 files are limited to 128 MiB
-
-## Configuration
-
-### Changing Server Name
-
-In OBS, right-click the AirPlay source → **Properties** and edit the **Server Name** field.  
-The default is `OBS AirPlay`. Change it to any name you like (e.g. `Studio Mac`, `MacBook Pro`).
-
-The name is applied ~800 ms after you stop typing — mDNS re-advertises once, and the new name appears in the iOS Screen Mirroring list right away (no connection needed).
-
-> **Tip:** If you run the plugin on multiple computers at the same time, give each a unique server name so iOS devices can tell them apart in the Screen Mirroring list.
-
-### Changing Ports
-
-The plugin listens on port 7000 and falls back to 7001 by itself when 7000 is
-taken (for example by a second OBS on the same Mac). To use another port, change
-the port passed to `g_uxplay_integration->start(...)` in `src/plugin-main.cpp`:
-
-```cpp
-g_uxplay_integration->start(mac_address, 7100, initial_name)
-```
-
-**Note:** After changing ports, you must rebuild and reinstall the plugin.
-
-### Enabling Password Protection
-
-Currently, password protection is disabled. To enable it, modify the TXT records in `src/uxplay-integration.cpp`.
-
-## Technical Details
-
-### Protocols Used
-
-1. **Bonjour/mDNS** - Service discovery (makes the receiver visible)
-   - Service Type: `_airplay._tcp`
-   - Service Type: `_raop._tcp`
-   - Port: 5353 (multicast)
-
-2. **AirPlay Protocol**
-   - Port: 7000 (TCP)
-   - HTTP-based protocol
-   - Handles screen mirroring plus Safari `/reverse`, `/play`, playback-info,
-     rate, and scrub controls
-
-3. **RAOP (Remote Audio Output Protocol)**
-   - Port: 5000 (TCP)
-   - RTSP-based protocol
-   - Handles audio streaming
-
-### Video Format
-- Codecs: H.264 and HEVC
-- Containers/protocols: MP4, MPEG-TS, and HLS
-- Resolution: Depends on source device
-
-### Audio Format
-- Codec: AAC-LC
-- Sample Rate: 44100 Hz
-- Channels: 2 (Stereo)
-
-## Development
-
-### Project Structure
-
-```
-obs-airplay-plugin/
-├── CMakeLists.txt           # Build configuration
-├── README.md                # This file
-└── src/
-    ├── plugin-main.cpp      # Plugin entry point, server name debounce
-    ├── airplay-source.cpp   # OBS source implementation
-    ├── airplay-source.hpp
-    ├── airplay-server.cpp   # AirPlay/RAOP socket server + FFmpeg decode pipeline
-    ├── airplay-server.hpp
-    ├── uxplay-integration.cpp  # UxPlay RAOP + mDNS (dnssd) integration
-    ├── uxplay-integration.hpp
-    ├── h264-decoder.cpp     # Video decoder
-    ├── h264-decoder.hpp
-    ├── audio-decoder.cpp    # Audio decoder
-    ├── audio-decoder.hpp
-    ├── media-player.cpp     # Safari URL/blob demux, decode, and playback clock
-    └── media-player.hpp
-```
-
-### Building for Development
+## Building from source
 
 ```bash
-# Debug build with verbose output
-mkdir build-debug
-cd build-debug
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-cmake --build . --config Debug -- -v
-
-# Install to OBS
-cp -r obs-airplay.plugin ~/Library/Application\ Support/obs-studio/plugins/
-
-# View logs
-tail -f ~/Library/Application\ Support/obs-studio/logs/$(ls -t ~/Library/Application\ Support/obs-studio/logs/ | head -1)
+git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git
+cd OBS-AirPlay-Plugin
+brew install cmake pkg-config ffmpeg libplist openssl@3
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
 ```
 
-### Debugging
-
-1. **Enable Debug Logging**
-   - Set log level in OBS: Settings -> Advanced -> Recording -> Log Level -> Debug
-
-2. **Use Console.app**
-   - Open Console.app
-   - Filter for "OBS" or "AirPlay"
-   - Run OBS and watch for messages
-
-3. **AirPlay video protocol trace**
-   - Create `~/Library/Application Support/obs-studio/plugin_config/obs-airplay/obs-airplay-media-trace` (or start OBS with `OBS_AIRPLAY_MEDIA_TRACE=1`) and restart OBS; the older location `~/Library/Application Support/obs-studio/obs-airplay-media-trace` still works
-   - The OBS log then shows every AirPlay video request and response (`/play`, `/action`, `/scrub`, `/rate`, `/stop`, `/playback-info`, reverse-HTTP) as `[MEDIA-TRACE]` lines, plus UxPlay's `[MEDIA]` lines
-   - Delete the file and restart OBS to turn it off; the trace is verbose
-
-4. **Attach Debugger**
-   ```bash
-   # Find OBS process ID
-   ps aux | grep OBS
-   
-   # Attach lldb
-   lldb -p <PID>
-   ```
-
-## Known Issues
-
-1. **4K Streaming**
-   - Currently limited to 1080p
-   - 4K support planned for future release
-
-2. **DRM Content**
-   - Protected or encrypted Safari media cannot be fetched or decoded
-
-3. **Safari Page-Local Media**
-   - `blob:` MP4 media must be transferred completely before playback starts
-   - Reverse-fetched files are currently limited to 128 MiB
-
-4. **AirPlay Video Playback Rates**
-   - Rates other than pause (0) and normal (1) apply to video only; audio is not time-stretched
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## References
-
-- [OBS Plugin Documentation](https://obsproject.com/docs/plugins.html)
-- [AirPlay Protocol Specification](https://openairplay.github.io/airplay-spec/)
-- [Apple Bonjour Documentation](https://developer.apple.com/bonjour/)
-- [mika314/obs-airplay](https://github.com/mika314/obs-airplay) - Original inspiration
+`./build.sh` builds and installs into your OBS plugins folder. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the layout of the code, its
+threads, the tests and the release process, and [CONTRIBUTING.md](CONTRIBUTING.md).
+Report security problems as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
@@ -495,13 +210,8 @@ and in the plugin bundle's `Contents/Resources/licenses/`). Up to v2.5.2 the pro
 code was offered under GPL-2.0-or-later; the released plugin was always GPL-3.0 in effect
 because it links UxPlay.
 
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/LZlamian/OBS-AirPlay-Plugin/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/LZlamian/OBS-AirPlay-Plugin/discussions)
-
 ## Acknowledgments
 
-- Thanks to mika314 for the original obs-airplay project
-- OBS Studio team for the excellent plugin API
-- FFmpeg team for multimedia codecs
+- [UxPlay](https://github.com/FDH2/UxPlay), whose AirPlay implementation the receiver is built on
+- mika314, for the original [obs-airplay](https://github.com/mika314/obs-airplay)
+- The OBS Studio and FFmpeg projects

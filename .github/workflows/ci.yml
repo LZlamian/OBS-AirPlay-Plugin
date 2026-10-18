@@ -130,7 +130,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="RELEASE_NOTES_${{ github.ref_name }}.md"
+          notes="docs/releases/RELEASE_NOTES_${{ github.ref_name }}.md"
           [ -f "$notes" ] || notes=/dev/null
           gh release create "${{ github.ref_name }}" --draft --verify-tag \
             --title "OBS AirPlay ${{ github.ref_name }}" --notes-file "$notes" \

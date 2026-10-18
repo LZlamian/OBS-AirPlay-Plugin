@@ -1,280 +1,80 @@
-# Installation Guide - OBS AirPlay Plugin
+# Installing and troubleshooting OBS AirPlay
 
-## Prerequisites
+## Install
 
-You need:
-1. **macOS 12 or later**
-2. **OBS Studio** installed at `/Applications/OBS.app`
-3. **Homebrew** package manager
-4. **Xcode Command Line Tools**
+1. Quit OBS.
+2. Download `obs-airplay-vX.Y.Z-macos-arm64.pkg` from the
+   [Releases page](https://github.com/LZlamian/OBS-AirPlay-Plugin/releases)
+   and open it. Releases are not signed with an Apple Developer ID: when macOS
+   warns, click **Done**, open **System Settings > Privacy & Security**, and
+   click **Open Anyway** at the bottom.
+3. The installer puts the plugin in your own plugins folder:
+   `~/Library/Application Support/obs-studio/plugins/obs-airplay.plugin`.
+   Instead of the `.pkg` you can unzip `obs-airplay-vX.Y.Z-macos-arm64.zip` and
+   copy `obs-airplay.plugin` into that folder.
+4. Start OBS and add an **AirPlay** source. If macOS asks whether
+   **OBS AirPlay Discovery** may use Bluetooth, allow it (faster discovery).
 
-## Step-by-Step Installation
+To check that it loaded: **Help > Log Files > View Current Log** should contain
+`OBS AirPlay Plugin loaded (version X.Y.Z)` and
+`UxPlay integration active on port 7000`.
 
-### 1. Install Xcode Command Line Tools
+Later versions install themselves when you choose **Install Update** in the
+prompt (see the README); turn the daily check off in the source's properties.
 
-```bash
-xcode-select --install
-```
+## Uninstall
 
-Click "Install" when prompted.
-
-### 2. Install Homebrew (if not already installed)
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-### 3. Install Dependencies
-
-```bash
-brew install cmake pkg-config ffmpeg libplist openssl@3
-```
-
-### 4. Download and Extract the Plugin
-
-```bash
-# Extract the archive
-tar -xzf obs-airplay-plugin.tar.gz
-cd obs-airplay-plugin
-```
-
-### 5. Build the Plugin
-
-**Option A: Automated (Recommended)**
-```bash
-./build.sh
-```
-
-**Option B: Manual**
-```bash
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(sysctl -n hw.ncpu)
-
-# Install
-cp -r obs-airplay.plugin "$HOME/Library/Application Support/obs-studio/plugins/"
-```
-
-### 6. Restart OBS Studio
-
-Close OBS completely and restart it.
-
-## Build Release Artifacts (zip + pkg)
-
-To create distributable macOS artifacts:
-
-```bash
-chmod +x scripts/package-macos.sh
-./scripts/package-macos.sh
-```
-
-Generated files:
-
-- `dist/obs-airplay-v<version>-macos-<arch>.zip`
-- `dist/obs-airplay-v<version>-macos-<arch>.pkg`
-
-The `.pkg` installer copies the plugin into the active user's:
-
-- `~/Library/Application Support/obs-studio/plugins/obs-airplay.plugin`
-
-### Any-Mac Distribution (Apple Silicon + Intel)
-
-Build one artifact per architecture, then distribute both:
-
-```bash
-# On Apple Silicon host
-ARCH_OVERRIDE=arm64 bash scripts/package-macos.sh
-
-# On Intel host (or x86_64 environment with x86_64 OBS/deps)
-ARCH_OVERRIDE=x86_64 bash scripts/package-macos.sh
-```
-
-This creates:
-
-- `dist/obs-airplay-v<version>-macos-arm64.pkg`
-- `dist/obs-airplay-v<version>-macos-x86_64.pkg`
-
-Note: `scripts/package-macos.sh` now validates dependency architecture early and fails with a clear message if the requested arch is unavailable locally.
-It also rejects dependencies whose deployment target is newer than macOS 12.
-For public releases, set `OBS_AIRPLAY_CODESIGN_IDENTITY` and
-`OBS_AIRPLAY_INSTALLER_IDENTITY` to your Developer ID identities.
-
-## Verify Installation
-
-### 1. Check Plugin Loaded
-
-In OBS:
-1. Go to **Help** → **Log Files** → **View Current Log**
-2. Search for "AirPlay" (Cmd+F)
-3. You should see:
-   ```
-   OBS AirPlay Plugin loaded (version X.Y.Z)
-   UxPlay integration started successfully
-   UxPlay integration active on port 7000
-   ```
-
-### 2. Add AirPlay Source
-
-1. In OBS, click the **+** button in the Sources panel
-2. Select **"AirPlay"** from the list
-3. Name it (e.g., "iPhone Screen") and click **OK**
-
-### 3. Test from iOS
-
-1. On iPhone/iPad, open **Control Center**
-2. Tap **Screen Mirroring**
-3. You should see **"OBS AirPlay"** in the list
-4. Tap it to connect
+Quit OBS, then delete from `~/Library/Application Support/obs-studio/plugins/`:
+`obs-airplay.plugin`, and `.obs-airplay.update` / `.obs-airplay.previous` if
+they exist (hidden: press Cmd-Shift-. in Finder). Settings are in
+`~/Library/Application Support/obs-studio/plugin_config/obs-airplay/`; the
+helper's preferences go with `defaults delete com.lzlamian.obs-airplay.discovery`.
+Versions before 2.6 also installed a copy in
+`/Library/Application Support/obs-studio/plugins/`: delete it too.
 
 ## Troubleshooting
 
-### Plugin Not Showing in Sources
+Start with the source's **Status** line (right-click the source > Properties):
+it says whether the receiver runs, on which port, whether a device is connected,
+and what is wrong when it does not run. Then run `./diagnose.sh` from the source
+folder while OBS is open; it needs no administrator rights and changes nothing.
 
-**Check OBS logs for errors:**
-```bash
-cat ~/Library/Application\ Support/obs-studio/logs/*.txt | grep -i "airplay.*error"
-```
+### Devices do not list the receiver
 
-**Reinstall the plugin:**
-```bash
-cd obs-airplay-plugin
-rm -rf build
-./build.sh
-```
+- The Mac and the device must be on the same network and VLAN. Guest networks
+  and some mesh or enterprise networks block Bonjour between devices; a VPN on
+  the Mac can take the default route away from Wi-Fi.
+- `dns-sd -B _airplay._tcp` (Ctrl-C to stop) should list the receiver's name.
+  If it does not, check the OBS log for `Bonjour registration failed`.
 
-### "OBS AirPlay" Not Showing on iOS
+### The receiver is listed but connecting fails
 
-**1. Check both devices are on same WiFi network**
+- **Port 7000**: the receiver uses TCP 7000, or 7001 when 7000 is taken.
+  `lsof -nP -iTCP:7000 -sTCP:LISTEN` shows who has it. macOS's own AirPlay
+  Receiver (`ControlCenter`) uses 7000: turn it off in **System Settings >
+  General > AirDrop & Handoff > AirPlay Receiver**, then restart OBS.
+- **Firewall**: if it is on, OBS must be allowed incoming connections:
+  **System Settings > Network > Firewall > Options**, set OBS to **Allow
+  incoming connections**. Audio and timing use UDP ports macOS picks, so
+  per-port rules do not work; allow the app.
 
-On Mac:
-```bash
-ipconfig getifaddr en0
-```
+### Video or audio problems
 
-On iOS: Settings → WiFi → (i) icon
+- Stutter: put the Mac on Ethernet or 5 GHz Wi-Fi; turn on **Log latency
+  telemetry** and look at the `[latency]` and `[MIRROR]` lines in the log.
+- AirPlay video: DRM-protected and encrypted media cannot be received. Videos
+  that only exist on the device (Safari `blob:` URLs, app files) are copied
+  whole before they play, up to 128 MiB. The receiver refuses to fetch from
+  loopback, link-local and multicast addresses and from unusual ports on
+  hosts other than the device (`[MEDIA] ... refused` in the log); HTTPS
+  servers with self-signed certificates need **Allow self-signed media
+  servers**.
 
-First three numbers should match (e.g., 192.168.1.x)
+## Getting help
 
-**2. Check firewall settings**
-
-```bash
-# Check if firewall is blocking
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
-
-# If enabled, allow OBS
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /Applications/OBS.app
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblock /Applications/OBS.app
-```
-
-**3. Verify mDNS advertising**
-
-```bash
-dns-sd -B _airplay._tcp
-```
-
-You should see "OBS AirPlay" appear. Press Ctrl+C to stop.
-
-**4. Check ports**
-
-```bash
-lsof -i :7000
-lsof -i :5000
-```
-
-Both should show OBS is listening.
-
-**5. Run diagnostics**
-
-```bash
-cd obs-airplay-plugin
-./diagnose.sh
-```
-
-### Build Errors
-
-**"Could not find libobs"**
-- Ensure OBS is installed at `/Applications/OBS.app`
-- If installed elsewhere: `cmake .. -DOBS_BUNDLE_PATH="/path/to/OBS.app"`
-
-**"Package 'libavcodec' not found"**
-```bash
-brew reinstall ffmpeg
-```
-
-**"Package 'libplist-2.0' not found"**
-```bash
-brew reinstall libplist
-```
-
-**"Cannot find dns_sd.h"**
-```bash
-xcode-select --install
-```
-
-### Connection Issues
-
-**iOS connects but drops immediately:**
-- WiFi signal too weak (move closer to router)
-- Network congestion (close other apps)
-- Firewall blocking after initial connection
-
-**No video in OBS:**
-- Ensure AirPlay source is added to a scene
-- Check source is visible (eye icon not crossed out)
-- Verify iOS shows green "connected" indicator
-
-**Laggy or stuttering video:**
-- Use 5GHz WiFi instead of 2.4GHz
-- Reduce network traffic
-- Lower OBS output resolution
-- Check CPU usage in Activity Monitor
-
-## Advanced Configuration
-
-### Change Server Name
-
-Open the AirPlay source properties in OBS and edit **Server Name**. The mDNS
-advertisement updates automatically after you stop typing.
-
-### Use Different Ports
-
-The plugin listens on port 7000 and falls back to 7001 by itself when 7000 is
-taken (for example by a second OBS on the same Mac). To use another port, change
-the port passed to `g_uxplay_integration->start(...)` in `src/plugin-main.cpp`:
-
-```cpp
-g_uxplay_integration->start(mac_address, 7100, initial_name)
-```
-
-### Enable Debug Logging
-
-In OBS:
-1. **Settings** → **Advanced**
-2. **Log Level** → **Debug**
-3. Restart OBS
-
-## Uninstallation
-
-```bash
-rm -rf "$HOME/Library/Application Support/obs-studio/plugins/obs-airplay.plugin"
-```
-
-Restart OBS.
-
-## Getting Help
-
-1. **Run diagnostics:**
-   ```bash
-   ./diagnose.sh > diagnostics.txt
-   ```
-
-2. **Collect logs:**
-   ```bash
-   cat ~/Library/Application\ Support/obs-studio/logs/*.txt | grep -i airplay > airplay-logs.txt
-   ```
-
-3. **Create GitHub issue** with diagnostics and logs
+Open an issue at https://github.com/LZlamian/OBS-AirPlay-Plugin/issues with the
+OBS, plugin and macOS versions, the device and what you did, and the log lines
+containing `AirPlay`, `[MEDIA]` or `UxPlay`.
 
 > **Before you post logs publicly:** OBS logs and `diagnose.sh` output can contain your
 > device names, local IP addresses and MAC-style device IDs. If you turned on the AirPlay
@@ -283,32 +83,6 @@ Restart OBS.
 > replaced with `[redacted]`, but the host and path remain. Read through what you paste,
 > remove anything you don't want public, and turn the trace off again afterwards.
 
-## Common Questions
+## Building from source
 
-**Q: Do I need the OBS source code?**
-A: No, this plugin builds against the installed OBS.app
-
-**Q: Can I use this with OBS from Homebrew?**
-A: Not currently. Install the official OBS from https://obsproject.com
-
-**Q: Does this work with OBS version X?**
-A: Works with OBS 28.0 or later. Check your version in Help → About OBS
-
-**Q: Can I build for Intel from Apple Silicon?**
-A: Yes if OBS and every dependency contains x86_64 code. The packaging script
-checks this before building; a hosted Intel CI runner is usually simpler.
-
-## Success Checklist
-
-- [ ] Xcode Command Line Tools installed
-- [ ] Homebrew installed
-- [ ] Dependencies installed (cmake, pkg-config, ffmpeg, libplist, openssl@3)
-- [ ] OBS Studio installed
-- [ ] Plugin built successfully
-- [ ] Plugin appears in OBS log
-- [ ] AirPlay source available in OBS
-- [ ] "OBS AirPlay" visible in iOS Screen Mirroring
-- [ ] Both devices on same WiFi network
-- [ ] Firewall allows OBS connections
-
-If all checked, you're ready to stream! 🎉
+See the README's *Building from source* and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
