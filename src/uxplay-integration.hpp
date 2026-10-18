@@ -139,6 +139,7 @@ private:
     // cleared. Devices that only look at the receiver (GET /info while the
     // AirPlay menu is open) connect and leave without one.
     std::atomic<bool> m_frame_shown{false};
+    std::atomic<bool> m_stream_nal_logged{false};
     // `reason` (a string literal) goes to the log when the clear happens.
     void scheduleDeferredClear(const char* reason = "no new AirPlay video item followed /stop");
     void cancelDeferredClear();

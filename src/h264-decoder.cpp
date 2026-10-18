@@ -195,12 +195,14 @@ bool H264Decoder::open(bool allow_hardware)
     // Low-latency tuning for live AirPlay mirroring:
     //  - LOW_DELAY  : decoder will not buffer frames waiting for B-frame reorder
     //  - FAST       : allow non-spec-compliant speedups
-    //  - SLICE thread type with auto thread_count keeps per-frame latency
-    //    minimal (FRAME threading would add 1+ frame of pipeline delay).
+    //  - SLICE threading keeps per-frame latency minimal (FRAME threading
+    //    would add 1+ frame of pipeline delay). Mirror streams have few
+    //    slices per picture, so more threads than that only sit idle (one
+    //    per core by default).
     m_codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
     m_codec_context->flags2 |= AV_CODEC_FLAG2_FAST;
     m_codec_context->thread_type = FF_THREAD_SLICE;
-    m_codec_context->thread_count = 0; // auto
+    m_codec_context->thread_count = 4;
     m_codec_context->opaque = this;
 
     m_hardware_open = false;
@@ -222,10 +224,7 @@ bool H264Decoder::open(bool allow_hardware)
         }
     }
 
-    AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "tune", "zerolatency", 0);
-    const int opened = avcodec_open2(m_codec_context, codec, &opts);
-    av_dict_free(&opts);
+    const int opened = avcodec_open2(m_codec_context, codec, nullptr);
     if (opened < 0) {
         blog(LOG_ERROR, "Failed to open codec");
         close();

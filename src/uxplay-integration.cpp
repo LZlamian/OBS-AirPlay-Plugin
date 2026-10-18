@@ -977,6 +977,9 @@ void UxPlayIntegration::setConnectionResetCallback(ConnectionResetCallback callb
 
 void UxPlayIntegration::processConnReset(bool clear_output, bool flush_decoders)
 {
+    if (flush_decoders) {
+        m_stream_nal_logged.store(false);
+    }
     ConnectionResetCallback callback;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -1040,8 +1043,12 @@ void UxPlayIntegration::processVideoData(video_decode_struct* data)
         return;
     }
 
-    blog(LOG_DEBUG, "Processing video data: %d bytes, H265: %s",
-         data->data_len, data->is_h265 ? "yes" : "no");
+    // Once per stream (not per frame): how many NAL units a payload holds,
+    // which tells whether slice threading could help the software decoder.
+    if (!m_stream_nal_logged.exchange(true)) {
+        blog(LOG_INFO, "[MIRROR] stream: %s, %d NAL units in the first payload",
+             data->is_h265 ? "HEVC" : "H.264", data->nal_count);
+    }
     callback(data->data,
              static_cast<size_t>(data->data_len),
              data->ntp_time_local,
@@ -1065,9 +1072,6 @@ void UxPlayIntegration::processAudioData(audio_decode_struct* data)
     if (!callback) {
         return;
     }
-
-    blog(LOG_DEBUG, "Processing audio data: %d bytes, ct: %d",
-         data->data_len, data->ct);
 
     callback(data->data,
              static_cast<size_t>(data->data_len),
