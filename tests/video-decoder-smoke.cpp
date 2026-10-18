@@ -2,6 +2,8 @@
 // Mirror video decoder smoke test: hardware (VideoToolbox) vs software.
 //
 // usage: obs-airplay-decoder-smoke [--require-hardware] FILE_A [FILE_B]
+//        obs-airplay-decoder-smoke --two-au FILE        (no B-frames)
+//        obs-airplay-decoder-smoke --colorspace BT601_FILE BT709_FILE
 //
 // FILE_A/FILE_B are H.264 or HEVC files (any container FFmpeg reads). Their
 // packets are converted to Annex B, as the AirPlay mirror path delivers them,
@@ -166,10 +168,107 @@ double psnr(const Picture& a, const Picture& b)
     return mse <= 1e-9 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
 }
 
+// One payload carrying two access units: the decoder must return the newer
+// picture, with the payload's pts (iOS sends one per payload, but nothing
+// in the protocol forbids two).
+int twoAccessUnits(const Stream& stream)
+{
+    if (stream.packets.size() < 12) return 2;
+    H264Decoder reference_decoder(stream.codec, H264Decoder::Mode::SoftwareOnly);
+    std::vector<Picture> reference;
+    for (size_t i = 0; i < stream.packets.size(); ++i) {
+        DecodedVideoFrame frame;
+        if (reference_decoder.decodeToI420(stream.packets[i].data(), stream.packets[i].size(),
+                                           frame, static_cast<int64_t>(i))) {
+            reference.push_back(copyPicture(frame, false));
+        }
+    }
+    if (reference.size() != stream.packets.size()) {
+        std::printf("two-au: the clip must decode one picture per packet (use -bf 0)\n");
+        return 2;
+    }
+    bool ok = true;
+    for (int mode = 0; mode < 2; ++mode) {
+        H264Decoder decoder(stream.codec, mode == 0 ? H264Decoder::Mode::SoftwareOnly
+                                                    : H264Decoder::Mode::Auto);
+        const size_t merged = 10;
+        for (size_t i = 0; i < merged; ++i) {
+            DecodedVideoFrame frame;
+            decoder.decodeToI420(stream.packets[i].data(), stream.packets[i].size(), frame,
+                                 static_cast<int64_t>(i));
+        }
+        std::vector<uint8_t> two = stream.packets[merged];
+        two.insert(two.end(), stream.packets[merged + 1].begin(), stream.packets[merged + 1].end());
+        DecodedVideoFrame frame;
+        const bool decoded = decoder.decodeToI420(two.data(), two.size(), frame,
+                                                  static_cast<int64_t>(merged + 1));
+        const Picture picture = decoded ? copyPicture(frame, decoder.usingHardware()) : Picture{};
+        const double newer = decoded ? psnr(picture, reference[merged + 1]) : 0.0;
+        const double older = decoded ? psnr(picture, reference[merged]) : 0.0;
+        // The next ordinary packet must not bring back a held picture.
+        DecodedVideoFrame next;
+        const bool next_ok = decoder.decodeToI420(stream.packets[merged + 2].data(),
+                                                  stream.packets[merged + 2].size(), next,
+                                                  static_cast<int64_t>(merged + 2)) &&
+            psnr(copyPicture(next, false), reference[merged + 2]) >= 40.0 &&
+            next.pts == static_cast<int64_t>(merged + 2);
+        const bool mode_ok = decoded && newer >= 40.0 && newer > older + 3.0 &&
+            frame.pts == static_cast<int64_t>(merged + 1) && next_ok;
+        std::printf("two-au (%s): newer_psnr=%.1f dB older_psnr=%.1f dB pts=%lld next=%s -> %s\n",
+                    mode == 0 ? "software" : (decoder.usingHardware() ? "hardware" : "auto/software"),
+                    newer, older, static_cast<long long>(decoded ? frame.pts : -1),
+                    next_ok ? "ok" : "late", mode_ok ? "ok" : "FAILED");
+        ok = ok && mode_ok;
+    }
+    return ok ? 0 : 1;
+}
+
+// The stream's colour matrix reaches the frame: BT.601 when it says so,
+// BT.709 otherwise, in software and hardware.
+int colorspace(const Stream& bt601_stream, const Stream& bt709_stream)
+{
+    bool ok = true;
+    for (int mode = 0; mode < 2; ++mode) {
+        for (int which = 0; which < 2; ++which) {
+            const Stream& stream = which == 0 ? bt601_stream : bt709_stream;
+            H264Decoder decoder(stream.codec, mode == 0 ? H264Decoder::Mode::SoftwareOnly
+                                                        : H264Decoder::Mode::Auto);
+            bool got = false;
+            bool bt601 = false;
+            for (const auto& packet : stream.packets) {
+                DecodedVideoFrame frame;
+                if (decoder.decodeToI420(packet.data(), packet.size(), frame)) {
+                    got = true;
+                    bt601 = frame.bt601;
+                    break;
+                }
+            }
+            const bool expected = which == 0;
+            ok = ok && got && bt601 == expected;
+            std::printf("colorspace (%s, %s clip): bt601=%d -> %s\n",
+                        mode == 0 ? "software" : (decoder.usingHardware() ? "hardware" : "auto"),
+                        which == 0 ? "BT.601" : "BT.709", bt601,
+                        got && bt601 == expected ? "ok" : "FAILED");
+        }
+    }
+    return ok ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if (argc == 3 && std::strcmp(argv[1], "--two-au") == 0) {
+        Stream stream;
+        if (!loadAnnexB(argv[2], &stream)) return 2;
+        return twoAccessUnits(stream);
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--colorspace") == 0) {
+        Stream bt601_stream;
+        Stream bt709_stream;
+        if (!loadAnnexB(argv[2], &bt601_stream) || !loadAnnexB(argv[3], &bt709_stream)) return 2;
+        return colorspace(bt601_stream, bt709_stream);
+    }
     bool require_hardware = false;
     std::vector<const char*> files;
     for (int i = 1; i < argc; ++i) {

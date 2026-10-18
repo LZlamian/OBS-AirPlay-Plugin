@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 extern "C" {
@@ -22,6 +23,10 @@ struct DecodedVideoFrame {
     // as produced by hardware decoding.
     bool nv12 = false;
     bool full_range = false;
+    // BT.601 colour matrix (the stream says so); otherwise BT.709.
+    bool bt601 = false;
+    // The pts passed with the packet this picture was decoded from.
+    int64_t pts = AV_NOPTS_VALUE;
 };
 
 // Decoder for the AirPlay mirroring stream (H.264 or HEVC, Annex B).
@@ -41,8 +46,15 @@ public:
     H264Decoder(const H264Decoder&) = delete;
     H264Decoder& operator=(const H264Decoder&) = delete;
 
-    bool decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame);
+    // Decodes one packet (Annex B). When it holds more than one picture,
+    // the newest is returned. `pts` comes back in out_frame.pts.
+    bool decodeToI420(const uint8_t* data, size_t size, DecodedVideoFrame& out_frame,
+                      int64_t pts = AV_NOPTS_VALUE);
     void flush();
+    // The caller is done with the last frame's planes (OBS has copied them):
+    // a locked VideoToolbox buffer goes back to the decoder's pool at once
+    // instead of at the next decode.
+    void releaseFrame();
 
     // True while the most recent frame came from the hardware decoder.
     bool usingHardware() const { return m_last_frame_hardware; }
@@ -55,7 +67,8 @@ private:
     void releaseLockedBuffer();
     void rememberParameterSets(const uint8_t* data, size_t size);
     bool fallBackToSoftware(const char* reason);
-    bool receiveFrame(DecodedVideoFrame& out_frame, int* error);
+    bool collectFrames(int* error);
+    bool produceFrame(DecodedVideoFrame& out_frame, int* error);
     bool outputHardwareFrame(DecodedVideoFrame& out_frame);
     bool outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_frame);
     void noteMode(bool hardware, int width, int height, bool nv12, bool full_range);
@@ -75,6 +88,7 @@ private:
     AVCodecContext* m_codec_context;
     AVBufferRef* m_hw_device = nullptr;
     AVFrame* m_frame;
+    AVFrame* m_frame_next = nullptr;  // receives while m_frame holds the newest
     AVFrame* m_frame_transfer = nullptr;
     AVFrame* m_frame_i420;
     AVPacket* m_packet;
@@ -83,8 +97,10 @@ private:
     // A VideoToolbox pixel buffer locked for the caller (CVPixelBufferRef).
     void* m_locked_buffer = nullptr;
 
-    // The stream's latest parameter sets (SPS/PPS/VPS, Annex B), replayed
-    // into a freshly opened decoder when falling back to software.
+    // The stream's latest parameter set of each kind (VPS/SPS/PPS, by NAL
+    // type, so a PPS-only update is kept too), and all of them as Annex B,
+    // replayed into a freshly opened decoder when falling back to software.
+    std::map<int, std::vector<uint8_t>> m_parameter_set_units;
     std::vector<uint8_t> m_parameter_sets;
 
     // Consecutive errors since the last decoded picture: hardware failures,

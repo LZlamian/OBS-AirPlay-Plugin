@@ -182,9 +182,13 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     const bool tele = g_latency_telemetry_enabled.load(std::memory_order_relaxed);
     const bool first_frame = m_video_frame_counter == 0;
     const uint64_t t_decode_start = (tele || first_frame) ? os_gettime_ns() : 0;
-    if (!decoder->decodeToI420(data, size, decoded)) {
+    if (!decoder->decodeToI420(data, size, decoded, static_cast<int64_t>(pts))) {
         return;
     }
+    // The picture's own packet pts: with two pictures in one payload, or a
+    // decoder that held one back, it is not this packet's.
+    const uint64_t picture_pts = decoded.pts != AV_NOPTS_VALUE
+        ? static_cast<uint64_t>(decoded.pts) : pts;
     const uint64_t t_decode_end = (tele || first_frame) ? os_gettime_ns() : 0;
 
     obs_source_frame frame = {};
@@ -201,14 +205,14 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
     frame.format = decoded.nv12 ? VIDEO_FORMAT_NV12 : VIDEO_FORMAT_I420;
     frame.full_range = decoded.full_range;
     frame.trc = VIDEO_TRC_DEFAULT;
-    video_format_get_parameters_for_format(VIDEO_CS_709,
+    video_format_get_parameters_for_format(decoded.bt601 ? VIDEO_CS_601 : VIDEO_CS_709,
                                            decoded.full_range ? VIDEO_RANGE_FULL
                                                               : VIDEO_RANGE_PARTIAL,
                                            frame.format,
                                            frame.color_matrix,
                                            frame.color_range_min,
                                            frame.color_range_max);
-    frame.timestamp = normalizeTimestamp(pts);
+    frame.timestamp = normalizeTimestamp(picture_pts);
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     const uint64_t t_output_start = tele ? os_gettime_ns() : 0;
@@ -300,6 +304,10 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
             m_mirror_stats_frames = 0;
         }
     }
+    // OBS has copied the planes and nothing reads them below: give a
+    // VideoToolbox buffer back now rather than at the next packet (which may
+    // be a second away while the screen is still).
+    decoder->releaseFrame();
 
     if (tele) {
         const uint64_t decode_ns = t_decode_end - t_decode_start;

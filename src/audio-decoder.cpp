@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "audio-decoder.hpp"
 
+#include <climits>
+
 #include <obs-module.h>
 
 #include <algorithm>
@@ -32,7 +34,7 @@ AudioDecoder::AudioDecoder()
     , m_input_sample_rate(0)
     , m_input_sample_format(AV_SAMPLE_FMT_NONE)
     , m_resampler_configured(false)
-#if LIBAVUTIL_VERSION_MAJOR < 57
+#if !OBS_AIRPLAY_HAVE_CH_LAYOUT
     , m_input_channel_layout(0)
 #endif
 {
@@ -76,7 +78,25 @@ bool AudioDecoder::configureDecoder(uint8_t ct)
     if (m_codec_type == ct && m_codec_context) {
         return true;
     }
+    // A decoder that could not be opened is tried again about every 10 s of
+    // packets, not on every one (each attempt logs at ERROR).
+    constexpr unsigned kRetryEveryCalls = 500;
+    if (ct == m_failed_codec_type && (++m_failed_calls % kRetryEveryCalls) != 0) {
+        return false;
+    }
+    const bool opened = openDecoder(ct);
+    if (opened) {
+        m_failed_codec_type = 0;
+        m_failed_calls = 0;
+    } else if (ct != m_failed_codec_type) {
+        m_failed_codec_type = ct;
+        m_failed_calls = 0;
+    }
+    return opened;
+}
 
+bool AudioDecoder::openDecoder(uint8_t ct)
+{
     const AVCodec* codec = nullptr;
     const uint8_t* extradata = nullptr;
     int extradata_size = 0;
@@ -120,7 +140,7 @@ bool AudioDecoder::configureDecoder(uint8_t ct)
     }
 
     m_codec_context->sample_rate = kDefaultSampleRate;
-#if LIBAVCODEC_VERSION_MAJOR >= 59
+#if OBS_AIRPLAY_HAVE_CH_LAYOUT
     av_channel_layout_default(&m_codec_context->ch_layout, 2);
 #else
     m_codec_context->channels = 2;
@@ -161,7 +181,7 @@ bool AudioDecoder::configureResampler(const AVFrame* frame)
         static_cast<AVSampleFormat>(frame->format);
     m_output_sample_rate = inputSampleRate;
 
-#if LIBAVUTIL_VERSION_MAJOR >= 57
+#if OBS_AIRPLAY_HAVE_CH_LAYOUT
     const AVChannelLayout* inputLayout = frame->ch_layout.nb_channels > 0
         ? &frame->ch_layout : &m_codec_context->ch_layout;
     if (inputLayout->nb_channels <= 0)
@@ -238,7 +258,7 @@ void AudioDecoder::resetResampler()
 {
     if (m_swr_context)
         swr_free(&m_swr_context);
-#if LIBAVUTIL_VERSION_MAJOR >= 57
+#if OBS_AIRPLAY_HAVE_CH_LAYOUT
     av_channel_layout_uninit(&m_input_channel_layout);
 #else
     m_input_channel_layout = 0;
@@ -256,7 +276,8 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
     right.clear();
     sample_rate = kDefaultSampleRate;
 
-    if (!data || size == 0 || !m_packet || !m_frame) {
+    if (!data || size == 0 || !m_packet || !m_frame ||
+        size > static_cast<size_t>(INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE)) {
         return false;
     }
 
