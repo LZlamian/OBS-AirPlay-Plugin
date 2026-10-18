@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Update download checks, staging and the swap, on scratch copies of a built
 // plugin bundle. Nothing outside SCRATCH_DIR is touched and no network is used.
 //   obs-airplay-updater-smoke BUILT_PLUGIN_BUNDLE SCRATCH_DIR

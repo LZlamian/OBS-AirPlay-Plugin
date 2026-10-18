@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "airplay-source.hpp"
 #include "airplay-server.hpp"
 #include "uxplay-integration.hpp"

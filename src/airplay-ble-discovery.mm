@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>

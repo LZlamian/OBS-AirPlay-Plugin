@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Mirror video decoder smoke test: hardware (VideoToolbox) vs software.
 //
 // usage: obs-airplay-decoder-smoke [--require-hardware] FILE_A [FILE_B]

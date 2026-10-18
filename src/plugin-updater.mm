@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #import "plugin-updater.h"
 
 #import <CommonCrypto/CommonDigest.h>

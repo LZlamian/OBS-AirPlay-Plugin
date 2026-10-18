@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 # OBS Installation Detector
 # This script helps find where OBS stores its libraries and headers

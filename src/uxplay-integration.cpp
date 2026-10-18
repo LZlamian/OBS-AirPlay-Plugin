@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "uxplay-integration.hpp"
 #include "media-url-policy.hpp"
 #include <obs-module.h>

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Signs a release zip for the self-updater (v2.6.0 and later).
 #
 #   scripts/sign-release.sh dist/obs-airplay-v2.6.0-macos-arm64.zip

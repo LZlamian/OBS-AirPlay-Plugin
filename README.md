@@ -489,7 +489,11 @@ Contributions are welcome! Please:
 
 ## License
 
-GPL-2.0 License - See LICENSE file for details
+GPL-3.0-or-later. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
+which lists every bundled component and its license (the texts are in [licenses/](licenses/)
+and in the plugin bundle's `Contents/Resources/licenses/`). Up to v2.5.2 the project's own
+code was offered under GPL-2.0-or-later; the released plugin was always GPL-3.0 in effect
+because it links UxPlay.
 
 ## Support
 

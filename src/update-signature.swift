@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Ed25519 verification for update signatures, with Apple's CryptoKit.
 // Called from plugin-updater.mm; see OBSAirPlayVerifyUpdateSignature.
 import CryptoKit

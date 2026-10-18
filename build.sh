@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 # OBS AirPlay Plugin Build Script
 # This script automates the build and installation process

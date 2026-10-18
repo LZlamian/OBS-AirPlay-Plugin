@@ -453,6 +453,8 @@ if(APPLE)
                 "${PLUGIN_BUNDLE_DIR}/Contents/Resources/LICENSE-UxPlay-GPL-3.0.txt"
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
                 "${PLUGIN_BUNDLE_DIR}/Contents/Resources/THIRD_PARTY_NOTICES.md"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/licenses"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/licenses"
         
         # Copy Info.plist
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/Info.plist" "${PLUGIN_BUNDLE_DIR}/Contents/Info.plist"

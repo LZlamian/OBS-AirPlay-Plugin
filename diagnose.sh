@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 # OBS AirPlay Plugin Diagnostic Script
 # Run this if your plugin isn't working

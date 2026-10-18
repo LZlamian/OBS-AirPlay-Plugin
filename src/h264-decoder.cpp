@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "h264-decoder.hpp"
 #include "hardware-decode-option.hpp"
 #include <obs-module.h>

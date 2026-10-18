@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "media-player.hpp"
 #include "media-url-policy.hpp"
 
