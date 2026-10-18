@@ -17,14 +17,21 @@ extern "C" {
 #include <limits>
 #include <thread>
 
+// Set when the player logs that it continued a cut-off response (--resilient).
+std::atomic<int> g_resumed_responses{0};
+
 extern "C" void blog(int, const char* format, ...)
 {
-    std::fputs("media-smoke: ", stderr);
+    char message[2048];
     va_list args;
     va_start(args, format);
-    std::vfprintf(stderr, format, args);
+    std::vsnprintf(message, sizeof(message), format, args);
     va_end(args);
-    std::fputc('\n', stderr);
+    std::fprintf(stderr, "media-smoke: %s\n", message);
+    int reopens = 0;
+    if (std::sscanf(message, "[MEDIA] media server responses ended early %d", &reopens) == 1) {
+        g_resumed_responses.store(reopens);
+    }
 }
 
 extern "C" uint64_t os_gettime_ns(void)
@@ -592,6 +599,38 @@ int urlPolicy()
 // HLS resources go through the policy: a playlist whose segments are on its
 // own host and port plays; one whose segments point at another loopback port
 // is refused (loopback is only allowed as the item's own address here).
+// ResilientHttpIo: a server that closes every response after 64 KiB
+// (tests/truncating-server.py). The whole clip still plays, every frame of
+// it, by way of fresh range requests.
+int resilient(const char* location)
+{
+    std::atomic<unsigned int> video_frames{0};
+    std::atomic<unsigned int> audio_frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0]) ++video_frames;
+    });
+    player.setAudioCallback([&](const MediaAudioFrame& frame) {
+        if (frame.frames > 0) ++audio_frames;
+    });
+    player.play(location, 0.0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    MediaPlaybackInfo info;
+    do {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        info = player.getPlaybackInfo();
+    } while (!info.ended && std::chrono::steady_clock::now() < deadline);
+    player.stop();
+    // clip8.mp4: 8 s at 30 fps.
+    const unsigned int expected_frames = 240;
+    const bool passed = info.ended && video_frames.load() >= expected_frames - 2 &&
+        audio_frames.load() > 0 && g_resumed_responses.load() > 0;
+    std::printf("resilient: ended=%d video_frames=%u (expected %u) audio_frames=%u "
+                "resumed_responses=%d\n", info.ended, video_frames.load(), expected_frames,
+                audio_frames.load(), g_resumed_responses.load());
+    return passed ? 0 : 1;
+}
+
 int nestedPolicy(const char* same_origin, const char* cross_origin)
 {
     media_url_policy::setLoopbackAllowedForTesting(false);
@@ -723,6 +762,9 @@ int main(int argc, char** argv)
     if (argc == 4 && std::strcmp(argv[1], "--nested-policy") == 0) {
         return nestedPolicy(argv[2], argv[3]);
     }
+    if (argc == 3 && std::strcmp(argv[1], "--resilient") == 0) {
+        return resilient(argv[2]);
+    }
     if (argc == 3 && std::strcmp(argv[1], "--tls-verify") == 0) {
         return tlsVerify(argv[2]);
     }
@@ -782,7 +824,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --ts-seek TS_URL | --after-end SHORT_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --ts-seek TS_URL | --after-end SHORT_URL\n", argv[0]);
         return 2;
     }
 

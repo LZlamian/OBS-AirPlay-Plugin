@@ -178,6 +178,7 @@ set(obs-airplay_SOURCES
     src/uxplay-integration.cpp
     src/h264-decoder.cpp
     src/audio-decoder.cpp
+    src/hls-playlist.cpp
     src/media-player.cpp
     src/media-url-policy.cpp
     src/module-settings.cpp
@@ -190,6 +191,7 @@ set(obs-airplay_HEADERS
     src/uxplay-integration.hpp
     src/h264-decoder.hpp
     src/audio-decoder.hpp
+    src/hls-playlist.hpp
     src/media-player.hpp
 )
 
@@ -412,6 +414,7 @@ if(BUILD_TESTING)
 
     add_executable(obs-airplay-media-smoke
         tests/media-player-smoke.cpp
+        src/hls-playlist.cpp
         src/media-player.cpp
         src/media-url-policy.cpp
     )
@@ -471,8 +474,24 @@ if(BUILD_TESTING)
     add_executable(obs-airplay-protocol-smoke
         tests/protocol-smoke.cpp
     )
+
+    # HLS playlist reader, media port list, audio decoder.
+    add_executable(obs-airplay-unit-tests
+        tests/unit-tests.cpp
+        src/audio-decoder.cpp
+        src/hls-playlist.cpp
+        src/media-url-policy.cpp
+    )
+    target_include_directories(obs-airplay-unit-tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${OBS_INCLUDE_DIR}
+        ${FFMPEG_INCLUDE_DIRS}
+    )
+    target_link_directories(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARIES})
+
     foreach(target obs-airplay-media-smoke obs-airplay-decoder-smoke obs-airplay-updater-smoke
-                   obs-airplay-protocol-smoke)
+                   obs-airplay-protocol-smoke obs-airplay-unit-tests)
         if(TARGET ${target})
             target_compile_options(${target} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
         endif()
@@ -485,6 +504,7 @@ if(BUILD_TESTING)
         airplay
     )
     # ---- CTest: every smoke, with media generated at test time ----------
+    add_test(NAME unit COMMAND obs-airplay-unit-tests)
     add_test(NAME protocol COMMAND obs-airplay-protocol-smoke)
     add_test(NAME protocol-large-blob COMMAND obs-airplay-protocol-smoke --large-blob)
 
@@ -534,7 +554,11 @@ if(BUILD_TESTING)
             COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --tls-verify
                     https://localhost:18443/clip.mp4)
-        set_tests_properties(media-nested-policy media-tls-verify PROPERTIES
+        add_test(NAME media-resilient-http
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+                    "$<TARGET_FILE:obs-airplay-media-smoke>" --resilient
+                    http://127.0.0.1:18903/clip8.mp4)
+        set_tests_properties(media-nested-policy media-tls-verify media-resilient-http PROPERTIES
             FIXTURES_REQUIRED media RESOURCE_LOCK media-servers TIMEOUT 120)
 
         add_test(NAME decoder
