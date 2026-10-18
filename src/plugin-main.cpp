@@ -7,6 +7,7 @@
 #include "media-player.hpp"
 #include "module-settings.hpp"
 #include "hardware-decode-option.hpp"
+#include "h264-decoder.hpp"
 #include <cctype>
 #include <atomic>
 #include <chrono>
@@ -53,6 +54,10 @@ static std::condition_variable g_status_cv;
 static bool                    g_status_quit = false;
 static std::atomic<bool>       g_status_dirty{false};
 static std::thread             g_status_thread;
+
+// Creates the process's first VideoToolbox sessions off the main thread at
+// load, so the first mirror connection does not wait for them.
+static std::thread             g_warmup_thread;
 
 static void refresh_airplay_source_panels()
 {
@@ -465,6 +470,12 @@ bool obs_module_load(void)
         } else {
             blog(LOG_INFO, "UxPlay integration started successfully");
             log_load_step("receiver started");
+            if (hardware_decode_requested()) {
+                g_warmup_thread = std::thread([] {
+                    const double ms = warm_up_video_decoding();
+                    blog(LOG_INFO, "[LOAD] video decoding warmed up in %.1f ms (off the main thread)", ms);
+                });
+            }
 
             // AirServer starts an otherwise empty CoreBluetooth peripheral
             // advertisement before any iPhone connection. Keep the
@@ -549,6 +560,8 @@ void obs_module_unload(void)
 
     stop_airplay_ble_helper();
 
+    if (g_warmup_thread.joinable())
+        g_warmup_thread.join();
     {
         std::lock_guard<std::mutex> lock(g_status_mutex);
         g_status_quit = true;

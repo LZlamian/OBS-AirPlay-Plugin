@@ -4,6 +4,7 @@
 // usage: obs-airplay-decoder-smoke [--require-hardware] FILE_A [FILE_B]
 //        obs-airplay-decoder-smoke --two-au FILE        (no B-frames)
 //        obs-airplay-decoder-smoke --colorspace BT601_FILE BT709_FILE
+//        obs-airplay-decoder-smoke --first-decode FILE [--warm]
 //
 // FILE_A/FILE_B are H.264 or HEVC files (any container FFmpeg reads). Their
 // packets are converted to Annex B, as the AirPlay mirror path delivers them,
@@ -41,6 +42,12 @@ extern "C" void blog(int, const char* format, ...)
     std::vfprintf(stderr, format, args);
     va_end(args);
     std::fputc('\n', stderr);
+}
+
+extern "C" uint64_t os_gettime_ns(void)
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 namespace {
@@ -256,8 +263,36 @@ int colorspace(const Stream& bt601_stream, const Stream& bt709_stream)
 
 } // namespace
 
+// Time from creating a decoder to its first picture, in a fresh process,
+// optionally after warm_up_video_decoding().
+int firstDecode(const Stream& stream, bool warm)
+{
+    double warm_ms = 0.0;
+    if (warm) warm_ms = warm_up_video_decoding();
+    const auto started = std::chrono::steady_clock::now();
+    H264Decoder decoder(stream.codec, H264Decoder::Mode::Auto);
+    double first_ms = -1.0;
+    for (const auto& packet : stream.packets) {
+        DecodedVideoFrame frame;
+        if (decoder.decodeToI420(packet.data(), packet.size(), frame)) {
+            first_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            break;
+        }
+    }
+    std::printf("first-decode: %s warm_up=%.1f ms first_picture=%.1f ms (%s)\n",
+                warm ? "warmed" : "cold", warm_ms, first_ms,
+                decoder.usingHardware() ? "hardware" : "software");
+    return first_ms >= 0.0 ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
+    if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--first-decode") == 0) {
+        Stream stream;
+        if (!loadAnnexB(argv[2], &stream)) return 2;
+        return firstDecode(stream, argc == 4 && std::strcmp(argv[3], "--warm") == 0);
+    }
     if (argc == 3 && std::strcmp(argv[1], "--two-au") == 0) {
         Stream stream;
         if (!loadAnnexB(argv[2], &stream)) return 2;

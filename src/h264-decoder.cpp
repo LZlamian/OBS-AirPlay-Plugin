@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "h264-decoder.hpp"
 #include "hardware-decode-option.hpp"
+#include "video-warmup-data.h"
 #include <obs-module.h>
+#include <util/platform.h>
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -97,6 +99,27 @@ bool is_slice(AVCodecID codec_id, uint8_t header)
 }
 
 } // namespace
+
+double warm_up_video_decoding()
+{
+    const uint64_t started = os_gettime_ns();
+    struct Canned {
+        AVCodecID codec;
+        const uint8_t* data;
+        size_t size;
+    };
+    const Canned canned[] = {
+        {AV_CODEC_ID_H264, warmup::kH264Keyframe, sizeof(warmup::kH264Keyframe)},
+        {AV_CODEC_ID_HEVC, warmup::kHevcKeyframe, sizeof(warmup::kHevcKeyframe)},
+    };
+    for (const Canned& keyframe : canned) {
+        H264Decoder decoder(keyframe.codec, H264Decoder::Mode::Auto);
+        DecodedVideoFrame frame;
+        decoder.decodeToI420(keyframe.data, keyframe.size, frame);
+        decoder.flush();
+    }
+    return (os_gettime_ns() - started) / 1e6;
+}
 
 H264Decoder::H264Decoder(AVCodecID codec_id, Mode mode)
     : m_codec_id(codec_id)

@@ -29,6 +29,12 @@ struct DecodedVideoFrame {
     int64_t pts = AV_NOPTS_VALUE;
 };
 
+// Decodes one canned keyframe per codec with hardware decoding, so the first
+// VideoToolbox session of the process (framework load, decoder service
+// start: 60-80 ms) is not created on the first mirror connection. Returns
+// the milliseconds it took. Call off the main thread.
+double warm_up_video_decoding();
+
 // Decoder for the AirPlay mirroring stream (H.264 or HEVC, Annex B).
 //
 // Uses VideoToolbox hardware decoding when the linked FFmpeg provides it and
