@@ -3,11 +3,12 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCH="${ARCH_OVERRIDE:-$(uname -m)}"
 MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET_OVERRIDE:-12.0}"
-PREFIX="${OBS_AIRPLAY_DEPS_PREFIX:-${ROOT_DIR}/build/release-deps/${ARCH}-macos${MACOS_DEPLOYMENT_TARGET}}"
-SOURCE_CACHE="${OBS_AIRPLAY_SOURCE_CACHE:-${ROOT_DIR}/build/release-sources}"
+# Outside the source tree (build.sh and `rm -rf build` used to wipe them),
+# and without spaces, which libtool cannot handle.
+PREFIX="${OBS_AIRPLAY_DEPS_PREFIX:-${HOME}/Library/Caches/obs-airplay-release-deps/${ARCH}-macos${MACOS_DEPLOYMENT_TARGET}}"
+SOURCE_CACHE="${OBS_AIRPLAY_SOURCE_CACHE:-${HOME}/Library/Caches/obs-airplay-release-sources}"
 WORK_DIR="${OBS_AIRPLAY_DEPS_WORK_DIR:-${TMPDIR:-/tmp}/obs-airplay-release-deps-work/${ARCH}-macos${MACOS_DEPLOYMENT_TARGET}}"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 

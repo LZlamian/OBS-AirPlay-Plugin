@@ -3,7 +3,16 @@
 
 # Build and packaging outputs
 build/
+build-*/
 dist/
+*.pkg
+*.zip
+*.zip.sig
+
+# Editors and tools
+.vscode/
+.idea/
+.claude/
 
 # CMake
 CMakeUserPresets.json

@@ -4,7 +4,10 @@
 # OBS AirPlay Plugin Build Script
 # This script automates the build and installation process
 
-set -e  # Exit on error
+set -euo pipefail
+
+# Work from the repository, wherever the script is started from.
+cd "$(dirname "$0")"
 
 # Colors for output
 RED='\033[0;31m'
@@ -64,21 +67,19 @@ fi
 
 echo -e "${GREEN}All dependencies satisfied!${NC}\n"
 
-# Create build directory
-echo -e "${YELLOW}Creating build directory...${NC}"
-rm -rf build
-mkdir -p build
-cd build
-
-# Configure CMake
+# Configure into a fresh build directory (release dependencies and their
+# sources are cached in ~/Library/Caches, not here)
 echo -e "${YELLOW}Configuring CMake...${NC}"
-cmake .. \
+rm -rf build
+cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
     -DCMAKE_OSX_ARCHITECTURES="$(uname -m)"
+cd build
 
 # Build
 echo -e "${YELLOW}Building plugin...${NC}"
-cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+cmake --build . --config Release -j"$(sysctl -n hw.ncpu)"
 
 echo -e "${GREEN}Build complete!${NC}\n"
 
@@ -108,15 +109,15 @@ echo ""
 echo -e "${GREEN}=== Installation Complete ===${NC}"
 echo ""
 echo "Next steps:"
-echo "1. ${YELLOW}Restart OBS Studio${NC}"
-echo "2. ${YELLOW}Add an 'AirPlay' source in OBS${NC}"
-echo "3. ${YELLOW}Open Control Center on your iOS device${NC}"
-echo "4. ${YELLOW}Tap 'Screen Mirroring'${NC}"
-echo "5. ${YELLOW}Select 'OBS AirPlay'${NC}"
+echo -e "1. ${YELLOW}Restart OBS Studio${NC}"
+echo -e "2. ${YELLOW}Add an 'AirPlay' source in OBS${NC}"
+echo -e "3. ${YELLOW}Open Control Center on your iOS device${NC}"
+echo -e "4. ${YELLOW}Tap 'Screen Mirroring'${NC}"
+echo -e "5. ${YELLOW}Select 'OBS AirPlay'${NC}"
 echo ""
 echo "Troubleshooting:"
 echo "- Check OBS logs: Help -> Log Files -> View Current Log"
-echo "- Verify mDNS: ${GREEN}dns-sd -B _airplay._tcp${NC}"
-echo "- Check ports: ${GREEN}lsof -i :7000${NC} and ${GREEN}lsof -i :5000${NC}"
+echo -e "- Verify mDNS: ${GREEN}dns-sd -B _airplay._tcp${NC}"
+echo -e "- Check the port: ${GREEN}lsof -i :7000${NC} (7001 if 7000 was taken)"
 echo ""
 echo -e "${GREEN}Happy streaming!${NC}"
