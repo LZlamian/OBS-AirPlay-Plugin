@@ -549,13 +549,22 @@ int main(int argc, char** argv)
         uint32_t body_size = 0;
         plist_to_bin(blob_action, &body, &body_size);
         std::atomic<bool> transfer_done{false};
+        // When the worst poll started, from the start of the upload, so a
+        // slow one can be placed (upload, reply, spool write).
+        const auto upload_started = std::chrono::steady_clock::now();
+        double worst_poll_at_ms = 0.0;
         std::thread poller([&] {
             while (!transfer_done.load()) {
                 const auto started = std::chrono::steady_clock::now();
                 httpExchange(port, std::string("GET /playback-info HTTP/1.1\r\nHost: 127.0.0.1\r\n") +
                                        "X-Apple-Session-ID: " + session + "\r\nContent-Length: 0\r\n\r\n");
-                worst_poll_ms = std::max(worst_poll_ms, std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - started).count());
+                const double took = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started).count();
+                if (took > worst_poll_ms) {
+                    worst_poll_ms = took;
+                    worst_poll_at_ms = std::chrono::duration<double, std::milli>(
+                        started - upload_started).count();
+                }
                 ++polls;
                 usleep(20000);
             }
@@ -575,6 +584,8 @@ int main(int argc, char** argv)
         }
         if (sent) blob_action_response = receiveResponse(fd);
         if (fd >= 0) close(fd);
+        const double reply_at_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - upload_started).count();
         const auto spool_started = std::chrono::steady_clock::now();
         waitForNewSpool(state, spool_before_blob, 30000);
         spool_wait_ms = std::chrono::duration<double, std::milli>(
@@ -594,8 +605,10 @@ int main(int argc, char** argv)
         }
         const bool in_budget = worst_poll_ms < budget_ms;
         std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms "
-                    "(budget %.0f ms), spooled %.0f ms after the reply -> %s\n", body_size, polls,
-                    worst_poll_ms, budget_ms, spool_wait_ms, in_budget ? "ok" : "SLOW");
+                    "(budget %.0f ms) starting %.0f ms into the upload (reply at %.0f ms), "
+                    "spooled %.0f ms after the reply -> %s\n", body_size, polls, worst_poll_ms,
+                    budget_ms, worst_poll_at_ms, reply_at_ms, spool_wait_ms,
+                    in_budget ? "ok" : "SLOW");
         large_transfer_ok = in_budget && polls > 10 && spool_wait_ms >= 1500.0;
     } else {
         blob_action_response = binaryPlistExchange(port, "/action", session, blob_action);
