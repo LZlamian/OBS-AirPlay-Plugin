@@ -528,7 +528,9 @@ void AirPlayServer::resetAudioRetimer()
 {
     m_audio_retimer.reset();
     m_audio_retimer_reported = false;
-    m_audio_retimer_shifts_reported = 0;
+    m_audio_retimer_steps_reported = 0;
+    m_audio_retimer_resyncs_reported = 0;
+    m_audio_retimer_trim_reported = false;
 }
 
 void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)
@@ -564,7 +566,10 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     audio.samples_per_sec = static_cast<uint32_t>(sample_rate);
     audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
     const uint64_t now = os_gettime_ns();
-    const AudioRetimer::Result timing = m_audio_retimer.process(normalizeTimestamp(pts), now);
+    const uint64_t duration = static_cast<uint64_t>(audio.frames) * 1000000000ULL /
+                              static_cast<uint64_t>(sample_rate > 0 ? sample_rate : 44100);
+    const AudioRetimer::Result timing =
+        m_audio_retimer.process(normalizeTimestamp(pts), duration, now);
     if (!m_audio_retimer_reported && m_audio_retimer.pastStartup(now)) {
         m_audio_retimer_reported = true;
         if (m_audio_retimer.dropped() > 0) {
@@ -573,10 +578,21 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
                  static_cast<unsigned long long>(m_audio_retimer.worstDroppedNs() / 1000000));
         }
     }
-    if (m_audio_retimer.shifts() != m_audio_retimer_shifts_reported) {
-        m_audio_retimer_shifts_reported = m_audio_retimer.shifts();
-        blog(LOG_INFO, "[AUDIO] stream fell behind; audio delayed by %llu ms in total",
-             static_cast<unsigned long long>(m_audio_retimer.shiftNs() / 1000000));
+    if (m_audio_retimer.steps() != m_audio_retimer_steps_reported &&
+        m_audio_retimer_steps_reported < 10) {
+        m_audio_retimer_steps_reported = m_audio_retimer.steps();
+        blog(LOG_INFO, "[AUDIO] sender timing moved by %lld ms; audio kept continuous",
+             static_cast<long long>(m_audio_retimer.lastStepNs() / 1000000));
+    }
+    if (m_audio_retimer.resyncs() != m_audio_retimer_resyncs_reported &&
+        m_audio_retimer_resyncs_reported < 10) {
+        m_audio_retimer_resyncs_reported = m_audio_retimer.resyncs();
+        blog(LOG_INFO, "[AUDIO] stream fell behind; restarted at the current time (%llu so far)",
+             static_cast<unsigned long long>(m_audio_retimer.resyncs()));
+    }
+    if (m_audio_retimer.trimmed() == 1 && !m_audio_retimer_trim_reported) {
+        m_audio_retimer_trim_reported = true;
+        blog(LOG_INFO, "[AUDIO] stream running ahead of OBS; dropping packets to keep the delay down");
     }
     if (timing.drop) {
         return;

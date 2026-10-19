@@ -434,113 +434,165 @@ void testPlistChecked()
 }
 
 // Mirrored audio never reaches OBS late (OBS would raise its buffering for
-// good): a startup backlog is dropped, a later stall is shifted out.
+// good) and its timestamps stay continuous.
+namespace {
+struct RetimerRun {
+    int dropped = 0;
+    int late = 0;        // output later than now - kLateNs
+    int gaps = 0;        // output not continuous with the previous packet
+    uint64_t max_lead = 0;  // output ahead of now, most
+};
+} // namespace
+
 void testAudioRetimer()
 {
     constexpr uint64_t ms = 1000000;
     constexpr uint64_t packet = 480 * 1000000000ULL / 44100;  // AAC-ELD packet, ns
     const uint64_t t0 = 1000000 * ms;
 
-    // On time (100 ms ahead): untouched.
-    {
-        AudioRetimer retimer;
-        uint64_t now = t0;
-        bool ok = true;
-        for (int i = 0; i < 500; ++i, now += packet) {
-            const auto r = retimer.process(now + 100 * ms, now);
-            ok = ok && !r.drop && r.timestamp == now + 100 * ms;
+    AudioRetimer retimer;
+    uint64_t last_end = 0;
+    auto feed = [&](RetimerRun& run, uint64_t play_at, uint64_t now) {
+        const auto r = retimer.process(play_at, packet, now);
+        if (r.drop) {
+            ++run.dropped;
+            return r;
         }
-        CHECK(ok);
-        CHECK_EQ(retimer.dropped(), uint64_t(0));
-        CHECK_EQ(retimer.shiftNs(), uint64_t(0));
+        if (r.timestamp + AudioRetimer::kLateNs < now) ++run.late;
+        if (last_end != 0 && r.timestamp != last_end) ++run.gaps;
+        if (r.timestamp > now && r.timestamp - now > run.max_lead) run.max_lead = r.timestamp - now;
+        last_end = r.timestamp + packet;
+        return r;
+    };
+    auto restart = [&] {
+        retimer.reset();
+        last_end = 0;
+    };
+
+    // On time (100 ms ahead): the sender's times, unchanged.
+    {
+        restart();
+        RetimerRun run;
+        uint64_t now = t0;
+        bool same = true;
+        for (int i = 0; i < 500; ++i, now += packet) {
+            same = same && feed(run, now + 100 * ms, now).timestamp == now + 100 * ms;
+        }
+        CHECK(same);
+        CHECK_EQ(run.dropped, 0);
+        CHECK_EQ(run.gaps, 0);
+        CHECK_EQ(retimer.steps(), uint64_t(0));
     }
 
     // Startup burst: 1 s of queued packets released at once (play-at times
-    // already passed), then real time. The backlog is dropped, the rest kept
-    // unchanged: no delay added.
+    // already passed), then real time. The backlog is dropped and the rest
+    // keeps the sender's times: no delay added.
     {
-        AudioRetimer retimer;
+        restart();
+        RetimerRun burst;
         uint64_t now = t0;
         uint64_t play_at = t0 - 1000 * ms;
-        int dropped = 0;
-        int kept_late = 0;
-        for (int i = 0; i < 120; ++i) {  // the burst: 1 ms apart
-            const auto r = retimer.process(play_at, now);
-            if (r.drop) ++dropped;
-            else if (r.timestamp + AudioRetimer::kLateNs < now) ++kept_late;
-            play_at += packet;
-            now += ms;
+        for (int i = 0; i < 120; ++i, play_at += packet, now += ms) feed(burst, play_at, now);
+        RetimerRun after;
+        bool same = true;
+        for (int i = 0; i < 400; ++i, play_at += packet, now += packet) {
+            const auto r = feed(after, play_at, now);
+            same = same && !r.drop && r.timestamp == play_at;
         }
-        uint64_t last = 0;
-        bool continuous = true;
-        for (int i = 0; i < 400; ++i) {  // then real time
-            const auto r = retimer.process(play_at, now);
-            continuous = continuous && !r.drop && r.timestamp == play_at &&
-                         (last == 0 || r.timestamp > last);
-            last = r.timestamp;
-            play_at += packet;
-            now += packet;
-        }
-        CHECK(dropped > 80);
-        CHECK_EQ(kept_late, 0);
-        CHECK(continuous);
-        CHECK_EQ(retimer.shiftNs(), uint64_t(0));
+        CHECK(burst.dropped > 80);
+        CHECK_EQ(burst.late + after.late, 0);
+        CHECK(same);
         CHECK(retimer.worstDroppedNs() >= 990 * ms);
     }
 
-    // A stall after the start: shifted once by the amount it fell behind,
-    // then continuous and on time.
+    // The first real RTP sync 4.4 s in moves every play-at time back by 1 s
+    // (seen on a device): the stream stays continuous and on time, nothing
+    // dropped, no delay added.
     {
-        AudioRetimer retimer;
+        restart();
+        RetimerRun run;
+        uint64_t now = t0;
+        uint64_t play_at = t0 + 200 * ms;
+        for (; now < t0 + 4400 * ms; now += packet, play_at += packet) feed(run, play_at, now);
+        play_at -= 1000 * ms;
+        for (int i = 0; i < 2000; ++i, now += packet, play_at += packet) feed(run, play_at, now);
+        CHECK_EQ(run.late, 0);
+        CHECK_EQ(run.gaps, 0);
+        CHECK_EQ(run.dropped, 0);
+        CHECK(run.max_lead <= 210 * ms);
+        CHECK_EQ(retimer.steps(), uint64_t(1));
+        CHECK(retimer.lastStepNs() < -990 * int64_t(ms) && retimer.lastStepNs() > -1010 * int64_t(ms));
+        CHECK_EQ(retimer.resyncs(), uint64_t(0));
+    }
+
+    // A stall after the start (packets 400 ms late): one restart at now, then
+    // on time again, and the delay does not grow.
+    {
+        restart();
+        RetimerRun run;
         uint64_t now = t0;
         uint64_t play_at = t0 + 50 * ms;
-        for (int i = 0; i < 300; ++i, now += packet, play_at += packet) {
-            CHECK(!retimer.process(play_at, now).drop);
-        }
-        now += 400 * ms;  // the stall: packets arrive 400 ms later than due
-        bool on_time = true;
-        for (int i = 0; i < 200; ++i, now += packet, play_at += packet) {
-            const auto r = retimer.process(play_at, now);
-            on_time = on_time && !r.drop && r.timestamp + AudioRetimer::kLateNs >= now;
-        }
-        CHECK(on_time);
-        CHECK_EQ(retimer.shifts(), uint64_t(1));
-        CHECK(retimer.shiftNs() >= 340 * ms && retimer.shiftNs() <= 360 * ms);
-        CHECK_EQ(retimer.dropped(), uint64_t(0));
+        for (int i = 0; i < 300; ++i, now += packet, play_at += packet) feed(run, play_at, now);
+        now += 400 * ms;
+        RetimerRun after;
+        for (int i = 0; i < 400; ++i, now += packet, play_at += packet) feed(after, play_at, now);
+        CHECK_EQ(run.late + after.late, 0);
+        CHECK_EQ(after.dropped, 0);
+        CHECK_EQ(retimer.resyncs(), uint64_t(1));
+        CHECK(after.max_lead <= packet);
     }
 
     // Late from the very start (500 ms): dropped for the startup window, then
-    // shifted once and on time.
+    // one restart at now, continuous and on time.
     {
-        AudioRetimer retimer;
+        restart();
+        RetimerRun startup;
         uint64_t now = t0;
         uint64_t play_at = t0 - 500 * ms;
-        bool on_time_after = true;
-        for (int i = 0; i < 400; ++i, now += packet, play_at += packet) {
-            const auto r = retimer.process(play_at, now);
-            if (now - t0 >= AudioRetimer::kStartupNs) {
-                on_time_after = on_time_after && !r.drop &&
-                                r.timestamp + AudioRetimer::kLateNs >= now;
-            }
+        for (; now - t0 < AudioRetimer::kStartupNs; now += packet, play_at += packet) {
+            feed(startup, play_at, now);
         }
-        CHECK(on_time_after);
-        CHECK(retimer.dropped() > 150);
-        CHECK_EQ(retimer.shifts(), uint64_t(1));
+        RetimerRun run;
+        for (int i = 0; i < 400; ++i, now += packet, play_at += packet) feed(run, play_at, now);
+        CHECK(startup.dropped > 150);
+        CHECK_EQ(run.late, 0);
+        CHECK_EQ(run.dropped, 0);
+        CHECK_EQ(retimer.resyncs(), uint64_t(1));
     }
 
-    // Never shifted by more than the cap.
+    // A sender clock 1% fast while its times are ridden over: the timeline
+    // never runs more than kMaxLeadNs ahead.
     {
-        AudioRetimer retimer;
+        restart();
+        RetimerRun run;
         uint64_t now = t0;
-        retimer.process(now, now);
-        now += AudioRetimer::kStartupNs + ms;
-        const auto r = retimer.process(now - 5000 * ms, now);
-        CHECK(!r.drop);
-        CHECK_EQ(retimer.shiftNs(), uint64_t(0));
-        retimer.reset();
-        CHECK_EQ(retimer.dropped(), uint64_t(0));
-        CHECK(retimer.process(now - 100 * ms, now).drop);  // a new stream starts over
+        uint64_t play_at = t0 + 100 * ms;
+        for (int i = 0; i < 100; ++i, now += packet, play_at += packet) feed(run, play_at, now);
+        play_at -= 1000 * ms;
+        for (int i = 0; i < 5000; ++i, now += packet * 99 / 100, play_at += packet) feed(run, play_at, now);
+        CHECK_EQ(run.late, 0);
+        CHECK(run.max_lead <= AudioRetimer::kMaxLeadNs + packet);
+        CHECK(retimer.trimmed() > 0);
     }
+
+    // A step forward that is on time is followed (keeps A/V sync).
+    {
+        restart();
+        RetimerRun run;
+        uint64_t now = t0;
+        uint64_t play_at = t0 + 50 * ms;
+        for (int i = 0; i < 100; ++i, now += packet, play_at += packet) feed(run, play_at, now);
+        play_at += 300 * ms;
+        const auto r = feed(run, play_at, now);
+        CHECK(!r.drop);
+        CHECK_EQ(r.timestamp, play_at);
+        CHECK_EQ(retimer.steps(), uint64_t(1));
+    }
+
+    // reset(): a new stream starts over.
+    restart();
+    CHECK(retimer.process(t0 - 100 * ms, packet, t0).drop);
+    CHECK_EQ(retimer.dropped(), uint64_t(1));
 }
 
 void testAudioDecoder()

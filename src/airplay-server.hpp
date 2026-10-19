@@ -113,7 +113,9 @@ private:
     // Keeps audio from reaching OBS late (under m_audio_decoder_mutex).
     AudioRetimer m_audio_retimer;
     bool m_audio_retimer_reported = false;
-    uint64_t m_audio_retimer_shifts_reported = 0;
+    uint64_t m_audio_retimer_steps_reported = 0;
+    uint64_t m_audio_retimer_resyncs_reported = 0;
+    bool m_audio_retimer_trim_reported = false;
     uint64_t m_video_frame_counter = 0;
     uint64_t m_first_decoded_frame_ns = 0;
     // Mirror statistics window ([MIRROR] line every ~10 s while frames arrive).

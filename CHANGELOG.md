@@ -56,11 +56,13 @@ Performance:
 - Audio streams are decoded in the format the sender negotiates (48 kHz,
   24-bit ALAC as well as 44.1 kHz), with the RTP clock at the same rate;
   until now every stream was assumed to be 44.1 kHz stereo.
-- Mirrored audio no longer reaches OBS late. The burst of queued packets an
-  AirPlay stream starts with is dropped, and a stream that falls behind later
-  is delayed just enough (at most 1 s). Until now OBS raised its audio
-  buffering to the 960 ms maximum at the start of mirroring, adding that delay
-  to every audio source until OBS was restarted.
+- Mirrored audio no longer reaches OBS late. Its timestamps stay continuous
+  and follow the sender only while that is on time: the burst of queued
+  packets a stream starts with is dropped, the jump back when the sender's
+  first clock sync arrives is ridden over, and after a stall the stream
+  restarts at the current time. Until now OBS raised its audio buffering to
+  the 960 ms maximum at the start of mirroring, adding that delay to every
+  audio source until OBS was restarted.
 
 Project:
 - The UxPlay fork is rebased onto the UxPlay v1.73.7 release (iOS 27
