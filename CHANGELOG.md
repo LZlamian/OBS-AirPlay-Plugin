@@ -26,6 +26,9 @@ Security and network hardening:
 - A peer that stops reading cannot block the receiver; no SIGPIPE.
 - The request parser no longer reads past received data for the protocol
   (found by fuzzing).
+- A request whose binary plist holds a text value with a NUL character can
+  no longer crash OBS (libplist asserted on it); found by fuzzing the request
+  handlers. The bundled libplist is now built without asserts as well.
 - Only the device that started AirPlay video can control or end it.
 - The media trace redacts URL query strings and credentials.
 - Updates require an Ed25519 signature (`<zip>.sig`) and are re-checked in
@@ -50,6 +53,9 @@ Performance:
 - Release builds are smaller (dead-stripped, only module entry points exported).
 - Reverse-fetched (page-local) media is written to its spool file on a worker
   thread; the receiver keeps answering while it is written.
+- Audio streams are decoded in the format the sender negotiates (48 kHz,
+  24-bit ALAC as well as 44.1 kHz), with the RTP clock at the same rate;
+  until now every stream was assumed to be 44.1 kHz stereo.
 
 Project:
 - The UxPlay fork is rebased onto the UxPlay v1.73.7 release (iOS 27

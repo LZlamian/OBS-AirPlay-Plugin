@@ -59,6 +59,8 @@ public:
     // waits for a decoder or for OBS.
     void ingestVideoBitstream(const uint8_t* data, size_t size, uint64_t pts, bool is_h265);
     void ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts);
+    // The format of the next audio stream (from SETUP).
+    void setAudioStreamFormat(const AirPlayAudioFormat& format);
     void outputMediaVideoFrame(const MediaVideoFrame& decoded);
     void outputMediaAudioFrame(const MediaAudioFrame& decoded);
     

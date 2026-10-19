@@ -484,11 +484,14 @@ if(BUILD_TESTING)
     )
     target_include_directories(obs-airplay-unit-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/uxplay/lib
         ${OBS_INCLUDE_DIR}
         ${FFMPEG_INCLUDE_DIRS}
+        ${PLIST_TEST_INCLUDE_DIRS}
     )
-    target_link_directories(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
-    target_link_libraries(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARIES})
+    target_link_directories(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARY_DIRS}
+        ${PLIST_TEST_LIBRARY_DIRS})
+    target_link_libraries(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARIES} ${PLIST_TEST_LIBRARIES})
 
     foreach(target obs-airplay-media-smoke obs-airplay-decoder-smoke obs-airplay-updater-smoke
                    obs-airplay-protocol-smoke obs-airplay-unit-tests)
@@ -543,6 +546,13 @@ if(BUILD_TESTING)
         target_include_directories(obs-airplay-fuzz-http-request PRIVATE ${CMAKE_SOURCE_DIR}/uxplay/lib)
         target_link_libraries(obs-airplay-fuzz-http-request PRIVATE airplay)
 
+        # Request sequences into the receiver's handlers (/play, /action,
+        # playback controls, RTSP), seeds from tests/fuzz/make-request-seeds.py.
+        obs_airplay_fuzz_target(obs-airplay-fuzz-requests tests/fuzz/fuzz-requests.cpp)
+        target_include_directories(obs-airplay-fuzz-requests PRIVATE
+            ${CMAKE_SOURCE_DIR}/uxplay/lib ${PLIST_TEST_INCLUDE_DIRS})
+        target_link_libraries(obs-airplay-fuzz-requests PRIVATE airplay)
+
         set(FUZZ_SEEDS "${CMAKE_SOURCE_DIR}/tests/fuzz/seeds")
         if(OBS_AIRPLAY_HAVE_LIBFUZZER)
             set(FUZZ_RUNS -runs=20000)
@@ -552,7 +562,10 @@ if(BUILD_TESTING)
         add_test(NAME fuzz-hls COMMAND obs-airplay-fuzz-hls ${FUZZ_RUNS} "${FUZZ_SEEDS}/master.m3u8")
         add_test(NAME fuzz-http-request COMMAND obs-airplay-fuzz-http-request ${FUZZ_RUNS}
                  "${FUZZ_SEEDS}/play-request.bin" "${FUZZ_SEEDS}/info-request.bin")
-        set_tests_properties(fuzz-hls fuzz-http-request PROPERTIES TIMEOUT 300)
+        add_test(NAME fuzz-requests COMMAND obs-airplay-fuzz-requests ${FUZZ_RUNS}
+                 "${FUZZ_SEEDS}/requests-video.bin" "${FUZZ_SEEDS}/requests-hls.bin"
+                 "${FUZZ_SEEDS}/requests-rtsp.bin")
+        set_tests_properties(fuzz-hls fuzz-http-request fuzz-requests PROPERTIES TIMEOUT 300)
     endif()
 
     # ---- CTest: every smoke, with media generated at test time ----------

@@ -61,13 +61,19 @@ every response short, as some sender media servers do.
 
 Fuzzing: configure with `--preset asan -DOBS_AIRPLAY_FUZZ=ON` for
 `obs-airplay-fuzz-hls`, `-fuzz-h264` (mirror access units into the software
-decoder) and `-fuzz-http-request` (the fork's request parser), each with a
-short `fuzz-*` CTest run. With a clang that has libFuzzer's runtime (not
-Apple's) they are libFuzzer binaries; otherwise `tests/fuzz/fuzz-driver.cpp`
-runs seeded random mutations: `obs-airplay-fuzz-hls -runs=1000000 -seed=7
-tests/fuzz/seeds/master.m3u8`. UBSan reports `__builtin_ctzll(0)` in the
-bundled llhttp's NEON code; it is harmless on arm64 (the result is 64, as the
-code expects) and left as generated.
+decoder), `-fuzz-http-request` (the fork's request parser) and
+`-fuzz-requests` (request sequences through the receiver's handlers: `/play`,
+`/action`, playback controls and RTSP, with binary plist bodies; seeds from
+`tests/fuzz/make-request-seeds.py`, receiver log with
+`OBS_AIRPLAY_FUZZ_VERBOSE=1`), each with a short `fuzz-*` CTest run. With a
+clang that has libFuzzer's runtime (not Apple's) they are libFuzzer binaries;
+otherwise `tests/fuzz/fuzz-driver.cpp` runs seeded random mutations:
+`obs-airplay-fuzz-requests -runs=1000000 -seed=7 tests/fuzz/seeds/requests-*.bin`.
+
+Untrusted binary plists are parsed with `plist_from_bin_checked`
+(`uxplay/lib/plist_checked.h`), which refuses strings and keys with a NUL
+byte: libplist's getters assert on them. The release libplist is also built
+with `NDEBUG`.
 
 Leak check: `MallocStackLogging=1 leaks --atExit -- <smoke> <args>`. Note that
 `leaks` exits 0 even when the program fails: take the result from a plain run.

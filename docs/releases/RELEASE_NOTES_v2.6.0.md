@@ -33,7 +33,8 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
   only a plugin in your own home folder updates itself, and the previous
   version is kept until the new one has started.
 - The media trace removes query strings and passwords from the URLs it logs.
-- Problems found by fuzzing the receiver's request parser are fixed.
+- Problems found by fuzzing the receiver are fixed, among them a malformed
+  request that could crash OBS (a text value containing a NUL character).
 
 ## Reliability and usability
 
@@ -51,6 +52,8 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
   that change their parameters mid-way decode correctly.
 - Nearby devices keep finding the receiver over Bluetooth after it has been
   idle.
+- Audio is decoded in the format the device chooses: 48 kHz and 24-bit
+  streams play at the right speed (every Apple device so far sends 44.1 kHz).
 - The installer puts one copy of the plugin in your user folder and removes
   the system-wide copy that earlier installers also left.
 

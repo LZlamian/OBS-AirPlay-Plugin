@@ -506,6 +506,10 @@ bool obs_module_load(void)
                 }
             });
 
+            g_uxplay_integration->setAudioFormatCallback([](const AirPlayAudioFormat& format) {
+                if (g_airplay_server) g_airplay_server->setAudioStreamFormat(format);
+            });
+
             g_uxplay_integration->setAudioCallback([](const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts) {
                 if (!data || size == 0) {
                     return;

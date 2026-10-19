@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <memory>
 
+#include "audio-decoder.hpp"
 #include "media-player.hpp"
 
 // UxPlay core includes
@@ -36,6 +37,9 @@ typedef std::function<void(const uint8_t* data, size_t size, uint64_t pts, bool 
 // Raw compressed AirPlay audio payload callback; `data` is valid only during
 // the call.
 typedef std::function<void(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)> AudioDataCallback;
+
+// The audio format a sender negotiated for its next audio stream (SETUP).
+typedef std::function<void(const AirPlayAudioFormat& format)> AudioFormatCallback;
 
 // Connection reset callback (called when AirPlay client disconnects/reconnects)
 // clear_output=false flushes decoders but keeps the last frame on screen.
@@ -90,6 +94,7 @@ public:
     // Set callbacks for video, audio, and connection reset
     void setVideoCallback(VideoFrameCallback callback);
     void setAudioCallback(AudioDataCallback callback);
+    void setAudioFormatCallback(AudioFormatCallback callback);
     void setMediaVideoCallback(MediaVideoCallback callback);
     void setMediaAudioCallback(MediaAudioCallback callback);
     void setConnectionResetCallback(ConnectionResetCallback callback);
@@ -105,6 +110,7 @@ private:
     std::atomic<uint64_t> m_connection_started_ns{0};
     VideoFrameCallback m_video_callback;
     AudioDataCallback m_audio_callback;
+    AudioFormatCallback m_audio_format_callback;  // under m_mutex
     ConnectionResetCallback m_reset_callback;
     std::mutex m_mutex;
 

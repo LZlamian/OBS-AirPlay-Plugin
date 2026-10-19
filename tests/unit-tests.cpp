@@ -6,10 +6,15 @@
 #include "media-url-policy.hpp"
 
 extern "C" {
+#include "plist_checked.h"
+}
+
+extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
 }
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -152,13 +157,13 @@ void testPortList()
 
 // Encodes `seconds` of a 440 Hz stereo sine as raw AAC-LC access units
 // (44.1 kHz, as AirPlay sends them: no ADTS headers).
-std::vector<std::vector<uint8_t>> encodeAacLc(double seconds)
+std::vector<std::vector<uint8_t>> encodeAacLc(double seconds, int sample_rate = 44100)
 {
     std::vector<std::vector<uint8_t>> packets;
     const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
     if (!codec) return packets;
     AVCodecContext* encoder = avcodec_alloc_context3(codec);
-    encoder->sample_rate = 44100;
+    encoder->sample_rate = sample_rate;
     encoder->sample_fmt = AV_SAMPLE_FMT_FLTP;
     encoder->bit_rate = 128000;
     encoder->profile = AV_PROFILE_AAC_LOW;
@@ -200,6 +205,231 @@ std::vector<std::vector<uint8_t>> encodeAacLc(double seconds)
     av_frame_free(&frame);
     avcodec_free_context(&encoder);
     return packets;
+}
+
+// Encodes `seconds` of a 440 Hz stereo sine as ALAC packets at `sample_rate`
+// and `bit_depth` (16 or 24); `frame_samples` gets the encoder's frame size.
+std::vector<std::vector<uint8_t>> encodeAlac(double seconds, int sample_rate, int bit_depth,
+                                             int& frame_samples)
+{
+    std::vector<std::vector<uint8_t>> packets;
+    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_ALAC);
+    if (!codec) return packets;
+    AVCodecContext* encoder = avcodec_alloc_context3(codec);
+    encoder->sample_rate = sample_rate;
+    encoder->sample_fmt = bit_depth > 16 ? AV_SAMPLE_FMT_S32P : AV_SAMPLE_FMT_S16P;
+    encoder->bits_per_raw_sample = bit_depth;
+    av_channel_layout_default(&encoder->ch_layout, 2);
+    if (avcodec_open2(encoder, codec, nullptr) < 0) {
+        avcodec_free_context(&encoder);
+        return packets;
+    }
+    frame_samples = encoder->frame_size;
+    AVFrame* frame = av_frame_alloc();
+    AVPacket* packet = av_packet_alloc();
+    frame->format = encoder->sample_fmt;
+    frame->sample_rate = sample_rate;
+    frame->nb_samples = encoder->frame_size;
+    av_channel_layout_copy(&frame->ch_layout, &encoder->ch_layout);
+    av_frame_get_buffer(frame, 0);
+    auto drain = [&] {
+        while (avcodec_receive_packet(encoder, packet) == 0) {
+            packets.emplace_back(packet->data, packet->data + packet->size);
+            av_packet_unref(packet);
+        }
+    };
+    const int total = static_cast<int>(seconds * sample_rate);
+    for (int sample = 0; sample + frame->nb_samples <= total; sample += frame->nb_samples) {
+        av_frame_make_writable(frame);
+        for (int ch = 0; ch < 2; ++ch) {
+            for (int i = 0; i < frame->nb_samples; ++i) {
+                const double value =
+                    0.5 * std::sin(2.0 * M_PI * 440.0 * (sample + i) / sample_rate);
+                if (bit_depth > 16) {
+                    // 24-bit samples, left-aligned in 32 bits
+                    reinterpret_cast<int32_t*>(frame->data[ch])[i] =
+                        static_cast<int32_t>(value * 8388607.0) * 256;
+                } else {
+                    reinterpret_cast<int16_t*>(frame->data[ch])[i] =
+                        static_cast<int16_t>(value * 32767.0);
+                }
+            }
+        }
+        frame->pts = sample;
+        if (avcodec_send_frame(encoder, frame) == 0) drain();
+    }
+    avcodec_send_frame(encoder, nullptr);
+    drain();
+    av_packet_free(&packet);
+    av_frame_free(&frame);
+    avcodec_free_context(&encoder);
+    return packets;
+}
+
+// Decodes packets with a decoder set up for `format` and checks the result
+// is the 440 Hz half-scale sine at the format's rate.
+void checkDecodedSine(const char* what, const std::vector<std::vector<uint8_t>>& packets,
+                      uint8_t ct, const AirPlayAudioFormat& format)
+{
+    AudioDecoder decoder;
+    decoder.setStreamFormat(format);
+    std::vector<float> left, right, all;
+    int sample_rate = 0;
+    int decoded = 0;
+    for (const auto& packet : packets) {
+        if (decoder.decode(packet.data(), packet.size(), ct, left, right, sample_rate)) {
+            ++decoded;
+            all.insert(all.end(), left.begin(), left.end());
+        }
+    }
+    const size_t begin = static_cast<size_t>(format.sample_rate / 10);
+    const size_t end = begin + static_cast<size_t>(format.sample_rate / 2);
+    double sum_squares = 0.0;
+    int crossings = 0;
+    if (all.size() > end) {
+        for (size_t i = begin; i < end; ++i) {
+            sum_squares += static_cast<double>(all[i]) * all[i];
+            if ((all[i - 1] < 0.0f) != (all[i] < 0.0f)) ++crossings;
+        }
+    }
+    const double rms = all.size() > end ? std::sqrt(sum_squares / static_cast<double>(end - begin)) : 0.0;
+    std::printf("audio %s: %d/%zu packets at %d Hz, rms=%.3f, %d zero crossings in 0.5 s\n", what,
+                decoded, packets.size(), sample_rate, rms, crossings);
+    CHECK(decoded >= static_cast<int>(packets.size()) - 2);
+    CHECK_EQ(sample_rate, format.sample_rate);
+    CHECK(std::fabs(rms - 0.5 / std::sqrt(2.0)) < 0.05);
+    CHECK(crossings > 420 && crossings < 460);
+}
+
+// BUG-15: the audio format a sender negotiates sets up the decoder (rate,
+// channels, depth, frame length) instead of fixed 44.1 kHz stereo data.
+void testAudioFormats()
+{
+    using airplay_audio::formatFromSetup;
+    AirPlayAudioFormat format;
+    CHECK(formatFromSetup(0x40000, 352, format) && format.sample_rate == 44100 &&
+          format.bit_depth == 16 && format.frame_samples == 352);
+    CHECK(formatFromSetup(0x80000, 352, format) && format.sample_rate == 44100 && format.bit_depth == 24);
+    CHECK(formatFromSetup(0x100000, 352, format) && format.sample_rate == 48000 && format.bit_depth == 16);
+    CHECK(formatFromSetup(0x200000, 352, format) && format.sample_rate == 48000 && format.bit_depth == 24);
+    CHECK(formatFromSetup(0x400000, 1024, format) && format.sample_rate == 44100);
+    CHECK(formatFromSetup(0x800000, 1024, format) && format.sample_rate == 48000);
+    CHECK(formatFromSetup(0x1000000, 480, format) && format.sample_rate == 44100 && format.channels == 2);
+    CHECK(formatFromSetup(0x2000000, 480, format) && format.sample_rate == 48000);
+    CHECK(!formatFromSetup(0, 0, format) && format == AirPlayAudioFormat{});
+    CHECK(!formatFromSetup(0x800, 352, format) && format.sample_rate == 44100);  // PCM: not ours
+
+    // The default setup data is exactly what the decoder always used.
+    const AirPlayAudioFormat standard;
+    CHECK((airplay_audio::aacAudioSpecificConfig(39, standard) ==
+           std::vector<uint8_t>{0xF8, 0xE8, 0x50, 0x00}));
+    CHECK((airplay_audio::aacAudioSpecificConfig(2, standard) == std::vector<uint8_t>{0x12, 0x10}));
+    CHECK((airplay_audio::alacMagicCookie(standard) == std::vector<uint8_t>{
+        0x00, 0x00, 0x00, 0x24, 0x61, 0x6C, 0x61, 0x63, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x60, 0x00, 0x10, 0x28, 0x0A, 0x0E, 0x02, 0x00, 0xFF,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xAC, 0x44}));
+    AirPlayAudioFormat rate48;
+    rate48.sample_rate = 48000;
+    CHECK((airplay_audio::aacAudioSpecificConfig(39, rate48) ==
+           std::vector<uint8_t>{0xF8, 0xE6, 0x50, 0x00}));
+    CHECK((airplay_audio::aacAudioSpecificConfig(2, rate48) == std::vector<uint8_t>{0x11, 0x90}));
+
+    // Decoded at the negotiated rate.
+    AirPlayAudioFormat lc48;
+    lc48.sample_rate = 48000;
+    checkDecodedSine("AAC-LC 48 kHz", encodeAacLc(1.0, 48000), 4, lc48);
+    for (const int rate : {44100, 48000}) {
+        for (const int depth : {16, 24}) {
+            int frame_samples = 0;
+            const auto packets = encodeAlac(1.0, rate, depth, frame_samples);
+            CHECK(!packets.empty());
+            AirPlayAudioFormat alac;
+            alac.sample_rate = rate;
+            alac.bit_depth = depth;
+            alac.frame_samples = frame_samples;
+            char what[48];
+            std::snprintf(what, sizeof(what), "ALAC %d Hz %d-bit", rate, depth);
+            checkDecodedSine(what, packets, 2, alac);
+        }
+    }
+}
+
+// Binary plists from the network: a string or key with a NUL byte is
+// refused before libplist's asserting getters could see it.
+std::vector<uint8_t> toBinary(plist_t plist)
+{
+    char* data = nullptr;
+    uint32_t size = 0;
+    plist_to_bin(plist, &data, &size);
+    std::vector<uint8_t> bytes(data, data + size);
+    plist_mem_free(data);
+    plist_free(plist);
+    return bytes;
+}
+
+bool replaceMarker(std::vector<uint8_t>& bytes, const std::vector<uint8_t>& marker,
+                   size_t at)
+{
+    for (size_t i = 0; i + marker.size() <= bytes.size(); ++i) {
+        if (std::equal(marker.begin(), marker.end(), bytes.begin() + static_cast<long>(i))) {
+            for (size_t j = 0; j < (marker.size() == 1 ? 1 : 2); ++j) bytes[i + at + j] = 0;
+            return true;
+        }
+    }
+    return false;
+}
+
+void testPlistChecked()
+{
+    auto check = [](const std::vector<uint8_t>& bytes) {
+        return bplist_strings_have_nul(reinterpret_cast<const char*>(bytes.data()),
+                                       static_cast<uint32_t>(bytes.size()));
+    };
+    plist_t ok = plist_new_dict();
+    plist_dict_set_item(ok, "Content-Location", plist_new_string("http://192.0.2.10/item.mp4"));
+    plist_dict_set_item(ok, "Title", plist_new_string("caf\xc3\xa9"));  // UTF-16 in bplist
+    plist_dict_set_item(ok, "Data", plist_new_data("\0\0\0", 3));      // NUL in data is fine
+    const std::vector<uint8_t> clean = toBinary(ok);
+    CHECK(!check(clean));
+
+    // ASCII string with a NUL ("aXb" -> "a\0b")
+    plist_t ascii = plist_new_dict();
+    plist_dict_set_item(ascii, "Content-Location", plist_new_string("http://192.0.2.10/aXb.mp4"));
+    std::vector<uint8_t> ascii_nul = toBinary(ascii);
+    CHECK(replaceMarker(ascii_nul, {'a', 'X', 'b'}, 1));
+    CHECK(check(ascii_nul));
+
+    // UTF-16 string with a zero code unit ("\u00e9X" -> "\u00e9\0")
+    plist_t utf16 = plist_new_dict();
+    plist_dict_set_item(utf16, "Content-Location", plist_new_string("caf\xc3\xa9X"));
+    std::vector<uint8_t> utf16_nul = toBinary(utf16);
+    CHECK(replaceMarker(utf16_nul, {0x00, 0xe9, 0x00, 'X'}, 2));
+    CHECK(check(utf16_nul));
+
+    // a dictionary key with a NUL
+    plist_t key = plist_new_dict();
+    plist_dict_set_item(key, "KeyXName", plist_new_string("value"));
+    std::vector<uint8_t> key_nul = toBinary(key);
+    CHECK(replaceMarker(key_nul, {'y', 'X', 'N'}, 1));
+    CHECK(check(key_nul));
+
+    // unreadable structure is refused too
+    std::vector<uint8_t> truncated(clean.begin(), clean.begin() + static_cast<long>(clean.size() / 2));
+    CHECK(check(truncated));
+    std::vector<uint8_t> garbage(64, 0xff);
+    std::memcpy(garbage.data(), "bplist00", 8);
+    CHECK(check(garbage));
+    CHECK(check({}));
+
+    // the checked parse gives NULL, as for a parse failure
+    plist_t parsed = nullptr;
+    plist_from_bin_checked(reinterpret_cast<const char*>(utf16_nul.data()),
+                           static_cast<uint32_t>(utf16_nul.size()), &parsed);
+    CHECK(parsed == nullptr);
+    plist_from_bin_checked(reinterpret_cast<const char*>(clean.data()),
+                           static_cast<uint32_t>(clean.size()), &parsed);
+    CHECK(parsed != nullptr);
+    if (parsed) plist_free(parsed);
 }
 
 void testAudioDecoder()
@@ -270,6 +500,8 @@ int main()
     testHlsResolve();
     testPortList();
     testAudioDecoder();
+    testAudioFormats();
+    testPlistChecked();
     if (g_failures) {
         std::fprintf(stderr, "unit-tests: %d check(s) failed\n", g_failures);
         return 1;

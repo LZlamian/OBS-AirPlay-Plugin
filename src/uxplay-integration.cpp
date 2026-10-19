@@ -299,6 +299,30 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         }
     };
     
+    // SETUP names the audio format of the stream about to start: the decoder
+    // is set up for its rate, channels and depth (all 44.1 kHz stereo from
+    // iOS so far, but the receiver accepts 48 kHz formats too).
+    callbacks.audio_get_format = [](void* cls, unsigned char* ct, unsigned short* spf,
+                                    bool* using_screen, bool* is_media, uint64_t* audio_format) {
+        auto* self = static_cast<UxPlayIntegration*>(cls);
+        if (!self || !ct || !spf || !audio_format) return;
+        AirPlayAudioFormat format;
+        const bool known = airplay_audio::formatFromSetup(*audio_format, *spf, format);
+        blog(known ? LOG_INFO : LOG_WARNING,
+             "[AUDIO] stream format: %s, %u samples per packet (audioFormat 0x%llx, %s%s)%s",
+             airplay_audio::describe(format, *ct).c_str(), static_cast<unsigned>(*spf),
+             static_cast<unsigned long long>(*audio_format),
+             using_screen && *using_screen ? "screen" : "audio only",
+             is_media && *is_media ? ", media" : "",
+             known ? "" : "; format not recognised, decoding as 44.1 kHz stereo");
+        AudioFormatCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(self->m_mutex);
+            callback = self->m_audio_format_callback;
+        }
+        if (callback) callback(format);
+    };
+
     callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) {
         if (cls && data) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
@@ -1057,6 +1081,12 @@ void UxPlayIntegration::setAudioCallback(AudioDataCallback callback)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_audio_callback = callback;
+}
+
+void UxPlayIntegration::setAudioFormatCallback(AudioFormatCallback callback)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_audio_format_callback = std::move(callback);
 }
 
 void UxPlayIntegration::setMediaVideoCallback(MediaVideoCallback callback)

@@ -97,14 +97,21 @@ else
   )
 fi
 
-if [[ -f "${PREFIX}/lib/libplist-2.0.a" && -f "${PREFIX}/lib/pkgconfig/libplist-2.0.pc" ]]; then
+# libplist is built with NDEBUG: its getters assert on strings with an
+# embedded NUL, which a sender controls (the receiver also refuses such
+# plists itself, uxplay/lib/plist_checked.h). The stamp rebuilds a prefix
+# made before this change.
+LIBPLIST_FEATURES="ndebug-v1"
+LIBPLIST_STAMP="${PREFIX}/.obs-airplay-libplist-features"
+if [[ -f "${PREFIX}/lib/libplist-2.0.a" && -f "${PREFIX}/lib/pkgconfig/libplist-2.0.pc" \
+      && "$(cat "${LIBPLIST_STAMP}" 2>/dev/null)" == "${LIBPLIST_FEATURES}" ]]; then
   echo "==> Reusing libplist ${LIBPLIST_VERSION}"
 else
   echo "==> Building libplist ${LIBPLIST_VERSION}"
   (
     cd "${WORK_DIR}/libplist-${LIBPLIST_VERSION}"
-    CFLAGS="${COMMON_CFLAGS}" \
-    CXXFLAGS="${COMMON_CFLAGS}" \
+    CFLAGS="${COMMON_CFLAGS} -DNDEBUG" \
+    CXXFLAGS="${COMMON_CFLAGS} -DNDEBUG" \
     LDFLAGS="-arch ${ARCH} -mmacosx-version-min=${MACOS_DEPLOYMENT_TARGET}" \
       ./configure \
         --prefix="${PREFIX}" \
@@ -113,9 +120,11 @@ else
         --without-cython \
         --without-tools \
         --without-tests
+    make clean >/dev/null 2>&1 || true
     make -j"${JOBS}"
     make install
   )
+  printf '%s' "${LIBPLIST_FEATURES}" > "${LIBPLIST_STAMP}"
 fi
 
 # The feature stamp makes a prefix built before a configure change (e.g.

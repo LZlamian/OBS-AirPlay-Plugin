@@ -515,6 +515,12 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
     }
 }
 
+void AirPlayServer::setAudioStreamFormat(const AirPlayAudioFormat& format)
+{
+    std::lock_guard<std::mutex> lock(m_audio_decoder_mutex);
+    if (m_audio_decoder) m_audio_decoder->setStreamFormat(format);
+}
+
 void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)
 {
     if (!data || size == 0 || !m_audio_decoder) {
