@@ -20,6 +20,9 @@
 | `scripts/` | Release dependencies, packaging, release signing |
 | `licenses/` | Third-party license texts shipped in the bundle |
 
+The 2026-10 audit of v2.5.1, its action plan and the completion record are in
+[AUDIT_2026-10-18.md](AUDIT_2026-10-18.md).
+
 ## Build and test
 
 ```bash
