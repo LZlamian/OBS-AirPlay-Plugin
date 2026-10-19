@@ -13,7 +13,7 @@ request from the local network, so please update.
 
 - ✅ Native Bonjour/mDNS advertising (shows up in iOS Screen Mirroring)
 - ✅ AirPlay protocol support
-- ✅ **Safari Media AirPlay** — play website MP4 and HLS video directly in OBS (set **AirPlay video** to **From any web address** under **Show advanced settings** in the source properties; by default only video from the sending device plays)
+- ✅ **Safari Media AirPlay** — play website MP4 and HLS video directly in OBS (set **AirPlay video** to **From any web address** under **Advanced settings** in the source properties; by default only video from the sending device plays)
 - ✅ **Page-local video support** — Safari `blob:` MP4 media is fetched over AirPlay's reverse channel
 - ✅ **iOS AirPlay video from native apps** — AVPlayer local-file playback (`mediaType=file`) is fetched from the sender's media server, with play/pause, seek, and item switches
 - ✅ **Sender-local media support** — stateful `file:` and `blob:` media URLs are fetched over AirPlay's reverse channel, including senders that establish `/reverse` after `/play`
@@ -142,7 +142,7 @@ When the device stops, the source goes empty about half a second later.
 ### Settings
 
 All AirPlay sources share these settings (there is one receiver per OBS). The
-server name and status are always shown; click **Show advanced settings** for
+server name and status are always shown; tick **Advanced settings** for
 the rest:
 
 - **Server Name**: the name devices show. Applied about a second after you stop

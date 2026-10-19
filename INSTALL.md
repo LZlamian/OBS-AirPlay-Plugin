@@ -20,7 +20,7 @@ To check that it loaded: **Help > Log Files > View Current Log** should contain
 `UxPlay integration active on port 7000`.
 
 Later versions install themselves when you choose **Install Update** in the
-prompt (see the README); turn the daily check off in the source's properties (under **Show advanced settings**).
+prompt (see the README); turn the daily check off in the source's properties (under **Advanced settings**).
 
 ## Uninstall
 
