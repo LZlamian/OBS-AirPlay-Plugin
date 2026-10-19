@@ -329,40 +329,71 @@ jobs:
           fi
           gh release upload "${{ github.ref_name }}" dist/*
 
+  # The Windows beta's draft pre-release. On a branch push it creates or
+  # refreshes the draft for windows/VERSION (when its release notes exist and
+  # no release of that version is published); the maintainer publishes it,
+  # which creates the windows-vX.Y.Z tag. On such a tag pushed by hand, it
+  # creates the draft, or fills an empty pre-release made on GitHub.
   windows-beta-draft:
-    if: startsWith(github.ref, 'refs/tags/windows-v')
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/windows-v') || startsWith(github.ref, 'refs/heads/'))
     needs: [windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: windows-beta-draft
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4   # the release notes
+      - uses: actions/checkout@v4   # windows/VERSION, the release notes
       - uses: actions/download-artifact@v4
         with:
           name: obs-airplay-windows-x64
           path: dist
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS-windows && cat SHA256SUMS-windows
-      - name: Draft pre-release, or fill the one the maintainer made
+      - name: Draft pre-release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
         run: |
-          notes="docs/releases/RELEASE_NOTES_${TAG}.md"
-          if [ ! -f "$notes" ]; then echo "::error::$notes is missing"; exit 1; fi
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" dist/* --verify-tag --draft --prerelease --latest=false \
-              --title "OBS AirPlay for Windows ${TAG#windows-v} (beta)" --notes-file "$notes"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="windows-v$(sed -nE '1s/^([0-9]+\.[0-9]+\.[0-9]+)\r?$/\1/p' windows/VERSION)"
+          fi
+          notes="docs/releases/RELEASE_NOTES_${tag}.md"
+          title="OBS AirPlay for Windows ${tag#windows-v} (beta)"
+          if [ ! -f "$notes" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then echo "::error::$notes is missing"; exit 1; fi
+            echo "no $notes: no draft for $tag"; exit 0
+          fi
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              gh release create "$tag" dist/* --verify-tag --draft --prerelease --latest=false \
+                --title "$title" --notes-file "$notes"
+            elif [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+              echo "$tag is already tagged without a release; not drafting"
+            else
+              gh release create "$tag" dist/* --draft --prerelease --latest=false \
+                --target "$GITHUB_SHA" --title "$title" --notes-file "$notes"
+              echo "::notice::draft $tag from $GITHUB_REF_NAME at $GITHUB_SHA"
+            fi
             exit 0
           fi
-          # The maintainer made the release (and so the tag) on GitHub: fill
-          # it if it is an empty pre-release; never replace files.
-          info="$(gh release view "$TAG" --json isPrerelease,assets,body \
-            --jq '"\(.isPrerelease) \(.assets | length) \(.body | length)"')"
-          read -r prerelease assets body <<<"$info"
-          if [ "$prerelease" != "true" ] || [ "$assets" != "0" ]; then
-            echo "::error::release $TAG exists and is not an empty pre-release; nothing changed"; exit 1
+
+          info="$(gh release view "$tag" --json isDraft,isPrerelease,assets,body \
+            --jq '"\(.isDraft) \(.isPrerelease) \(.assets | length) \(.body | length)"')"
+          read -r draft prerelease assets body <<<"$info"
+          if [ "$draft" = true ] && [ "$GITHUB_REF_TYPE" = branch ]; then
+            # Still a draft: it follows the branch's latest build.
+            gh release edit "$tag" --target "$GITHUB_SHA" --title "$title" --notes-file "$notes"
+            gh release upload "$tag" dist/* --clobber
+            echo "::notice::draft $tag refreshed from $GITHUB_REF_NAME at $GITHUB_SHA"
+          elif [ "$GITHUB_REF_TYPE" = tag ] && [ "$prerelease" = true ] && [ "$assets" = 0 ]; then
+            # Made on GitHub with the tag: fill it.
+            gh release upload "$tag" dist/*
+            if [ "$body" = 0 ]; then gh release edit "$tag" --notes-file "$notes"; fi
+          else
+            echo "release $tag is published with its files; nothing changed"
           fi
-          gh release upload "$TAG" dist/*
-          if [ "$body" = "0" ]; then gh release edit "$TAG" --notes-file "$notes"; fi
