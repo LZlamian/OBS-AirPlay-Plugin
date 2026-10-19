@@ -30,9 +30,10 @@ public:
     // own smoothing threshold is 70 ms).
     static constexpr uint64_t kJitterNs = 70'000'000;
     // While play-at times are ridden over, the timeline is kept at most this
-    // far ahead of now (a sender clock slightly faster than OBS's would
-    // otherwise add delay over time).
-    static constexpr uint64_t kMaxLeadNs = 500'000'000;
+    // far ahead of now: a burst after a stall, or a sender clock slightly
+    // faster than OBS's, would otherwise add delay for the rest of the stream.
+    // Enough to absorb Wi-Fi jitter.
+    static constexpr uint64_t kMaxLeadNs = 150'000'000;
 
     struct Result {
         bool drop = false;

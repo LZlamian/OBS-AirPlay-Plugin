@@ -506,8 +506,8 @@ void testAudioRetimer()
     }
 
     // The first real RTP sync 4.4 s in moves every play-at time back by 1 s
-    // (seen on a device): the stream stays continuous and on time, nothing
-    // dropped, no delay added.
+    // (seen on a device): the stream stays continuous and on time; the 200 ms
+    // lead is trimmed to kMaxLeadNs by dropping a few packets.
     {
         restart();
         RetimerRun run;
@@ -518,11 +518,33 @@ void testAudioRetimer()
         for (int i = 0; i < 2000; ++i, now += packet, play_at += packet) feed(run, play_at, now);
         CHECK_EQ(run.late, 0);
         CHECK_EQ(run.gaps, 0);
-        CHECK_EQ(run.dropped, 0);
+        CHECK(run.dropped <= 6);
         CHECK(run.max_lead <= 210 * ms);
         CHECK_EQ(retimer.steps(), uint64_t(1));
         CHECK(retimer.lastStepNs() < -990 * int64_t(ms) && retimer.lastStepNs() > -1010 * int64_t(ms));
         CHECK_EQ(retimer.resyncs(), uint64_t(0));
+    }
+
+    // A 4.7 s gap, then the backlog in a burst (seen on a device): restarted
+    // at now, and the burst adds at most kMaxLeadNs of delay.
+    {
+        restart();
+        RetimerRun run;
+        uint64_t now = t0;
+        uint64_t play_at = t0 + 100 * ms;
+        for (int i = 0; i < 300; ++i, now += packet, play_at += packet) feed(run, play_at, now);
+        now += 4700 * ms;
+        play_at += 1900 * ms;
+        for (int i = 0; i < 200; ++i, play_at += packet, now += ms) feed(run, play_at, now);
+        uint64_t settled_lead = 0;
+        for (int i = 0; i < 400; ++i, now += packet, play_at += packet) {
+            const auto r = feed(run, play_at, now);
+            if (!r.drop) settled_lead = r.timestamp - now;
+        }
+        CHECK_EQ(run.late, 0);
+        CHECK(run.max_lead <= AudioRetimer::kMaxLeadNs + packet);
+        CHECK(settled_lead <= AudioRetimer::kMaxLeadNs + packet);
+        CHECK(retimer.trimmed() > 0);
     }
 
     // A stall after the start (packets 400 ms late): one restart at now, then
