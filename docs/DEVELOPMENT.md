@@ -143,7 +143,7 @@ scripts/build-windows-release-deps.sh          # once; ~/.cache/obs-airplay-rele
 scripts/windows-bonjour-sdk.sh "$HOME/bonjour-sdk"
 # obs.dll: bin/64bit/obs.dll from the OBS Studio 32.0.4 Windows zip
 deps="$HOME/.cache/obs-airplay-release-deps/windows-x64"
-BONJOUR_SDK_HOME="$HOME/bonjour-sdk" PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" \
+BONJOUR_SDK_HOME="$HOME/bonjour-sdk" PKG_CONFIG_PATH="$deps/lib/pkgconfig" PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" \
   cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
   -DOBS_AIRPLAY_STATIC_DEPS=ON -DOPENSSL_ROOT_DIR="$deps" -DOBS_LIBOBS=/path/to/obs.dll
 cmake --build build-windows && ctest --test-dir build-windows
@@ -151,7 +151,9 @@ scripts/package-windows.sh                     # dist/: zip, setup.exe (Inno Set
 ```
 
 (`mingw-w64-ucrt-x86_64-ffmpeg` is only for the `ffmpeg` tool that makes the
-test media; the build links the static FFmpeg from the deps script.)
+test media; the build links the static FFmpeg from the deps script. Set both
+`PKG_CONFIG_PATH` and `PKG_CONFIG_LIBDIR`: MSYS2's shell sets
+`PKG_CONFIG_PATH` to its own libraries, which pkg-config searches first.)
 The same works on Linux with mingw-w64 (posix threads):
 `OBS_AIRPLAY_CROSS=x86_64-w64-mingw32` for both scripts and a CMake
 toolchain file for that compiler.

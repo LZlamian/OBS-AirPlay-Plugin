@@ -169,7 +169,10 @@ jobs:
           unzip -q -o obs.zip 'bin/64bit/*' && rm obs.zip
       - name: Configure
         run: |
-          BONJOUR_SDK_HOME="$TEMP_M/bonjour-sdk" PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig" \
+          # Only the release dependencies: MSYS2's shell also sets
+          # PKG_CONFIG_PATH (searched first) to its own FFmpeg.
+          BONJOUR_SDK_HOME="$TEMP_M/bonjour-sdk" \
+            PKG_CONFIG_PATH="$DEPS/lib/pkgconfig" PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig" \
             cmake -S . -B build-windows -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
             -DOBS_AIRPLAY_STATIC_DEPS=ON -DOPENSSL_ROOT_DIR="$DEPS" \
