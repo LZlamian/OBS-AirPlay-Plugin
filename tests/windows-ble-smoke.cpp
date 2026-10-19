@@ -3,7 +3,7 @@
 // against Windows itself: the class activates, answers the declared interface
 // and reports a valid status through the declared vtable, before and after
 // Start. A machine without a Bluetooth radio (CI) ends in "aborted"; one
-// without the WinRT class at all is skipped.
+// without the WinRT class at all is skipped (exit 77).
 #include "windows-ble.hpp"
 
 #include <chrono>
@@ -17,7 +17,7 @@ int main()
     if (created == REGDB_E_CLASSNOTREG || created == HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND)) {
         std::printf("windows-ble-smoke: SKIP, no WinRT publisher (0x%08lx)\n",
                     static_cast<unsigned long>(created));
-        return 0;
+        return 77;  // ctest: skipped
     }
     if (FAILED(created) || !publisher.ready()) {
         std::printf("windows-ble-smoke: FAIL, create 0x%08lx\n", static_cast<unsigned long>(created));

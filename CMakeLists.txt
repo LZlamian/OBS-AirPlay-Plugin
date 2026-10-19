@@ -636,7 +636,7 @@ if(BUILD_TESTING)
         target_include_directories(obs-airplay-windows-ble-smoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
         target_compile_options(obs-airplay-windows-ble-smoke PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
         add_test(NAME windows-ble COMMAND obs-airplay-windows-ble-smoke)
-        set_tests_properties(windows-ble PROPERTIES TIMEOUT 60)
+        set_tests_properties(windows-ble PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
     endif()
     # Fuzz targets for input from the network: HLS playlists, mirror access
     # units, HTTP requests. With libFuzzer's runtime they are libFuzzer
