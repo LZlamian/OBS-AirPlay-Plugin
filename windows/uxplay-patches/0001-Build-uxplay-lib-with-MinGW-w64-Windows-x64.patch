@@ -1,14 +1,20 @@
-Windows (MinGW-w64) build fixes for uxplay/lib, applied by the "windows"
-CI job on top of the pinned submodule. They belong in the UxPlay fork
-(LZlamian/UxPlay) as a new tag; until then the submodule stays unchanged.
-See docs/WINDOWS_PORT_SCOPE.md.
+From 68697b6a96d8db9246b9311571d6a050ca9e0041 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 11:12:28 +0000
+Subject: [PATCH 1/4] Build uxplay/lib with MinGW-w64 (Windows x64)
 
 - media_url_policy.h: Winsock headers; inet_aton from Windows' own lenient
-  IPv4 parser (RtlIpv4StringToAddressA, same short/octal/hex forms).
-- CMakeLists.txt: link ntdll (RtlIpv4StringToAddressA).
+  IPv4 parser (RtlIpv4StringToAddressA, Strict=FALSE), which takes the
+  same short, octal and hex forms Windows resolves; link ntdll.
 - media_trace.h: no memmem in the Windows C runtime.
-- http_handlers.h: FCUP media spooling is not ported (POSIX file modes and
-  owner checks); on Windows it fails cleanly and the sweep is a no-op.
+- http_handlers.h: media spooling is POSIX-only here (ported in a later
+  commit); on Windows it fails cleanly.
+---
+ lib/CMakeLists.txt     |  3 ++-
+ lib/http_handlers.h    | 13 +++++++++++++
+ lib/media_trace.h      | 12 +++++++++++-
+ lib/media_url_policy.h | 17 +++++++++++++++++
+ 4 files changed, 43 insertions(+), 2 deletions(-)
 
 diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
 index 2cf4016..00cf137 100644
@@ -132,3 +138,6 @@ index e3660f4..c571e3a 100644
  #define MEDIA_URL_HOST_BYTES 256
  
  typedef enum {
+-- 
+2.43.0
+

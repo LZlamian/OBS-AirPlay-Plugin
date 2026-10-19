@@ -162,6 +162,17 @@ elseif(WIN32)
     endif()
 endif()
 
+if(WIN32)
+    # Release builds link FFmpeg, libcrypto and libplist into the DLL, from
+    # scripts/build-windows-release-deps.sh (point PKG_CONFIG_PATH and
+    # OPENSSL_ROOT_DIR at its prefix).
+    option(OBS_AIRPLAY_STATIC_DEPS "Link FFmpeg, libcrypto and libplist statically" OFF)
+    if(OBS_AIRPLAY_STATIC_DEPS)
+        add_compile_definitions(LIBPLIST_STATIC)  # no dllimport in plist.h
+        set(OPENSSL_USE_STATIC_LIBS ON)
+    endif()
+endif()
+
 # Find required libraries
 find_package(PkgConfig REQUIRED)
 
@@ -173,6 +184,11 @@ pkg_check_modules(FFMPEG REQUIRED
     libswscale 
     libswresample
 )
+if(OBS_AIRPLAY_STATIC_DEPS)
+    # The static libraries and what they need (Schannel, D3D11, Winsock...).
+    set(FFMPEG_LIBRARIES ${FFMPEG_STATIC_LIBRARIES})
+    set(FFMPEG_LIBRARY_DIRS ${FFMPEG_STATIC_LIBRARY_DIRS})
+endif()
 
 # Add UxPlay as subdirectory
 # The UxPlay fork is a git submodule; a plain clone or a release source
@@ -587,6 +603,17 @@ if(BUILD_TESTING)
         add_library(obs-airplay-dnssd-stub SHARED tests/dnssd-stub.c)
         set_target_properties(obs-airplay-dnssd-stub PROPERTIES PREFIX "" OUTPUT_NAME dnssd)
         add_dependencies(obs-airplay-protocol-smoke obs-airplay-dnssd-stub)
+
+        # Discovery without Bonjour: register and resolve through the
+        # Windows DNS service.
+        add_executable(obs-airplay-dnssd-native-smoke tests/dnssd-native-smoke.cpp)
+        target_include_directories(obs-airplay-dnssd-native-smoke PRIVATE
+            ${CMAKE_SOURCE_DIR}/uxplay/lib)
+        target_compile_options(obs-airplay-dnssd-native-smoke PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+        target_link_libraries(obs-airplay-dnssd-native-smoke PRIVATE airplay dnsapi
+            ${OBS_AIRPLAY_WIN32_LIBS})
+        add_test(NAME dnssd-native COMMAND obs-airplay-dnssd-native-smoke)
+        set_tests_properties(dnssd-native PROPERTIES TIMEOUT 60)
     endif()
     # Fuzz targets for input from the network: HLS playlists, mirror access
     # units, HTTP requests. With libFuzzer's runtime they are libFuzzer

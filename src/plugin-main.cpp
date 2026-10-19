@@ -357,8 +357,8 @@ void set_module_settings(ModuleSettings settings, obs_source_t* origin)
             snprintf(text, sizeof(text), obs_module_text("AirPlay.Error.NameTooLong"),
                      static_cast<int>(kMaxServerNameBytes), g_module_settings.server_name.c_str());
             g_server_name_error = text;
-            blog(LOG_WARNING, "[AirPlay] server name too long (%zu bytes); keeping \"%s\"",
-                 settings.server_name.size(), g_module_settings.server_name.c_str());
+            blog(LOG_WARNING, "[AirPlay] server name too long (%llu bytes); keeping \"%s\"",
+                 static_cast<unsigned long long>(settings.server_name.size()), g_module_settings.server_name.c_str());
             settings.server_name = g_module_settings.server_name;
         } else {
             g_server_name_error.clear();

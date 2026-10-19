@@ -61,6 +61,18 @@ void setIntOption(int fd, int option, int value)
 }
 #endif
 
+// POSIX: the spool file is 0600. Windows has no such modes (its DACL
+// grants this user and SYSTEM only: uxplay/lib/spool_win32.c).
+bool spoolModePrivate(unsigned mode)
+{
+#if defined(_WIN32)
+    (void)mode;
+    return true;
+#else
+    return mode == 0600;
+#endif
+}
+
 void receiverLog(void*, int level, const char* message)
 {
     if (message && (level <= LOGGER_WARNING || std::strstr(message, "[MEDIA]") ||
@@ -144,7 +156,9 @@ void play(void* cls, const char* location, float start_position)
     std::lock_guard<std::mutex> lock(state->mutex);
     state->location = location ? location : "";
     if (state->play_count == 0) state->first_location = state->location;
-    if (state->location.find("/obs-airplay-fcup-") != std::string::npos) {
+    const size_t spool_name = state->location.find("obs-airplay-fcup-");
+    if (spool_name != std::string::npos && spool_name > 0 &&
+        (state->location[spool_name - 1] == '/' || state->location[spool_name - 1] == '\\')) {
         state->spooled_location = state->location;
         FILE* file = std::fopen(state->location.c_str(), "rb");
         if (file) {
@@ -656,7 +670,7 @@ int main(int argc, char** argv)
         blob_spooled = state.spooled_bytes.size() >= sizeof(mp4_header) &&
             !std::memcmp(state.spooled_bytes.data(), mp4_header, sizeof(mp4_header)) &&
             state.spooled_size == static_cast<off_t>(mp4_payload.size()) &&
-            state.spooled_mode == 0600;
+            spoolModePrivate(state.spooled_mode);
         blob_spooled_location = state.spooled_location;
     }
 
@@ -699,7 +713,7 @@ int main(int argc, char** argv)
         file_spooled = state.spooled_bytes.size() >= sizeof(mp4_header) &&
             !std::memcmp(state.spooled_bytes.data(), mp4_header, sizeof(mp4_header)) &&
             state.spooled_size == static_cast<off_t>(mp4_payload.size()) &&
-            state.spooled_mode == 0600;
+            spoolModePrivate(state.spooled_mode);
         file_spooled_location = state.spooled_location;
     }
 

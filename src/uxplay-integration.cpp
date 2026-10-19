@@ -675,12 +675,26 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                              &dnssd_error,
                              0);
         if (!m_dnssd || dnssd_error != DNSSD_ERROR_NOERROR) {
+#if defined(_WIN32)
+            if (dnssd_error == DNSSD_ERROR_LIBNOTFOUND) {
+                blog(LOG_ERROR, "AirPlay discovery is unavailable: this Windows has neither "
+                                "Bonjour nor the DNS service discovery API (Windows 10 1809 or "
+                                "later). Install Bonjour (it comes with Apple Devices or iTunes) "
+                                "and restart OBS.");
+            }
+#endif
             blog(LOG_ERROR, "Failed to initialize UxPlay dnssd context (error=%d)", dnssd_error);
             raop_destroy(m_raop);
             m_raop = nullptr;
             m_dnssd = nullptr;
             return false;
         }
+
+#if defined(_WIN32)
+        // Bonjour, or the Windows DNS service when it is not installed.
+        // (dnssd_get_backend comes with windows/uxplay-patches.)
+        blog(LOG_INFO, "AirPlay discovery (DNS-SD) through %s", dnssd_get_backend(m_dnssd));
+#endif
 
 #if OBS_AIRPLAY_FAST_CONNECT
         // Match AirServer's Bonjour and connection profiles captured from the

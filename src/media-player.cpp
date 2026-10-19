@@ -1069,8 +1069,8 @@ private:
             return location;
         }
         blog(LOG_INFO,
-             "[MEDIA] selected HLS rendition from %zu variants in %.1fms (bandwidth=%lld bps)",
-             variants.size(), elapsed_ms, static_cast<long long>(selected->bandwidth));
+             "[MEDIA] selected HLS rendition from %llu variants in %.1fms (bandwidth=%lld bps)",
+             static_cast<unsigned long long>(variants.size()), elapsed_ms, static_cast<long long>(selected->bandwidth));
         return resolved;
     }
 

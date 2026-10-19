@@ -5,6 +5,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
+#include <windows.h>
+#include <aclapi.h>
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -318,6 +320,74 @@ std::string checkNested(const std::string& url, const std::string& item_url)
     return checkHost(parts.host);
 }
 
+#if defined(_WIN32)
+namespace {
+
+std::wstring widen(const std::string& text)
+{
+    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                                          static_cast<int>(text.size()), nullptr, 0);
+    if (count <= 0) return {};
+    std::wstring wide(static_cast<size_t>(count), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), count);
+    return wide;
+}
+
+// The file's owner is this process's user (or the owner it gives new files,
+// e.g. Administrators when elevated).
+bool ownedByThisUser(const std::wstring& path)
+{
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner,
+                              nullptr, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+        return false;
+    }
+    bool owned = false;
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        BYTE user[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+        BYTE default_owner[sizeof(TOKEN_OWNER) + SECURITY_MAX_SID_SIZE];
+        DWORD size = 0;
+        owned = (GetTokenInformation(token, TokenUser, user, sizeof(user), &size) &&
+                 EqualSid(owner, reinterpret_cast<TOKEN_USER*>(user)->User.Sid)) ||
+                (GetTokenInformation(token, TokenOwner, default_owner, sizeof(default_owner),
+                                     &size) &&
+                 EqualSid(owner, reinterpret_cast<TOKEN_OWNER*>(default_owner)->Owner));
+        CloseHandle(token);
+    }
+    LocalFree(descriptor);
+    return owned;
+}
+
+} // namespace
+
+// UxPlay spools into the user's temporary folder (uxplay/lib/spool_win32.c).
+std::string checkLocalFile(const std::string& location)
+{
+    if (g_local_files_for_testing) return "";
+    const std::wstring path = widen(location);
+    if (path.empty()) return "not a valid path";
+    wchar_t directory[MAX_PATH + 1];
+    const DWORD directory_length = GetTempPathW(MAX_PATH + 1, directory);
+    if (!directory_length || directory_length > MAX_PATH) return "no temporary folder";
+    if (path.size() <= directory_length ||
+        CompareStringOrdinal(path.c_str(), static_cast<int>(directory_length), directory,
+                             static_cast<int>(directory_length), TRUE) != CSTR_EQUAL) {
+        return "not in the receiver's spool folder";
+    }
+    const std::wstring name = path.substr(directory_length);
+    if (name.find_first_of(L"\\/:") != std::wstring::npos) return "path is not canonical";
+    if (name.rfind(L"obs-airplay-fcup-", 0) != 0) return "not a receiver spool file";
+    WIN32_FILE_ATTRIBUTE_DATA info;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        !ownedByThisUser(path)) {
+        return "spool file is not a regular file owned by this user";
+    }
+    return "";
+}
+#else
 std::string checkLocalFile(const std::string& location)
 {
     if (g_local_files_for_testing) return "";
@@ -327,17 +397,13 @@ std::string checkLocalFile(const std::string& location)
     }
     const std::string name = location.substr(location.rfind('/') + 1);
     if (name.rfind("obs-airplay-fcup-", 0) != 0) return "not a receiver spool file";
-#if defined(_WIN32)
-    // UxPlay does not spool on Windows yet (no owner check to match).
-    return "spool files are not supported on Windows";
-#else
     struct stat info = {};
     if (lstat(location.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
         info.st_uid != getuid()) {
         return "spool file is not a regular file owned by this user";
     }
     return "";
-#endif
 }
+#endif
 
 } // namespace media_url_policy

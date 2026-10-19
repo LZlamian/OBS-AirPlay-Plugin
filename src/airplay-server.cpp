@@ -118,8 +118,9 @@ void AirPlayServer::ingestVideoBitstream(const uint8_t* data, size_t size, uint6
         std::lock_guard<std::mutex> lock(m_video_queue_mutex);
         if (m_video_thread_quit) return;
         if (m_video_queue.size() >= kMaxQueuedVideo && !m_waiting_for_keyframe) {
-            blog(LOG_WARNING, "[MIRROR] decoding fell %zu frames behind; dropping them and "
-                              "continuing at the next keyframe", m_video_queue.size());
+            blog(LOG_WARNING, "[MIRROR] decoding fell %llu frames behind; dropping them and "
+                              "continuing at the next keyframe",
+                 static_cast<unsigned long long>(m_video_queue.size()));
             for (PendingVideo& dropped : m_video_queue) {
                 if (m_spare_video_buffers.size() < 4) {
                     dropped.data.clear();

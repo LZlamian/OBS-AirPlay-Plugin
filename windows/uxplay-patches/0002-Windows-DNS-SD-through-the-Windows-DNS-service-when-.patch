@@ -1,0 +1,459 @@
+From 2a1b3586ebdc9a8a67065b3bfd380d8339d74108 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 11:12:44 +0000
+Subject: [PATCH 2/4] Windows: DNS-SD through the Windows DNS service when
+ Bonjour is missing
+
+dnssd_init loads Bonjour's dnssd.dll as before; without it (or with
+UXPLAY_DNSSD_BACKEND=windows) the services are registered with
+DnsServiceRegister, the DNS Client service's mDNS responder (Windows 10
+1809 and later), and TXT records are built in process. dnsapi.dll is
+looked up at run time, so nothing changes on older Windows.
+dnssd_get_backend names the implementation in use for logs.
+---
+ lib/CMakeLists.txt |   1 +
+ lib/dnssd.c        |  45 ++++++--
+ lib/dnssd.h        |   3 +
+ lib/dnssd_win32.c  | 272 +++++++++++++++++++++++++++++++++++++++++++++
+ lib/dnssd_win32.h  |  35 ++++++
+ 5 files changed, 349 insertions(+), 7 deletions(-)
+ create mode 100644 lib/dnssd_win32.c
+ create mode 100644 lib/dnssd_win32.h
+
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 00cf137..f82a610 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -76,6 +76,7 @@ elseif( WIN32 )
+ 			 iphlpapi
+                          ws2_32
+                          ntdll )  # RtlIpv4StringToAddressA (media_url_policy.h)
++  # dnsapi.dll (dnssd_win32.c) is looked up at run time: nothing to link.
+ else()
+   target_link_libraries( airplay PUBLIC
+           pthread
+diff --git a/lib/dnssd.c b/lib/dnssd.c
+index e50b354..c9208d2 100644
+--- a/lib/dnssd.c
++++ b/lib/dnssd.c
+@@ -39,6 +39,9 @@
+ #include "dnssdint.h"
+ #include "global.h"
+ #include "utils.h"
++#ifdef _WIN32
++#include "dnssd_win32.h"
++#endif
+ 
+ #define MAX_DEVICEID 18
+ #define MAX_SERVNAME 256
+@@ -121,7 +124,7 @@ typedef const void * (DNSSD_STDCALL *TXTRecordGetBytesPtr_t)(const TXTRecordRef
+ 
+ struct dnssd_s {
+ #ifdef WIN32
+-    HMODULE module;
++    HMODULE module;            /* Bonjour's dnssd.dll, or NULL: Windows DNS service */
+ #elif USE_LIBDL
+     void *module;
+ #endif
+@@ -195,12 +198,28 @@ dnssd_init(const char* name, int name_len, const char* hw_addr, int hw_addr_len,
+     dnssd->features2 = (uint32_t) features;
+ 
+ #ifdef WIN32
+-    dnssd->module = LoadLibraryA("dnssd.dll");
++    /* Bonjour when it is installed; otherwise the DNS Client service's own
++       mDNS responder (obs-airplay). UXPLAY_DNSSD_BACKEND=bonjour or
++       windows picks one. */
++    const char *backend = getenv("UXPLAY_DNSSD_BACKEND");
++    const bool bonjour_allowed = !backend || strcmp(backend, "windows") != 0;
++    const bool native_allowed = !backend || strcmp(backend, "bonjour") != 0;
++    dnssd->module = bonjour_allowed ? LoadLibraryA("dnssd.dll") : NULL;
+ 	if (!dnssd->module) {
+-		if (error) *error = DNSSD_ERROR_LIBNOTFOUND;
+-		free(dnssd);
+-		return NULL;
+-	}
++		dnssd_win32_functions_t native;
++		if (!native_allowed || !dnssd_win32_native(&native)) {
++			if (error) *error = DNSSD_ERROR_LIBNOTFOUND;
++			free(dnssd);
++			return NULL;
++		}
++		dnssd->DNSServiceRegister = (DNSServiceRegister_t) native.DNSServiceRegister;
++		dnssd->DNSServiceRefDeallocate = (DNSServiceRefDeallocate_t) native.DNSServiceRefDeallocate;
++		dnssd->TXTRecordCreate = (TXTRecordCreate_t) native.TXTRecordCreate;
++		dnssd->TXTRecordSetValue = (TXTRecordSetValue_t) native.TXTRecordSetValue;
++		dnssd->TXTRecordGetLength = (TXTRecordGetLength_t) native.TXTRecordGetLength;
++		dnssd->TXTRecordGetBytesPtr = (TXTRecordGetBytesPtr_t) native.TXTRecordGetBytesPtr;
++		dnssd->TXTRecordDeallocate = (TXTRecordDeallocate_t) native.TXTRecordDeallocate;
++	} else {
+ 	dnssd->DNSServiceRegister = (DNSServiceRegister_t)GetProcAddress(dnssd->module, "DNSServiceRegister");
+ 	dnssd->DNSServiceRefDeallocate = (DNSServiceRefDeallocate_t)GetProcAddress(dnssd->module, "DNSServiceRefDeallocate");
+ 	dnssd->TXTRecordCreate = (TXTRecordCreate_t)GetProcAddress(dnssd->module, "TXTRecordCreate");
+@@ -217,6 +236,7 @@ dnssd_init(const char* name, int name_len, const char* hw_addr, int hw_addr_len,
+ 		free(dnssd);
+ 		return NULL;
+ 	}
++	}
+ #elif USE_LIBDL
+     dnssd->module = dlopen("libdns_sd.so", RTLD_LAZY);
+ 	if (!dnssd->module) {
+@@ -278,7 +298,7 @@ dnssd_destroy(dnssd_t *dnssd)
+ {
+     if (dnssd) {
+ #ifdef WIN32
+-        FreeLibrary(dnssd->module);
++        if (dnssd->module) FreeLibrary(dnssd->module);
+ #elif USE_LIBDL
+         dlclose(dnssd->module);
+ #endif
+@@ -549,3 +569,14 @@ void dnssd_set_airplay_features(dnssd_t *dnssd, int bit, int val) {
+         *features = *features & ~mask;
+     }
+ }
++
++const char *
++dnssd_get_backend(dnssd_t *dnssd) {
++#ifdef WIN32
++    if (dnssd && !dnssd->module) return "Windows DNS service";
++    return "Bonjour";
++#else
++    (void) dnssd;
++    return "system";
++#endif
++}
+diff --git a/lib/dnssd.h b/lib/dnssd.h
+index beeab47..32b7932 100644
+--- a/lib/dnssd.h
++++ b/lib/dnssd.h
+@@ -51,6 +51,9 @@ DNSSD_API uint64_t dnssd_get_airplay_features(dnssd_t *dnssd);
+ DNSSD_API void dnssd_set_airserver_profile(dnssd_t *dnssd, bool enabled);
+ DNSSD_API void dnssd_set_pk(dnssd_t *dnssd, char * pk_str);
+ 
++/* Which DNS-SD implementation registers the services (for logs). */
++DNSSD_API const char *dnssd_get_backend(dnssd_t *dnssd);
++
+ DNSSD_API void dnssd_destroy(dnssd_t *dnssd);
+ 
+ #ifdef __cplusplus
+diff --git a/lib/dnssd_win32.c b/lib/dnssd_win32.c
+new file mode 100644
+index 0000000..1a3be28
+--- /dev/null
++++ b/lib/dnssd_win32.c
+@@ -0,0 +1,272 @@
++/*
++ * DNS-SD for Windows without Bonjour (obs-airplay): see dnssd_win32.h.
++ *
++ * Registration goes through DnsServiceRegister, which the DNS Client
++ * service answers over mDNS together with the computer's own host name
++ * (<hostname>.local) and addresses. It completes asynchronously; a
++ * registration that later fails (a name conflict, the service stopped) is
++ * only seen in the completion status, which is kept with the service.
++ * The API is looked up at run time so the module still loads on Windows
++ * releases without it.
++ */
++#ifdef _WIN32
++
++#include "dnssd_win32.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <wchar.h>
++#include <winsock2.h>
++#include <windows.h>
++#include <windns.h>
++
++#define TXT_MAX_ITEMS 64
++#define DEREGISTER_WAIT_MS 2000
++
++typedef PDNS_SERVICE_INSTANCE (WINAPI *construct_instance_t)(PCWSTR, PCWSTR, PIP4_ADDRESS,
++                                                             PIP6_ADDRESS, WORD, WORD, WORD,
++                                                             DWORD, PCWSTR *, PCWSTR *);
++typedef DWORD (WINAPI *register_t)(PDNS_SERVICE_REGISTER_REQUEST, PDNS_SERVICE_CANCEL);
++typedef VOID (WINAPI *free_instance_t)(PDNS_SERVICE_INSTANCE);
++
++static construct_instance_t construct_instance;
++static register_t service_register;
++static register_t service_deregister;
++static free_instance_t free_instance;
++
++/* dns_sd.h leaves the service reference opaque; this is ours. */
++struct _DNSServiceRef_t {
++    DNS_SERVICE_REGISTER_REQUEST request;
++    PDNS_SERVICE_INSTANCE instance;
++    HANDLE completed;            /* set by every completion callback */
++    volatile LONG status;        /* last completion status */
++};
++
++/* TXTRecordRef is 16 opaque bytes: they hold a pointer to this. */
++typedef struct {
++    uint8_t *bytes;
++    uint16_t length;
++} txt_t;
++
++static txt_t **
++txt_slot(TXTRecordRef *record) {
++    return (txt_t **) (void *) record;
++}
++
++static txt_t *
++txt_of(const TXTRecordRef *record) {
++    return *(txt_t * const *) (const void *) record;
++}
++
++static void DNSSD_API
++txt_create(TXTRecordRef *record, uint16_t buffer_length, void *buffer) {
++    (void) buffer_length;
++    (void) buffer;
++    memset(record, 0, sizeof(*record));
++    *txt_slot(record) = calloc(1, sizeof(txt_t));
++}
++
++static DNSServiceErrorType DNSSD_API
++txt_set_value(TXTRecordRef *record, const char *key, uint8_t value_size, const void *value) {
++    txt_t *txt = txt_of(record);
++    if (!txt || !key) return kDNSServiceErr_BadParam;
++    const size_t key_length = strlen(key);
++    const size_t item = key_length + (value ? 1U + value_size : 0U);
++    if (!key_length || item > 255 || (size_t) txt->length + 1U + item > UINT16_MAX) {
++        return kDNSServiceErr_BadParam;
++    }
++    uint8_t *bytes = realloc(txt->bytes, (size_t) txt->length + 1U + item);
++    if (!bytes) return kDNSServiceErr_NoMemory;
++    txt->bytes = bytes;
++    bytes += txt->length;
++    *bytes++ = (uint8_t) item;
++    memcpy(bytes, key, key_length);
++    if (value) {
++        bytes[key_length] = '=';
++        memcpy(bytes + key_length + 1, value, value_size);
++    }
++    txt->length = (uint16_t) (txt->length + 1U + item);
++    return kDNSServiceErr_NoError;
++}
++
++static uint16_t DNSSD_API
++txt_get_length(const TXTRecordRef *record) {
++    const txt_t *txt = txt_of(record);
++    return txt ? txt->length : 0;
++}
++
++static const void * DNSSD_API
++txt_get_bytes(const TXTRecordRef *record) {
++    const txt_t *txt = txt_of(record);
++    return txt ? txt->bytes : NULL;
++}
++
++static void DNSSD_API
++txt_deallocate(TXTRecordRef *record) {
++    txt_t *txt = txt_of(record);
++    if (txt) free(txt->bytes);
++    free(txt);
++    *txt_slot(record) = NULL;
++}
++
++/* UTF-8 to a new UTF-16 string (caller frees), or NULL. */
++static wchar_t *
++widen(const char *text, int length) {
++    if (length < 0) length = (int) strlen(text);
++    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, length, NULL, 0);
++    if (count <= 0 && length > 0) return NULL;
++    wchar_t *wide = calloc((size_t) count + 1U, sizeof(wchar_t));
++    if (wide && count > 0) MultiByteToWideChar(CP_UTF8, 0, text, length, wide, count);
++    return wide;
++}
++
++static void WINAPI
++register_complete(DWORD status, PVOID context, PDNS_SERVICE_INSTANCE instance) {
++    DNSServiceRef service = context;
++    if (instance) free_instance(instance);  /* the callback owns this copy */
++    InterlockedExchange(&service->status, (LONG) status);
++    SetEvent(service->completed);
++}
++
++static void
++service_free(DNSServiceRef service) {
++    if (!service) return;
++    if (service->instance) free_instance(service->instance);
++    if (service->completed) CloseHandle(service->completed);
++    free(service);
++}
++
++static DNSServiceErrorType DNSSD_API
++native_register(DNSServiceRef *reference, DNSServiceFlags flags, uint32_t interface_index,
++                const char *name, const char *type, const char *domain, const char *host,
++                uint16_t port, uint16_t txt_length, const void *txt_record,
++                DNSServiceRegisterReply callback, void *context) {
++    (void) flags;
++    (void) host;
++    (void) callback;
++    (void) context;
++    *reference = NULL;
++    if (!name || !type) return kDNSServiceErr_BadParam;
++
++    /* "<name>.<type>.<domain>" and "<computer>.local" */
++    char instance_name[512];
++    const int written = snprintf(instance_name, sizeof(instance_name), "%s.%s.%s", name, type,
++                                 domain && *domain ? domain : "local");
++    if (written <= 0 || (size_t) written >= sizeof(instance_name)) return kDNSServiceErr_BadParam;
++    wchar_t computer[256];
++    DWORD computer_length = (DWORD) (sizeof(computer) / sizeof(computer[0]));
++    if (!GetComputerNameExW(ComputerNameDnsHostname, computer, &computer_length)) {
++        return kDNSServiceErr_Unknown;
++    }
++    wchar_t host_name[300];
++    if (_snwprintf(host_name, sizeof(host_name) / sizeof(host_name[0]), L"%ls.local",
++                   computer) < 0) {
++        return kDNSServiceErr_BadParam;
++    }
++
++    /* TXT: length-prefixed "key=value" items to key and value arrays */
++    PCWSTR keys[TXT_MAX_ITEMS] = {0};
++    PCWSTR values[TXT_MAX_ITEMS] = {0};
++    DWORD count = 0;
++    DNSServiceErrorType error = kDNSServiceErr_NoError;
++    const uint8_t *txt = txt_record;
++    for (size_t offset = 0; txt && offset < txt_length && !error;) {
++        const size_t item_length = txt[offset];
++        if (offset + 1U + item_length > txt_length || count == TXT_MAX_ITEMS) {
++            error = kDNSServiceErr_BadParam;
++            break;
++        }
++        const char *item = (const char *) txt + offset + 1;
++        const char *equals = memchr(item, '=', item_length);
++        const int key_length = (int) (equals ? (size_t) (equals - item) : item_length);
++        const char *value = equals ? equals + 1 : "";
++        const int value_length = equals ? (int) (item_length - (size_t) key_length - 1U) : 0;
++        keys[count] = widen(item, key_length);
++        values[count] = widen(value, value_length);
++        if (!keys[count] || !values[count]) error = kDNSServiceErr_BadParam;
++        ++count;
++        offset += 1U + item_length;
++    }
++
++    DNSServiceRef service = NULL;
++    wchar_t *wide_name = error ? NULL : widen(instance_name, -1);
++    if (!error && !wide_name) error = kDNSServiceErr_BadParam;
++    if (!error) {
++        service = calloc(1, sizeof(*service));
++        if (service) service->completed = CreateEventW(NULL, FALSE, FALSE, NULL);
++        if (!service || !service->completed) error = kDNSServiceErr_NoMemory;
++    }
++    if (!error) {
++        /* the port arrives in network byte order */
++        service->instance = construct_instance(wide_name, host_name, NULL, NULL, ntohs(port),
++                                               0, 0, count, keys, values);
++        if (!service->instance) error = kDNSServiceErr_NoMemory;
++    }
++    for (DWORD i = 0; i < count; ++i) {
++        free((void *) keys[i]);
++        free((void *) values[i]);
++    }
++    free(wide_name);
++
++    if (!error) {
++        service->status = DNS_REQUEST_PENDING;
++        service->request.Version = DNS_QUERY_REQUEST_VERSION1;
++        service->request.InterfaceIndex = interface_index;
++        service->request.pServiceInstance = service->instance;
++        service->request.pRegisterCompletionCallback = register_complete;
++        service->request.pQueryContext = service;
++        service->request.unicastEnabled = FALSE;
++        const DWORD result = service_register(&service->request, NULL);
++        if (result != DNS_REQUEST_PENDING) {
++            error = result == ERROR_SERVICE_NOT_ACTIVE ? kDNSServiceErr_ServiceNotRunning
++                                                       : kDNSServiceErr_Unknown;
++        }
++    }
++    if (error) {
++        service_free(service);
++        return error;
++    }
++    *reference = service;
++    return kDNSServiceErr_NoError;
++}
++
++static void DNSSD_API
++native_deallocate(DNSServiceRef service) {
++    if (!service) return;
++    ResetEvent(service->completed);
++    const DWORD result = service_deregister(&service->request, NULL);
++    /* The completion callback still refers to the service: free it only
++       once deregistration has completed, else leave it (a few hundred
++       bytes) rather than risk a late callback into freed memory. */
++    if (result == DNS_REQUEST_PENDING &&
++        WaitForSingleObject(service->completed, DEREGISTER_WAIT_MS) != WAIT_OBJECT_0) {
++        return;
++    }
++    service_free(service);
++}
++
++bool
++dnssd_win32_native(dnssd_win32_functions_t *functions) {
++    static HMODULE dnsapi;
++    if (!dnsapi) dnsapi = LoadLibraryExW(L"dnsapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
++    if (!dnsapi) return false;
++    construct_instance = (construct_instance_t) (void *)
++        GetProcAddress(dnsapi, "DnsServiceConstructInstance");
++    service_register = (register_t) (void *) GetProcAddress(dnsapi, "DnsServiceRegister");
++    service_deregister = (register_t) (void *) GetProcAddress(dnsapi, "DnsServiceDeRegister");
++    free_instance = (free_instance_t) (void *) GetProcAddress(dnsapi, "DnsServiceFreeInstance");
++    if (!construct_instance || !service_register || !service_deregister || !free_instance) {
++        return false;
++    }
++    functions->DNSServiceRegister = native_register;
++    functions->DNSServiceRefDeallocate = native_deallocate;
++    functions->TXTRecordCreate = txt_create;
++    functions->TXTRecordSetValue = txt_set_value;
++    functions->TXTRecordGetLength = txt_get_length;
++    functions->TXTRecordGetBytesPtr = txt_get_bytes;
++    functions->TXTRecordDeallocate = txt_deallocate;
++    return true;
++}
++
++#endif /* _WIN32 */
+diff --git a/lib/dnssd_win32.h b/lib/dnssd_win32.h
+new file mode 100644
+index 0000000..e7658ae
+--- /dev/null
++++ b/lib/dnssd_win32.h
+@@ -0,0 +1,35 @@
++/*
++ * Windows without Bonjour: the DNS-SD calls dnssd.c makes, served by the
++ * Windows DNS Client service's own mDNS responder (DnsServiceRegister,
++ * Windows 10 1809 and later) and an in-process TXT record builder.
++ * (obs-airplay)
++ */
++#ifndef DNSSD_WIN32_H
++#define DNSSD_WIN32_H
++
++#ifdef _WIN32
++#include <stdbool.h>
++#include <stdint.h>
++#include <dns_sd.h>
++
++typedef struct {
++    DNSServiceErrorType (DNSSD_API *DNSServiceRegister)(DNSServiceRef *, DNSServiceFlags, uint32_t,
++                                                        const char *, const char *, const char *,
++                                                        const char *, uint16_t, uint16_t,
++                                                        const void *, DNSServiceRegisterReply,
++                                                        void *);
++    void (DNSSD_API *DNSServiceRefDeallocate)(DNSServiceRef);
++    void (DNSSD_API *TXTRecordCreate)(TXTRecordRef *, uint16_t, void *);
++    DNSServiceErrorType (DNSSD_API *TXTRecordSetValue)(TXTRecordRef *, const char *, uint8_t,
++                                                       const void *);
++    uint16_t (DNSSD_API *TXTRecordGetLength)(const TXTRecordRef *);
++    const void *(DNSSD_API *TXTRecordGetBytesPtr)(const TXTRecordRef *);
++    void (DNSSD_API *TXTRecordDeallocate)(TXTRecordRef *);
++} dnssd_win32_functions_t;
++
++/* Fills `functions` when the Windows DNS service API exists (dnsapi.dll on
++   Windows 10 1809+); false otherwise. */
++bool dnssd_win32_native(dnssd_win32_functions_t *functions);
++#endif
++
++#endif
+-- 
+2.43.0
+

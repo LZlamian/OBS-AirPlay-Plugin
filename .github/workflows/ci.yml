@@ -87,10 +87,11 @@ jobs:
           cmake --build --preset asan -j4
           ctest --preset asan -j2 -R 'protocol|media-'
 
-  # Windows x64 port in progress (docs/WINDOWS_PORT_SCOPE.md): MinGW-w64
-  # (MSYS2 UCRT64) builds UxPlay, the receiver core and the plugin DLL
-  # against obs.dll from the OBS Studio release the vendored headers match,
-  # and runs the tests that do not need macOS. Not part of any release.
+  # Windows x64 (docs/WINDOWS_PORT_SCOPE.md): MinGW-w64 (MSYS2 UCRT64)
+  # builds the release configuration (FFmpeg, libcrypto and libplist linked
+  # into the DLL, scripts/build-windows-release-deps.sh) against obs.dll
+  # from the OBS Studio release the vendored headers match, and runs the
+  # tests that do not need macOS. Not part of any release.
   windows:
     runs-on: windows-2022
     defaults:
@@ -107,27 +108,42 @@ jobs:
         with:
           msystem: UCRT64
           update: false
+          # ffmpeg: only its command line tool, which makes the test media
           install: >-
             git
+            make
+            perl
             patch
             unzip
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nasm
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-ffmpeg
-            mingw-w64-ucrt-x86_64-openssl
-            mingw-w64-ucrt-x86_64-libplist
             mingw-w64-ucrt-x86_64-python
       - name: UxPlay changes for Windows (to be moved into the fork)
         run: |
           for patch in windows/uxplay-patches/*.patch; do
-            [ -e "$patch" ] || continue
             echo "applying $patch"
             git -C uxplay apply --verbose "../$patch"
           done
+      - name: Paths
+        run: |
+          temp="$(cygpath -m "$RUNNER_TEMP")"
+          echo "DEPS=$temp/obs-airplay-deps" >> "$GITHUB_ENV"
+          echo "TEMP_M=$temp" >> "$GITHUB_ENV"
+      - name: Release dependencies (cached by the script's content)
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/obs-airplay-deps
+          key: windows-release-deps-${{ hashFiles('scripts/build-windows-release-deps.sh') }}
+      - name: Build release dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: OBS_AIRPLAY_DEPS_PREFIX="$DEPS" scripts/build-windows-release-deps.sh
       - name: Bonjour SDK files (dns_sd.h and an import library)
-        run: scripts/windows-bonjour-sdk.sh "$(cygpath -m "$RUNNER_TEMP")/bonjour-sdk"
+        run: scripts/windows-bonjour-sdk.sh "$TEMP_M/bonjour-sdk"
       - name: OBS Studio release (obs.dll to link against)
         id: obs
         uses: actions/cache@v4
@@ -137,35 +153,33 @@ jobs:
       - name: Download OBS Studio
         if: steps.obs.outputs.cache-hit != 'true'
         run: |
-          mkdir -p "$RUNNER_TEMP/obs-studio"
-          cd "$RUNNER_TEMP/obs-studio"
+          mkdir -p "$TEMP_M/obs-studio"
+          cd "$TEMP_M/obs-studio"
           curl -L --fail --retry 3 -o obs.zip \
             "https://github.com/obsproject/obs-studio/releases/download/${OBS_WINDOWS_VERSION}/OBS-Studio-${OBS_WINDOWS_VERSION}-Windows-x64.zip"
           echo "${OBS_WINDOWS_SHA256}  obs.zip" | sha256sum -c -
           unzip -q -o obs.zip 'bin/64bit/*' && rm obs.zip
       - name: Configure
         run: |
-          temp="$(cygpath -m "$RUNNER_TEMP")"
-          BONJOUR_SDK_HOME="$temp/bonjour-sdk" cmake -S . -B build-windows -G Ninja \
+          BONJOUR_SDK_HOME="$TEMP_M/bonjour-sdk" PKG_CONFIG_LIBDIR="$DEPS/lib/pkgconfig" \
+            cmake -S . -B build-windows -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-            -DOBS_LIBOBS="$temp/obs-studio/bin/64bit/obs.dll"
+            -DOBS_AIRPLAY_STATIC_DEPS=ON -DOPENSSL_ROOT_DIR="$DEPS" \
+            -DOBS_LIBOBS="$TEMP_M/obs-studio/bin/64bit/obs.dll"
       - name: Build
         run: cmake --build build-windows -j4
       - name: Plugin DLL imports and exports
         run: |
           objdump -p build-windows/obs-airplay.dll | grep -E 'DLL Name|^\s+\[ *[0-9]+\]' | tee build-windows/dll-report.txt
+          # Only Windows itself and OBS: no MinGW, FFmpeg or OpenSSL DLLs.
+          if grep 'DLL Name' build-windows/dll-report.txt | grep -viE \
+              ' (obs|kernel32|user32|advapi32|ole32|ws2_32|bcrypt|crypt32|ncrypt|secur32|ntdll|api-ms-win-crt-[a-z0-9-]+)\.dll$'; then
+            echo "::error::obs-airplay.dll depends on a DLL OBS does not provide"; exit 1
+          fi
       - name: Test
         env:
           OBS_AIRPLAY_TIMING_SCALE: "3"
-        run: ctest --test-dir build-windows --output-on-failure -j2 -E '^protocol'
-      # Known Windows gaps (docs/WINDOWS_PORT_SCOPE.md 2.4, 2.6): FCUP
-      # spooling is not ported and the over-budget 413 is lost to a reset.
-      # Shown, not gating, until they are fixed.
-      - name: Protocol smoke (known Windows gaps)
-        continue-on-error: true
-        env:
-          OBS_AIRPLAY_TIMING_SCALE: "3"
-        run: ctest --test-dir build-windows --output-on-failure -R '^protocol'
+        run: ctest --test-dir build-windows --output-on-failure -j2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
