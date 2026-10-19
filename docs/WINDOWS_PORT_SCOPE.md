@@ -32,7 +32,17 @@ the fork (§2), are what is left before a release.
 | Release hook | job `release-windows` | attaches a tag's Windows packages to the draft release after approval; off until the repository variable `OBS_AIRPLAY_RELEASE_WINDOWS` is `true` |
 | Notices | `THIRD_PARTY_NOTICES.md`, `licenses/` | Windows section; MinGW-w64 runtime and winpthreads texts |
 
-<!-- CI-RESULTS -->
+Last full CI run: [run 34](https://github.com/LZlamian/OBS-AirPlay-Plugin/actions/runs/39249389607)
+(09d4d05), all jobs green. On windows-2022, against the release
+configuration: all 29 tests pass, among them `dnssd-native` (registers
+`_airplay._tcp` and `_raop._tcp` through the Windows DNS service and
+resolves the AirPlay service back over mDNS with the right port and TXT
+record), `protocol` and `protocol-large-blob` (Windows spooling, the 413
+fix), `media-tls-verify` (Schannel) and all 17 AirPlay video playback
+modes; the DLL check (imports: Windows and `obs.dll` only; exports: the
+seven `obs_module_*`), `diagnose.ps1` parsing, and the zip, installer and
+symbols zip (artifact `obs-airplay-windows-x64`). The macOS jobs are
+unchanged and green.
 
 ## 2. Left to do (development)
 
