@@ -177,6 +177,7 @@ void AirPlayServer::resetDecoders(bool clear_output, bool flush_decoders)
         if (m_h265_decoder) m_h265_decoder->flush();
         std::lock_guard<std::mutex> audio_lock(m_audio_decoder_mutex);
         if (m_audio_decoder) m_audio_decoder->flush();
+        resetAudioRetimer();
     }
     {
         // Native and URL playback both update these counters while holding
@@ -519,6 +520,15 @@ void AirPlayServer::setAudioStreamFormat(const AirPlayAudioFormat& format)
 {
     std::lock_guard<std::mutex> lock(m_audio_decoder_mutex);
     if (m_audio_decoder) m_audio_decoder->setStreamFormat(format);
+    resetAudioRetimer();
+}
+
+// A new audio stream (under m_audio_decoder_mutex).
+void AirPlayServer::resetAudioRetimer()
+{
+    m_audio_retimer.reset();
+    m_audio_retimer_reported = false;
+    m_audio_retimer_shifts_reported = 0;
 }
 
 void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8_t codec_type, uint64_t pts)
@@ -553,7 +563,25 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     audio.speakers = SPEAKERS_STEREO;
     audio.samples_per_sec = static_cast<uint32_t>(sample_rate);
     audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
-    audio.timestamp = normalizeTimestamp(pts);
+    const uint64_t now = os_gettime_ns();
+    const AudioRetimer::Result timing = m_audio_retimer.process(normalizeTimestamp(pts), now);
+    if (!m_audio_retimer_reported && m_audio_retimer.pastStartup(now)) {
+        m_audio_retimer_reported = true;
+        if (m_audio_retimer.dropped() > 0) {
+            blog(LOG_INFO, "[AUDIO] dropped %llu late packets at stream start (up to %llu ms late)",
+                 static_cast<unsigned long long>(m_audio_retimer.dropped()),
+                 static_cast<unsigned long long>(m_audio_retimer.worstDroppedNs() / 1000000));
+        }
+    }
+    if (m_audio_retimer.shifts() != m_audio_retimer_shifts_reported) {
+        m_audio_retimer_shifts_reported = m_audio_retimer.shifts();
+        blog(LOG_INFO, "[AUDIO] stream fell behind; audio delayed by %llu ms in total",
+             static_cast<unsigned long long>(m_audio_retimer.shiftNs() / 1000000));
+    }
+    if (timing.drop) {
+        return;
+    }
+    audio.timestamp = timing.timestamp;
 
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     const uint64_t t_output_start = tele ? os_gettime_ns() : 0;

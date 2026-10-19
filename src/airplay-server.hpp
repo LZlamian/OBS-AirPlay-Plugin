@@ -5,6 +5,7 @@
 #include "uxplay-integration.hpp"
 #include "h264-decoder.hpp"
 #include "audio-decoder.hpp"
+#include "audio-retimer.hpp"
 #include "media-player.hpp"
 #include <memory>
 #include <atomic>
@@ -98,6 +99,7 @@ private:
     std::string generateMACAddress();
     uint64_t normalizeTimestamp(uint64_t source_timestamp);
     void resetStreamClock();
+    void resetAudioRetimer();
     std::string m_mac_address;
 
     std::unique_ptr<H264Decoder> m_h264_decoder;
@@ -108,6 +110,10 @@ private:
     // Decoded samples, reused for every packet (under m_audio_decoder_mutex).
     std::vector<float> m_audio_left;
     std::vector<float> m_audio_right;
+    // Keeps audio from reaching OBS late (under m_audio_decoder_mutex).
+    AudioRetimer m_audio_retimer;
+    bool m_audio_retimer_reported = false;
+    uint64_t m_audio_retimer_shifts_reported = 0;
     uint64_t m_video_frame_counter = 0;
     uint64_t m_first_decoded_frame_ns = 0;
     // Mirror statistics window ([MIRROR] line every ~10 s while frames arrive).

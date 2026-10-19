@@ -2,6 +2,7 @@
 // Unit tests for the parts that need no network or OBS: the HLS playlist
 // reader, the media port list, and the AirPlay audio decoder.
 #include "audio-decoder.hpp"
+#include "audio-retimer.hpp"
 #include "hls-playlist.hpp"
 #include "media-url-policy.hpp"
 
@@ -432,6 +433,116 @@ void testPlistChecked()
     if (parsed) plist_free(parsed);
 }
 
+// Mirrored audio never reaches OBS late (OBS would raise its buffering for
+// good): a startup backlog is dropped, a later stall is shifted out.
+void testAudioRetimer()
+{
+    constexpr uint64_t ms = 1000000;
+    constexpr uint64_t packet = 480 * 1000000000ULL / 44100;  // AAC-ELD packet, ns
+    const uint64_t t0 = 1000000 * ms;
+
+    // On time (100 ms ahead): untouched.
+    {
+        AudioRetimer retimer;
+        uint64_t now = t0;
+        bool ok = true;
+        for (int i = 0; i < 500; ++i, now += packet) {
+            const auto r = retimer.process(now + 100 * ms, now);
+            ok = ok && !r.drop && r.timestamp == now + 100 * ms;
+        }
+        CHECK(ok);
+        CHECK_EQ(retimer.dropped(), uint64_t(0));
+        CHECK_EQ(retimer.shiftNs(), uint64_t(0));
+    }
+
+    // Startup burst: 1 s of queued packets released at once (play-at times
+    // already passed), then real time. The backlog is dropped, the rest kept
+    // unchanged: no delay added.
+    {
+        AudioRetimer retimer;
+        uint64_t now = t0;
+        uint64_t play_at = t0 - 1000 * ms;
+        int dropped = 0;
+        int kept_late = 0;
+        for (int i = 0; i < 120; ++i) {  // the burst: 1 ms apart
+            const auto r = retimer.process(play_at, now);
+            if (r.drop) ++dropped;
+            else if (r.timestamp + AudioRetimer::kLateNs < now) ++kept_late;
+            play_at += packet;
+            now += ms;
+        }
+        uint64_t last = 0;
+        bool continuous = true;
+        for (int i = 0; i < 400; ++i) {  // then real time
+            const auto r = retimer.process(play_at, now);
+            continuous = continuous && !r.drop && r.timestamp == play_at &&
+                         (last == 0 || r.timestamp > last);
+            last = r.timestamp;
+            play_at += packet;
+            now += packet;
+        }
+        CHECK(dropped > 80);
+        CHECK_EQ(kept_late, 0);
+        CHECK(continuous);
+        CHECK_EQ(retimer.shiftNs(), uint64_t(0));
+        CHECK(retimer.worstDroppedNs() >= 990 * ms);
+    }
+
+    // A stall after the start: shifted once by the amount it fell behind,
+    // then continuous and on time.
+    {
+        AudioRetimer retimer;
+        uint64_t now = t0;
+        uint64_t play_at = t0 + 50 * ms;
+        for (int i = 0; i < 300; ++i, now += packet, play_at += packet) {
+            CHECK(!retimer.process(play_at, now).drop);
+        }
+        now += 400 * ms;  // the stall: packets arrive 400 ms later than due
+        bool on_time = true;
+        for (int i = 0; i < 200; ++i, now += packet, play_at += packet) {
+            const auto r = retimer.process(play_at, now);
+            on_time = on_time && !r.drop && r.timestamp + AudioRetimer::kLateNs >= now;
+        }
+        CHECK(on_time);
+        CHECK_EQ(retimer.shifts(), uint64_t(1));
+        CHECK(retimer.shiftNs() >= 340 * ms && retimer.shiftNs() <= 360 * ms);
+        CHECK_EQ(retimer.dropped(), uint64_t(0));
+    }
+
+    // Late from the very start (500 ms): dropped for the startup window, then
+    // shifted once and on time.
+    {
+        AudioRetimer retimer;
+        uint64_t now = t0;
+        uint64_t play_at = t0 - 500 * ms;
+        bool on_time_after = true;
+        for (int i = 0; i < 400; ++i, now += packet, play_at += packet) {
+            const auto r = retimer.process(play_at, now);
+            if (now - t0 >= AudioRetimer::kStartupNs) {
+                on_time_after = on_time_after && !r.drop &&
+                                r.timestamp + AudioRetimer::kLateNs >= now;
+            }
+        }
+        CHECK(on_time_after);
+        CHECK(retimer.dropped() > 150);
+        CHECK_EQ(retimer.shifts(), uint64_t(1));
+    }
+
+    // Never shifted by more than the cap.
+    {
+        AudioRetimer retimer;
+        uint64_t now = t0;
+        retimer.process(now, now);
+        now += AudioRetimer::kStartupNs + ms;
+        const auto r = retimer.process(now - 5000 * ms, now);
+        CHECK(!r.drop);
+        CHECK_EQ(retimer.shiftNs(), uint64_t(0));
+        retimer.reset();
+        CHECK_EQ(retimer.dropped(), uint64_t(0));
+        CHECK(retimer.process(now - 100 * ms, now).drop);  // a new stream starts over
+    }
+}
+
 void testAudioDecoder()
 {
     const std::vector<std::vector<uint8_t>> packets = encodeAacLc(1.0);
@@ -502,6 +613,7 @@ int main()
     testAudioDecoder();
     testAudioFormats();
     testPlistChecked();
+    testAudioRetimer();
     if (g_failures) {
         std::fprintf(stderr, "unit-tests: %d check(s) failed\n", g_failures);
         return 1;

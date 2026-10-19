@@ -10,6 +10,7 @@
 | `src/airplay-server.cpp` | Mirror decode thread and output of mirror and AirPlay video frames and audio to OBS |
 | `src/h264-decoder.cpp` | Mirror video decoder (VideoToolbox with software fallback) |
 | `src/audio-decoder.cpp` | Mirror audio decoder (AAC-ELD, AAC-LC, ALAC) |
+| `src/audio-retimer.hpp` | Keeps mirror audio from reaching OBS late (startup burst, stalls) |
 | `src/media-player.cpp` | AirPlay video ("URL") player: demux, decode, presenter thread, clock |
 | `src/media-url-policy.cpp` | Which URLs AirPlay video may fetch (resolved addresses, redirects, HLS) |
 | `src/plugin-updater.mm`, `src/update-signature.swift` | Self-updater: release checks, Ed25519 signature, staging, swap |

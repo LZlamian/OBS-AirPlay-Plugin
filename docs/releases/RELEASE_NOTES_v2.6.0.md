@@ -54,6 +54,9 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
   idle.
 - Audio is decoded in the format the device chooses: 48 kHz and 24-bit
   streams play at the right speed (every Apple device so far sends 44.1 kHz).
+- Starting screen mirroring with sound no longer makes OBS raise its audio
+  buffering to the 960 ms maximum ("Max audio buffering reached" in the log).
+  Until now that delay applied to all your OBS audio until OBS was restarted.
 - The installer puts one copy of the plugin in your user folder and removes
   the system-wide copy that earlier installers also left.
 
