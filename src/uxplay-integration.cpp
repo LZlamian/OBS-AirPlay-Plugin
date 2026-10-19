@@ -15,6 +15,9 @@
 #include <utility>
 #if defined(__APPLE__)
 #include <pthread/qos.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <avrt.h>
 #endif
 
 // UxPlay headers (extern "C" to avoid C++ name mangling issues)
@@ -27,6 +30,18 @@ extern "C" {
 }
 
 namespace {
+#if defined(_WIN32)
+// The Windows counterpart: the Multimedia Class Scheduler's "Playback" task,
+// released when the receiver thread ends (UxPlay ends it with the session).
+struct MmcssRegistration {
+    HANDLE handle = nullptr;
+    ~MmcssRegistration()
+    {
+        if (handle) AvRevertMmThreadCharacteristics(handle);
+    }
+};
+#endif
+
 // Boost the calling thread to USER_INTERACTIVE QoS exactly once per thread.
 // UxPlay invokes our video/audio callbacks on its receiver thread; raising
 // its scheduling class reduces jitter spikes when other apps compete for
@@ -45,6 +60,21 @@ void boost_caller_thread_qos_once(const char* tag)
         blog(LOG_INFO, "Boosted %s receiver thread to QOS_CLASS_USER_INTERACTIVE", tag);
     } else {
         blog(LOG_WARNING, "Failed to boost %s receiver thread QoS (rc=%d)", tag, rc);
+    }
+#elif defined(_WIN32)
+    static thread_local MmcssRegistration registration;
+    static thread_local bool boosted = false;
+    if (boosted) {
+        return;
+    }
+    boosted = true;
+    DWORD task_index = 0;
+    registration.handle = AvSetMmThreadCharacteristicsW(L"Playback", &task_index);
+    if (registration.handle) {
+        blog(LOG_INFO, "Registered %s receiver thread with MMCSS (Playback)", tag);
+    } else {
+        blog(LOG_WARNING, "Failed to register %s receiver thread with MMCSS (error %lu)", tag,
+             static_cast<unsigned long>(GetLastError()));
     }
 #else
     (void)tag;

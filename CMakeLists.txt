@@ -257,7 +257,7 @@ endif()
 if(WIN32)
     # UxPlay's sockets need Winsock; FFmpeg's D3D11VA and OpenSSL need these
     # system libraries when linked statically.
-    set(OBS_AIRPLAY_WIN32_LIBS ws2_32 iphlpapi ntdll bcrypt crypt32 ole32 user32 advapi32)
+    set(OBS_AIRPLAY_WIN32_LIBS ws2_32 iphlpapi ntdll bcrypt crypt32 ole32 user32 advapi32 avrt)
 endif()
 
 if(LIBOBS_LIB)

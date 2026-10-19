@@ -25,6 +25,7 @@ the fork (§2), are what is left before a release.
 | 413 after an over-budget body | patch 0004 | lingering close: Windows dropped the 413 when the socket closed with unread data |
 | Exports | `.def` from `src/obs-airplay.exports`, patch 0005 | exactly the seven `obs_module_*`; llhttp no longer exports its API (it did: 33 `llhttp_*` symbols, missed by the first scoping report) |
 | macOS-only pieces | `src/airplay-ble-helper-stub.cpp`, `src/airplay-source.cpp` | no BLE helper, no self-updater; "Check for updates" hidden |
+| Receiver thread priority | `src/uxplay-integration.cpp` | the mirror video and audio threads join MMCSS's "Playback" task (macOS: QoS user-interactive) |
 | Portability fixes | `src/media-url-policy.cpp`, `src/uxplay-integration.cpp`, tests | Winsock, `inet_aton` → `RtlIpv4StringToAddressA` (same lenient forms Windows resolves), `localtime_s`, `%zu` → `%llu` |
 | Packaging | `scripts/package-windows.sh`, `windows/installer/obs-airplay.iss` | zip in OBS 30+'s `%ProgramData%\obs-studio\plugins\obs-airplay` layout; Inno Setup installer with a firewall rule for `obs64.exe` (private networks), removed on uninstall; symbols zip; refuses a DLL with unexpected imports or exports |
 | Support | `diagnose.ps1` | install, Bonjour or the DNS service, network profile, firewall, ports, OBS log; shipped in the package |
@@ -51,7 +52,6 @@ unchanged and green.
 | Commit `windows/uxplay-patches/0001`–`0005` to LZlamian/UxPlay, tag, bump the submodule, drop the patch step from CI and the `_WIN32` guard around `dnssd_get_backend` in `src/uxplay-integration.cpp` | 0.5 day | needs push access to the fork (this session had none). Patch 0004 also changes macOS behaviour (for the better: RFC 9112 lingering close); run the macOS tests after the bump |
 | Code signing (Authenticode) for the installer and DLL | cost decision | without it SmartScreen warns |
 | Fixes from the device test pass (§6) | unknown | discovery through the Windows DNS service is the largest unknown |
-| Optional: MMCSS thread priority for the receiver threads (`boost_caller_thread_qos_once` is macOS QoS only) | 1 day | |
 | Optional: Windows self-updater (WinHTTP + the existing Ed25519 check via libcrypto; swap the DLL after OBS quits) | 4–6 days | |
 | Optional: Bluetooth LE advertiser (`Windows.Devices.Bluetooth.Advertisement`) | 3–4 days | macOS's "fast discovery"; AirPlay works without it |
 

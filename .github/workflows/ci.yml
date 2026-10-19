@@ -184,7 +184,7 @@ jobs:
           objdump -p build-windows/obs-airplay.dll | grep -E 'DLL Name|^\s+\[ *[0-9]+\]' | tee build-windows/dll-report.txt
           # Only Windows itself and OBS: no MinGW, FFmpeg or OpenSSL DLLs.
           if grep 'DLL Name' build-windows/dll-report.txt | grep -viE \
-              ' (obs|kernel32|user32|advapi32|ole32|ws2_32|bcrypt|crypt32|ncrypt|secur32|ntdll|api-ms-win-crt-[a-z0-9-]+)\.dll$'; then
+              ' (obs|kernel32|user32|advapi32|ole32|ws2_32|bcrypt|crypt32|ncrypt|secur32|ntdll|avrt|api-ms-win-crt-[a-z0-9-]+)\.dll$'; then
             echo "::error::obs-airplay.dll depends on a DLL OBS does not provide"; exit 1
           fi
       - name: Test
