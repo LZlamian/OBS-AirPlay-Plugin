@@ -117,16 +117,21 @@ obs_properties_t* airplay_source_get_properties(void* data)
 
     obs_properties_t* props = obs_properties_create();
 
-    obs_property_t* name = obs_properties_add_text(props, "server_name",
+    // Two boxes of the same width: OBS draws a group across the whole panel,
+    // so the always-shown part is boxed too and lines up with the
+    // collapsible Advanced settings box below it.
+    obs_properties_t* receiver = obs_properties_create();
+
+    obs_property_t* name = obs_properties_add_text(receiver, "server_name",
         obs_module_text("AirPlay.ServerName"),
         OBS_TEXT_DEFAULT);
     obs_property_set_long_description(name, obs_module_text("AirPlay.ServerNameTooltip"));
 
-    obs_properties_add_button(props, "reset_server_name",
+    obs_properties_add_button(receiver, "reset_server_name",
         obs_module_text("AirPlay.ResetServerName"),
         reset_server_name_clicked);
 
-    obs_properties_add_text(props, "info", obs_module_text("AirPlay.Info"), OBS_TEXT_INFO);
+    obs_properties_add_text(receiver, "info", obs_module_text("AirPlay.Info"), OBS_TEXT_INFO);
     
     // Live state; the panel is refreshed when it changes.
     auto uxplay = get_uxplay_integration();
@@ -152,11 +157,17 @@ obs_properties_t* airplay_source_get_properties(void* data)
         snprintf(line, sizeof(line), obs_module_text("AirPlay.Status.Refused"), refusal.c_str());
         server_info += std::string("\n") + line;
     }
-    obs_property_t* status = obs_properties_add_text(props, "server_info", server_info.c_str(),
+    obs_property_t* status = obs_properties_add_text(receiver, "server_info", server_info.c_str(),
                                                      OBS_TEXT_INFO);
     if (!error.empty() || !name_error.empty() || !refusal.empty()) {
         obs_property_text_set_info_type(status, OBS_TEXT_INFO_WARNING);
     }
+
+    char version[64];
+    snprintf(version, sizeof(version), obs_module_text("AirPlay.Version"), PLUGIN_VERSION);
+    obs_properties_add_text(receiver, "plugin_version", version, OBS_TEXT_INFO);
+    obs_properties_add_group(props, "receiver", obs_module_text("AirPlay.Receiver"),
+                             OBS_GROUP_NORMAL, receiver);
 
     obs_properties_t* advanced = obs_properties_create();
     obs_property_t* follow = obs_properties_add_bool(advanced, "follow_sender_clock",
@@ -190,9 +201,6 @@ obs_properties_t* airplay_source_get_properties(void* data)
         obs_module_text("AirPlay.Advanced"), OBS_GROUP_CHECKABLE, advanced);
     obs_property_set_modified_callback(advanced_group, advanced_modified);
 
-    char version[64];
-    snprintf(version, sizeof(version), obs_module_text("AirPlay.Version"), PLUGIN_VERSION);
-    obs_properties_add_text(props, "plugin_version", version, OBS_TEXT_INFO);
 
     return props;
 }
