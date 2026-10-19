@@ -65,6 +65,8 @@ is configured as above with these differences:
 (instead of --enable-openssl) --enable-d3d11va --enable-dxva2
 --enable-hwaccel=h264_d3d11va,hevc_d3d11va,h264_d3d11va2,hevc_d3d11va2,h264_dxva2,hevc_dxva2
 (instead of VideoToolbox)
+--enable-encoder=aac,alac --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb
+(used by the tests only)
 ```
 
 To use your own compatible FFmpeg build, build the release dependencies

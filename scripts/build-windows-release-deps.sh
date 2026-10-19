@@ -117,8 +117,11 @@ else
 fi
 
 # The macOS recipe with VideoToolbox swapped for D3D11VA (and DXVA2 for older
-# drivers), Windows threads, and Schannel instead of OpenSSL for TLS.
-FFMPEG_FEATURES="${FFMPEG_VERSION};d3d11va-schannel-w32threads-v1"
+# drivers), Windows threads, and Schannel instead of OpenSSL for TLS. The
+# AAC/ALAC encoders and the mp4toannexb filters are for the tests only (they
+# make the test audio and read the test video), so that CI tests this FFmpeg
+# itself; the plugin does not use them.
+FFMPEG_FEATURES="${FFMPEG_VERSION};d3d11va-schannel-w32threads-testparts-v2"
 if built ffmpeg "${FFMPEG_FEATURES}" lib/libavformat.a; then
   echo "==> Reusing FFmpeg ${FFMPEG_VERSION}"
 else
@@ -146,6 +149,8 @@ else
       --enable-swscale \
       --enable-swresample \
       --enable-decoder=aac,alac,h264,hevc,mp3 \
+      --enable-encoder=aac,alac \
+      --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
       --enable-d3d11va \
       --enable-dxva2 \
       --enable-hwaccel=h264_d3d11va,hevc_d3d11va,h264_d3d11va2,hevc_d3d11va2,h264_dxva2,hevc_dxva2 \
