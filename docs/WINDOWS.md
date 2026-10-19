@@ -18,6 +18,8 @@ in [WINDOWS_PORT_SCOPE.md](WINDOWS_PORT_SCOPE.md).
 
 ## Getting a test build
 
+Beta releases (tags `windows-v*`, marked pre-release) are on the
+[releases page](https://github.com/LZlamian/OBS-AirPlay-Plugin/releases).
 Every push to the Windows branch builds one: open the CI run on GitHub
 (Actions > CI > the run > **Artifacts**) and download
 `obs-airplay-windows-x64`. It holds:

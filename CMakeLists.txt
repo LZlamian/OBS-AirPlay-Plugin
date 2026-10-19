@@ -7,6 +7,19 @@ endif()
 
 project(obs-airplay VERSION 2.6.0)
 
+# The Windows build has its own version line (windows/VERSION) while it is in
+# beta, released under windows-v<version> tags; macOS uses the project version.
+if(WIN32)
+    file(STRINGS "${CMAKE_SOURCE_DIR}/windows/VERSION" OBS_AIRPLAY_VERSION LIMIT_COUNT 1
+        REGEX "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    if(NOT OBS_AIRPLAY_VERSION)
+        message(FATAL_ERROR "windows/VERSION must be one x.y.z line")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/windows/VERSION")
+else()
+    set(OBS_AIRPLAY_VERSION "${CMAKE_PROJECT_VERSION}")
+endif()
+
 # A plain `cmake ..` used to build without optimisation.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -281,7 +294,7 @@ target_include_directories(obs-airplay PRIVATE
 )
 
 target_compile_definitions(obs-airplay PRIVATE
-    PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
+    PLUGIN_VERSION="${OBS_AIRPLAY_VERSION}"
 )
 
 if(OBS_AIRPLAY_FAST_CONNECT)
@@ -392,7 +405,7 @@ if(APPLE)
     )
     target_link_options(obs-airplay-ble-discovery PRIVATE ${OBS_AIRPLAY_SWIFT_LINK_OPTIONS})
     target_compile_definitions(obs-airplay-ble-discovery PRIVATE
-        PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
+        PLUGIN_VERSION="${OBS_AIRPLAY_VERSION}"
     )
     target_compile_options(obs-airplay-ble-discovery PRIVATE -fobjc-arc)
     target_link_libraries(obs-airplay-ble-discovery PRIVATE
@@ -519,7 +532,7 @@ if(BUILD_TESTING)
         ${FFMPEG_INCLUDE_DIRS}
     )
     target_compile_definitions(obs-airplay-media-smoke PRIVATE
-        PLUGIN_VERSION="${CMAKE_PROJECT_VERSION}"
+        PLUGIN_VERSION="${OBS_AIRPLAY_VERSION}"
     )
     target_link_directories(obs-airplay-media-smoke PRIVATE
         ${FFMPEG_LIBRARY_DIRS}

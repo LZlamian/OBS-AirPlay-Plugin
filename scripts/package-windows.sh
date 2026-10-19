@@ -19,13 +19,16 @@ CROSS="${OBS_AIRPLAY_CROSS:-}"
 STRIP="${CROSS:+${CROSS}-}strip"
 OBJDUMP="${CROSS:+${CROSS}-}objdump"
 
-VERSION="$(sed -nE 's/^project\(obs-airplay VERSION ([0-9]+\.[0-9]+\.[0-9]+)\).*/\1/p' "${ROOT_DIR}/CMakeLists.txt" | head -n1)"
+# The Windows version line (the DLL is built with the same file).
+VERSION="$(sed -nE '1s/^([0-9]+\.[0-9]+\.[0-9]+)\r?$/\1/p' "${ROOT_DIR}/windows/VERSION")"
 if [[ -z "${VERSION}" ]]; then
-  echo "error: could not read the version from CMakeLists.txt" >&2
+  echo "error: could not read the version from windows/VERSION" >&2
   exit 1
 fi
-if [[ -n "${OBS_AIRPLAY_RELEASE_TAG:-}" && "${OBS_AIRPLAY_RELEASE_TAG#v}" != "${VERSION}" ]]; then
-  echo "error: tag ${OBS_AIRPLAY_RELEASE_TAG} does not match CMakeLists.txt version ${VERSION}" >&2
+# A release tag (vX.Y.Z or windows-vX.Y.Z) must name the version built.
+TAG_VERSION="${OBS_AIRPLAY_RELEASE_TAG#windows-}"
+if [[ -n "${OBS_AIRPLAY_RELEASE_TAG:-}" && "${TAG_VERSION#v}" != "${VERSION}" ]]; then
+  echo "error: tag ${OBS_AIRPLAY_RELEASE_TAG} does not match windows/VERSION ${VERSION}" >&2
   exit 1
 fi
 BASENAME="obs-airplay-v${VERSION}-windows-x64"

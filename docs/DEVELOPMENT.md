@@ -205,6 +205,17 @@ behind `_WIN32` until the submodule moves.
    until Windows has been tested on devices; the `windows` job still builds
    and uploads the packages as a CI artifact for every push and tag.
 
+Windows beta line: the Windows build takes its version from
+`windows/VERSION`, not `project()`. To ship a beta, set it, add
+`docs/releases/RELEASE_NOTES_windows-vX.Y.Z.md` and push the tag
+`windows-vX.Y.Z`; CI builds and tests it, and the `windows-beta-draft` job
+attaches the installer, zip, symbols and `SHA256SUMS-windows` to a **draft
+pre-release**, which the maintainer publishes. Pre-releases are never the
+"latest" release, so neither updater sees them. When Windows joins the main
+releases, set `windows/VERSION` to the project version (the `windows` job
+refuses a `vX.Y.Z` tag that does not match it when
+`OBS_AIRPLAY_RELEASE_WINDOWS` is on).
+
 The release signing key's public half is in `kTrustedUpdateKeys`
 (`src/update-trusted-keys.h`, shared by both updaters). To rotate it, ship one release signed by the old
 key that trusts both keys, then drop the old one.

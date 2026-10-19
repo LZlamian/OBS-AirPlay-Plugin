@@ -581,8 +581,12 @@ void check_for_updates()
     const std::string latest = windows_update::plain_version(tag);
     if (!windows_update::is_newer(latest, PLUGIN_VERSION) || state.skipped_version == latest) return;
     const auto update = windows_update::installable(tag, assets);
-    blog(LOG_INFO, "[Update] %s is available (%s)", latest.c_str(),
-         update ? "signed installer found" : "no installable Windows asset");
+    if (!update) {
+        // A release without a signed Windows installer (macOS only) is not offered.
+        blog(LOG_INFO, "[Update] %s has no signed Windows installer; not offered", latest.c_str());
+        return;
+    }
+    blog(LOG_INFO, "[Update] %s is available", latest.c_str());
 
     // Never in the middle of a show.
     while (g_outputs_active || !g_update_checks) {

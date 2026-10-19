@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Build and test on every push and pull request; a tag vX.Y.Z also builds
 # release artifacts, which wait for approval (the "release" environment)
-# and are attached to a draft release for the maintainer to publish.
+# and are attached to a draft release for the maintainer to publish. A tag
+# windows-vX.Y.Z (the Windows beta line, windows/VERSION) attaches the
+# Windows packages to a draft pre-release for the maintainer to publish; a
+# pre-release never becomes the "latest" release the macOS updater reads.
 name: CI
 
 on:
   push:
     branches: ["**"]
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*", "windows-v*.*.*"]
   pull_request:
 
 permissions:
@@ -208,7 +211,7 @@ jobs:
           OBS_AIRPLAY_BUILD_DIR: build-windows
           OBS_AIRPLAY_DIST_DIR: dist
           # on a tag, the package must carry the tagged version
-          OBS_AIRPLAY_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          OBS_AIRPLAY_RELEASE_TAG: ${{ (startsWith(github.ref, 'refs/tags/windows-v') || (startsWith(github.ref, 'refs/tags/v') && vars.OBS_AIRPLAY_RELEASE_WINDOWS == 'true')) && github.ref_name || '' }}
         run: scripts/package-windows.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -325,3 +328,32 @@ jobs:
             exit 0
           fi
           gh release upload "${{ github.ref_name }}" dist/*
+
+  windows-beta-draft:
+    if: startsWith(github.ref, 'refs/tags/windows-v')
+    needs: [windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4   # the release notes
+      - uses: actions/download-artifact@v4
+        with:
+          name: obs-airplay-windows-x64
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS-windows && cat SHA256SUMS-windows
+      - name: Draft pre-release (published by the maintainer)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="docs/releases/RELEASE_NOTES_${TAG}.md"
+          if [ ! -f "$notes" ]; then echo "::error::$notes is missing"; exit 1; fi
+          # Never changes an existing release: a new beta needs a new tag.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists"; exit 1
+          fi
+          gh release create "$TAG" dist/* --verify-tag --draft --prerelease --latest=false \
+            --title "OBS AirPlay for Windows ${TAG#windows-v} (beta)" --notes-file "$notes"
