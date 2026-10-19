@@ -210,7 +210,11 @@ Windows beta line: the Windows build takes its version from
 `docs/releases/RELEASE_NOTES_windows-vX.Y.Z.md` and push the tag
 `windows-vX.Y.Z`; CI builds and tests it, and the `windows-beta-draft` job
 attaches the installer, zip, symbols and `SHA256SUMS-windows` to a **draft
-pre-release**, which the maintainer publishes. Pre-releases are never the
+pre-release**, which the maintainer publishes. Without a local clone, make
+the tag on GitHub instead: Releases > Draft a new release, a new tag
+`windows-vX.Y.Z` on the branch, **Set as a pre-release**, Publish; the job
+then uploads the files into that release (about 15 minutes) and adds the
+notes if it has none. It never replaces files of an existing release. Pre-releases are never the
 "latest" release, so neither updater sees them. When Windows joins the main
 releases, set `windows/VERSION` to the project version (the `windows` job
 refuses a `vX.Y.Z` tag that does not match it when
