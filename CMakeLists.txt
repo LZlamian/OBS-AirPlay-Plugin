@@ -669,7 +669,12 @@ if(BUILD_TESTING)
                     "${OBS_AIRPLAY_FIXTURES}")
         set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP media TIMEOUT 600)
 
-        set(F "file://${OBS_AIRPLAY_FIXTURES}")
+        # FFmpeg's file protocol drops "file:"; "file://D:/x" would be a UNC path.
+        if(WIN32)
+            set(F "file:${OBS_AIRPLAY_FIXTURES}")
+        else()
+            set(F "file://${OBS_AIRPLAY_FIXTURES}")
+        endif()
         set(OBS_AIRPLAY_MEDIA_TESTS
             "media-play|${F}/clip8.mp4"
             "media-rotated|${F}/rot90.mp4"
