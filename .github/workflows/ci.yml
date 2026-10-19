@@ -127,7 +127,7 @@ jobs:
             git -C uxplay apply --verbose "../$patch"
           done
       - name: Bonjour SDK files (dns_sd.h and an import library)
-        run: scripts/windows-bonjour-sdk.sh "$RUNNER_TEMP/bonjour-sdk"
+        run: scripts/windows-bonjour-sdk.sh "$(cygpath -m "$RUNNER_TEMP")/bonjour-sdk"
       - name: OBS Studio release (obs.dll to link against)
         id: obs
         uses: actions/cache@v4
@@ -145,9 +145,10 @@ jobs:
           unzip -q -o obs.zip 'bin/64bit/*' && rm obs.zip
       - name: Configure
         run: |
-          BONJOUR_SDK_HOME="$RUNNER_TEMP/bonjour-sdk" cmake -S . -B build-windows -G Ninja \
+          temp="$(cygpath -m "$RUNNER_TEMP")"
+          BONJOUR_SDK_HOME="$temp/bonjour-sdk" cmake -S . -B build-windows -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-            -DOBS_LIBOBS="$RUNNER_TEMP/obs-studio/bin/64bit/obs.dll"
+            -DOBS_LIBOBS="$temp/obs-studio/bin/64bit/obs.dll"
       - name: Build
         run: cmake --build build-windows -j4
       - name: Plugin DLL imports and exports

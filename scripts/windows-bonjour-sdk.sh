@@ -21,7 +21,7 @@ if [[ ! -f "${OUT}/Include/dns_sd.h" ]]; then
   curl -L --fail --retry 3 -o "${OUT}/Include/dns_sd.h.part" "${URL}"
   mv "${OUT}/Include/dns_sd.h.part" "${OUT}/Include/dns_sd.h"
 fi
-actual="$(sha256sum "${OUT}/Include/dns_sd.h" | cut -d' ' -f1)"
+actual="$(sha256sum < "${OUT}/Include/dns_sd.h" | cut -d' ' -f1)"
 if [[ "${actual}" != "${SHA256}" ]]; then
   echo "error: SHA-256 mismatch for dns_sd.h (${actual})" >&2
   rm -f "${OUT}/Include/dns_sd.h"
