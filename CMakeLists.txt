@@ -246,18 +246,25 @@ set(obs-airplay_HEADERS
     src/media-player.hpp
 )
 
-# The discovery helper (Bluetooth LE advertisement, self-updater) exists
-# only on macOS.
+# The discovery helper (Bluetooth LE advertisement, self-updater): a helper
+# app on macOS, in the plugin on Windows, none elsewhere.
 if(APPLE)
     list(APPEND obs-airplay_SOURCES src/airplay-ble-helper.cpp)
+elseif(WIN32)
+    list(APPEND obs-airplay_SOURCES src/windows-helper.cpp src/windows-update.cpp
+        src/windows-ble.cpp)
 else()
     list(APPEND obs-airplay_SOURCES src/airplay-ble-helper-stub.cpp)
 endif()
 
 if(WIN32)
     # UxPlay's sockets need Winsock; FFmpeg's D3D11VA and OpenSSL need these
-    # system libraries when linked statically.
-    set(OBS_AIRPLAY_WIN32_LIBS ws2_32 iphlpapi ntdll bcrypt crypt32 ole32 user32 advapi32 avrt)
+    # system libraries when linked statically; WinHTTP and Shell32 are the
+    # updater's.
+    set(OBS_AIRPLAY_WIN32_LIBS ws2_32 iphlpapi ntdll bcrypt crypt32 ole32 user32 advapi32 avrt
+        winhttp shell32)
+    # The updater's SHA-256 and Ed25519 (the libcrypto UxPlay links anyway).
+    find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
 endif()
 
 if(LIBOBS_LIB)
@@ -312,7 +319,7 @@ if(WIN32 AND TARGET obs-airplay)
     set_target_properties(obs-airplay PROPERTIES PREFIX "" OUTPUT_NAME "obs-airplay")
     target_link_options(obs-airplay PRIVATE
         "${CMAKE_BINARY_DIR}/obs-airplay.def")
-    target_link_libraries(obs-airplay PRIVATE ${OBS_AIRPLAY_WIN32_LIBS})
+    target_link_libraries(obs-airplay PRIVATE OpenSSL::Crypto ${OBS_AIRPLAY_WIN32_LIBS})
 endif()
 
 # macOS-specific settings
@@ -614,6 +621,22 @@ if(BUILD_TESTING)
             ${OBS_AIRPLAY_WIN32_LIBS})
         add_test(NAME dnssd-native COMMAND obs-airplay-dnssd-native-smoke)
         set_tests_properties(dnssd-native PROPERTIES TIMEOUT 60)
+
+        # The self-updater's rules: versions, assets, release signatures.
+        add_executable(obs-airplay-windows-update-tests
+            tests/windows-update-tests.cpp src/windows-update.cpp)
+        target_include_directories(obs-airplay-windows-update-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+        target_compile_options(obs-airplay-windows-update-tests PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+        target_link_libraries(obs-airplay-windows-update-tests PRIVATE OpenSSL::Crypto
+            ${OBS_AIRPLAY_WIN32_LIBS})
+        add_test(NAME windows-update COMMAND obs-airplay-windows-update-tests)
+
+        # The hand-declared WinRT Bluetooth LE publisher, against Windows.
+        add_executable(obs-airplay-windows-ble-smoke tests/windows-ble-smoke.cpp src/windows-ble.cpp)
+        target_include_directories(obs-airplay-windows-ble-smoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
+        target_compile_options(obs-airplay-windows-ble-smoke PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+        add_test(NAME windows-ble COMMAND obs-airplay-windows-ble-smoke)
+        set_tests_properties(windows-ble PROPERTIES TIMEOUT 60)
     endif()
     # Fuzz targets for input from the network: HLS playlists, mirror access
     # units, HTTP requests. With libFuzzer's runtime they are libFuzzer

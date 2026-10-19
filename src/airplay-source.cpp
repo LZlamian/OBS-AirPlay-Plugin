@@ -78,7 +78,7 @@ void airplay_source_get_defaults(obs_data_t* settings)
 // show_advanced, shows them, and clearing it collapses the box to its title.
 static const char* const kAdvancedProperties[] = {
     "follow_sender_clock", "allow_self_signed_media", "log_latency_telemetry",
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
     "check_for_updates",
 #endif
     "airplay_video",
@@ -185,8 +185,8 @@ obs_properties_t* airplay_source_get_properties(void* data)
         obs_module_text("AirPlay.LatencyTelemetry"));
     obs_property_set_long_description(telemetry, obs_module_text("AirPlay.LatencyTelemetry.Tooltip"));
 
-#if defined(__APPLE__)
-    // The updater is part of the macOS discovery helper.
+#if defined(__APPLE__) || defined(_WIN32)
+    // The self-updater: the discovery helper on macOS, windows-helper.cpp.
     obs_property_t* updates = obs_properties_add_bool(advanced, "check_for_updates",
         obs_module_text("AirPlay.CheckForUpdates"));
     obs_property_set_long_description(updates, obs_module_text("AirPlay.CheckForUpdates.Tooltip"));

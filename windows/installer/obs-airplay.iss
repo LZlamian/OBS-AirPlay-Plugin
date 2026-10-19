@@ -67,6 +67,32 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 var
   ObsPath: String;
 
+// /WAITPID=<pid>: started by the plugin's updater from inside OBS; install
+// once that OBS process has quit (it holds obs-airplay.dll open).
+function OpenProcess(DesiredAccess: Cardinal; InheritHandle: Cardinal; ProcessId: Cardinal): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: Cardinal): Cardinal;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): Cardinal;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function InitializeSetup(): Boolean;
+var
+  ProcessId: Cardinal;
+  Process: THandle;
+begin
+  ProcessId := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
+  if ProcessId <> 0 then begin
+    Process := OpenProcess($00100000 { SYNCHRONIZE }, 0, ProcessId);
+    if Process <> 0 then begin
+      Log(Format('Waiting for OBS (process %d) to quit', [ProcessId]));
+      WaitForSingleObject(Process, $FFFFFFFF);
+      CloseHandle(Process);
+    end;
+  end;
+  Result := True;
+end;
+
 // obs64.exe of the installed OBS Studio: its installer records the folder
 // as the default value of HKLM\SOFTWARE\OBS Studio.
 function ObsExecutable(Param: String): String;

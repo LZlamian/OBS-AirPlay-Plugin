@@ -52,7 +52,7 @@ echo "==> Checking ${DLL}"
 dump="$("${OBJDUMP}" -p "${DLL}" | tr -d '\r')"
 imports="$(printf '%s\n' "${dump}" | sed -nE 's/^[[:space:]]*DLL Name: (.*)$/\1/p')"
 unexpected="$(printf '%s\n' "${imports}" | grep -viE \
-  '^(obs|kernel32|user32|advapi32|ole32|ws2_32|bcrypt|crypt32|ncrypt|secur32|ntdll|avrt|msvcrt|api-ms-win-crt-[a-z0-9-]+)\.dll$' || true)"
+  '^(obs|kernel32|user32|advapi32|ole32|ws2_32|bcrypt|crypt32|ncrypt|secur32|ntdll|avrt|winhttp|shell32|msvcrt|api-ms-win-crt-[a-z0-9-]+)\.dll$' || true)"
 if [[ -n "${unexpected}" ]]; then
   echo "error: obs-airplay.dll needs DLLs OBS does not provide:" >&2
   printf '%s\n' "${unexpected}" | sed 's/^/  /' >&2

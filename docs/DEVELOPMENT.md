@@ -200,5 +200,5 @@ behind `_WIN32` until the submodule moves.
    and uploads the packages as a CI artifact for every push and tag.
 
 The release signing key's public half is in `kTrustedUpdateKeys`
-(`src/plugin-updater.mm`). To rotate it, ship one release signed by the old
+(`src/update-trusted-keys.h`, shared by both updaters). To rotate it, ship one release signed by the old
 key that trusts both keys, then drop the old one.

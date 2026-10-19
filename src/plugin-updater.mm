@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #import "plugin-updater.h"
+#include "update-trusted-keys.h"
 
 #import <CommonCrypto/CommonDigest.h>
 
@@ -33,13 +34,6 @@ NSString *const kDownloadPathPrefix = @"/LZlamian/OBS-AirPlay-Plugin/releases/do
 constexpr unsigned long long kMaxUpdateSize = 200ull * 1024 * 1024;
 constexpr unsigned long long kMaxSignatureSize = 4096;
 
-// Ed25519 public keys whose signatures make a release installable. The
-// private key is held by the maintainer outside the repository
-// (scripts/sign-release.sh). To rotate, ship a release signed by the old
-// key that lists both, then drop the old one a release later.
-const char *const kTrustedUpdateKeys[] = {
-    "ca4d3512515ca43033f9994d36fe58c0dac5da39ede4f645a375f740310372af",
-};
 NSArray<NSData *> *gTrustedKeysForTesting = nil;
 NSString *gUpdateRootForTesting = nil;
 
