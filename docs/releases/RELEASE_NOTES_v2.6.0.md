@@ -61,6 +61,9 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
 - Mirroring: the hardware decoder is warmed up when OBS starts, so the first
   picture appears sooner; decoding runs on its own thread, and the receiver
   wakes up less often.
+- Page-local Safari videos are written to disk in the background, so screen
+  mirroring and other AirPlay requests no longer pause while a large one is
+  saved.
 - The plugin is smaller.
 
 ## Updating

@@ -129,6 +129,18 @@ void play(void* cls, const char* location, float start_position)
     state->start_position = start_position;
     ++state->play_count;
     state->cv.notify_all();
+    state->cv.notify_all();
+}
+
+// Reverse-fetched media is written to its spool file off the receiver's
+// network thread; playback starts once it is. Waits for the play callback
+// that names a spool file other than `previous`.
+bool waitForNewSpool(TestState& state, const std::string& previous, int timeout_ms)
+{
+    std::unique_lock<std::mutex> lock(state.mutex);
+    return state.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+        return !state.spooled_location.empty() && state.spooled_location != previous;
+    });
 }
 
 int connectLocal(unsigned short port)
@@ -479,9 +491,15 @@ int main(int argc, char** argv)
     plist_t pending_action = plist_new_dict();
     plist_dict_set_item(pending_action, "type", plist_new_string("unhandledURLResponse"));
     plist_dict_set_item(pending_action, "params", pending_params);
+    std::string spool_before_pending;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        spool_before_pending = state.spooled_location;
+    }
     const std::string pending_action_response =
         binaryPlistExchange(port, "/action", session, pending_action);
     plist_free(pending_action);
+    waitForNewSpool(state, spool_before_pending, 5000);
 
     // Reproduce the device path: a stateful blob /play must stop the previous
     // URL player and ask Safari to return the page-local object over PTTH.
@@ -517,7 +535,13 @@ int main(int argc, char** argv)
     // Wi-Fi) while another connection polls /playback-info: the receiver's
     // single HTTP thread must keep answering it during and after the transfer.
     std::string blob_action_response;
+    std::string spool_before_blob;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        spool_before_blob = state.spooled_location;
+    }
     bool large_transfer_ok = true;
+    double spool_wait_ms = 0.0;
     double worst_poll_ms = 0.0;
     int polls = 0;
     if (large_blob) {
@@ -540,6 +564,9 @@ int main(int argc, char** argv)
             "X-Apple-Session-ID: " + session + "\r\n" +
             "Content-Type: application/x-apple-binary-plist\r\n" +
             "Content-Length: " + std::to_string(body_size) + "\r\n\r\n";
+        // A slow disk: the spool file takes 1.5 s to write. The receiver must
+        // keep answering meanwhile (the file is written off its thread).
+        raop_set_spool_delay_for_testing(raop, 1500);
         const int fd = connectLocal(port);
         bool sent = fd >= 0 && sendAll(fd, headers.data(), headers.size());
         for (uint32_t offset = 0; sent && offset < body_size; offset += 1U << 20) {
@@ -548,24 +575,31 @@ int main(int argc, char** argv)
         }
         if (sent) blob_action_response = receiveResponse(fd);
         if (fd >= 0) close(fd);
+        const auto spool_started = std::chrono::steady_clock::now();
+        waitForNewSpool(state, spool_before_blob, 30000);
+        spool_wait_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - spool_started).count();
+        raop_set_spool_delay_for_testing(raop, 0);
         usleep(200000);
         transfer_done.store(true);
         poller.join();
         free(body);
-        // 100 ms on a developer Mac (51-55 ms measured). The worst wait is
-        // the spool file being written on the receiver's thread, so on a
-        // shared CI runner it measures that runner's disk (0.2-4 s seen):
-        // OBS_AIRPLAY_LATENCY_REPORT_ONLY=1 reports it without failing.
-        const double budget_ms = 100.0;
-        const char* report_only_env = std::getenv("OBS_AIRPLAY_LATENCY_REPORT_ONLY");
-        const bool report_only = report_only_env && std::strcmp(report_only_env, "1") == 0;
+        // The receiver's thread never waits on the disk, so /playback-info
+        // stays within 100 ms on a developer Mac through the transfer and the
+        // slow (1.5 s) spool write; OBS_AIRPLAY_TIMING_SCALE widens it on
+        // slower machines.
+        double budget_ms = 100.0;
+        if (const char* env = std::getenv("OBS_AIRPLAY_TIMING_SCALE")) {
+            if (std::atof(env) >= 1.0) budget_ms *= std::atof(env);
+        }
         const bool in_budget = worst_poll_ms < budget_ms;
         std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms "
-                    "(budget %.0f ms) -> %s\n", body_size, polls, worst_poll_ms, budget_ms,
-                    in_budget ? "ok" : report_only ? "SLOW (reported only)" : "SLOW");
-        large_transfer_ok = (in_budget || report_only) && polls > 10;
+                    "(budget %.0f ms), spooled %.0f ms after the reply -> %s\n", body_size, polls,
+                    worst_poll_ms, budget_ms, spool_wait_ms, in_budget ? "ok" : "SLOW");
+        large_transfer_ok = in_budget && polls > 10 && spool_wait_ms >= 1500.0;
     } else {
         blob_action_response = binaryPlistExchange(port, "/action", session, blob_action);
+        waitForNewSpool(state, spool_before_blob, 5000);
     }
     plist_free(blob_action);
 
@@ -602,9 +636,15 @@ int main(int argc, char** argv)
     plist_t file_action = plist_new_dict();
     plist_dict_set_item(file_action, "type", plist_new_string("unhandledURLResponse"));
     plist_dict_set_item(file_action, "params", file_params);
+    std::string spool_before_file;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        spool_before_file = state.spooled_location;
+    }
     const std::string file_action_response =
         binaryPlistExchange(port, "/action", session, file_action);
     plist_free(file_action);
+    waitForNewSpool(state, spool_before_file, 5000);
 
     bool file_spooled = false;
     std::string file_spooled_location;

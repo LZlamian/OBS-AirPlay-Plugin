@@ -48,6 +48,8 @@ Performance:
 - Mirroring: decoding on its own thread; VideoToolbox warmed up at load; the
   discovery helper starts in the background; fewer wakeups and allocations.
 - Release builds are smaller (dead-stripped, only module entry points exported).
+- Reverse-fetched (page-local) media is written to its spool file on a worker
+  thread; the receiver keeps answering while it is written.
 
 Project:
 - The UxPlay fork is rebased onto the UxPlay v1.73.7 release (iOS 27
