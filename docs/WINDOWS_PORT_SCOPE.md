@@ -1,302 +1,142 @@
-# Windows x64 port: scope (2026-10-19)
+# Windows x64 port: scope and status
 
-A scoping pass, not a release. Started from `main` at 563f805 (v2.6.0) with
-the UxPlay fork at `uxplay-obs-airplay-v2.6.0` (f12a037). Nothing here was
-run on a real Windows PC with an iPhone or iPad; what was run is listed in
-§1 and the gaps are in §7.
+Started 2026-10-19 from `main` at 563f805 (v2.6.0), UxPlay fork at
+`uxplay-obs-airplay-v2.6.0` (f12a037). How to try it and what to test on a
+real PC: [WINDOWS.md](WINDOWS.md). How to build it:
+[DEVELOPMENT.md](DEVELOPMENT.md#windows).
 
-**Short answer:** practical. The protocol core (UxPlay), the receiver, the
-audio path, the HLS reader, the URL policy and the plugin DLL itself build
-for Windows x64 with MinGW-w64 and link against the real `obs.dll` of OBS
-Studio 32.0.4. What is missing is mostly at the edges: discovery for end
-users (Bonjour), TLS trust for AirPlay video, FCUP spooling, a release
-dependency build, an installer, and device testing. Estimate to a first
-public Windows beta: **about 3–5 weeks of focused work**, plus device
-testing (§8).
+**Status:** the port is done as far as it can be without a Windows PC and
+an iPhone or iPad. The release configuration (FFmpeg, libcrypto and
+libplist inside `obs-airplay.dll`) builds in CI against the real `obs.dll`
+of OBS Studio 32.0.4, the tests run on a Windows runner, and every build is
+packaged as an installer, a zip and a symbols zip. Nothing has been run
+inside OBS with a device yet (§6); that, and moving the UxPlay patches into
+the fork (§2), are what is left before a release.
 
-## 1. What builds and passes on Windows
+## 1. What was done
 
-CI job `windows` in `.github/workflows/ci.yml` (windows-2022, MSYS2 UCRT64,
-GCC; the macOS jobs are unchanged and stay green):
-
-| Piece | Builds | Tests on windows-2022 (run 25, bc370f8) |
+| Piece | Where | Notes |
 |---|---|---|
-| `uxplay/lib` (libairplay, playfair, llhttp) | yes, with `windows/uxplay-patches/0001-*.patch` | `protocol`, `protocol-large-blob`: everything passes **except** FCUP spooling (`blob=failed file=failed`, §2.4) and `body_limits` (§2.6); run as a separate non-gating step |
-| Mirror decoder (`h264-decoder.cpp`) | yes, D3D11VA + software fallback | `decoder`, `decoder-two-au`, `decoder-colorspace`: pass (the D3D11VA path itself is unverified: the runner has no GPU) |
-| Audio decoder, re-timer | yes | `unit`: pass |
-| HLS reader, media URL policy | yes | `unit`, `media-url-policy`, `media-nested-policy`: pass |
-| AirPlay video player (`media-player.cpp`) | yes | all 17 `media-*` playback modes, `media-tls-verify`, `media-resilient-http`: pass |
-| Plugin module `obs-airplay.dll` | yes, linked against OBS 32.0.4's `obs.dll` | exports exactly the seven `obs_module_*`; imports the UCRT (`api-ms-win-crt-*`), system DLLs, `obs.dll` and (CI only) MSYS2's FFmpeg/libcrypto/libplist DLLs. Not loaded into OBS |
+| Toolchain | MinGW-w64, MSYS2 UCRT64 (§3) | `obs.dll` linked directly; MinGW runtime static; UCRT like OBS |
+| Hardware decoding | `src/hw-decode-platform.hpp` | D3D11VA (DXVA2 in FFmpeg too) instead of VideoToolbox; frames copied to memory as for 10-bit on macOS; software fallback unchanged |
+| Release dependencies | `scripts/build-windows-release-deps.sh`, `-DOBS_AIRPLAY_STATIC_DEPS=ON` | static FFmpeg 8.1.2 (the macOS recipe, D3D11VA, Windows threads, **Schannel TLS**, so HTTPS AirPlay video is verified against Windows' certificate store), libcrypto 3.6.3, libplist 2.7.0 |
+| Discovery | UxPlay patch 0002 | Bonjour when installed; otherwise the Windows DNS service (`DnsServiceRegister`, Windows 10 1809+), so Bonjour is not required. The log names the backend, and says what to install if there is none |
+| AirPlay video spooling (Safari `blob:`, sender-local files) | patch 0003, `src/media-url-policy.cpp` | private files in the user's temp folder (`CREATE_NEW`, random name, DACL for the user and SYSTEM); the media policy accepts only such files owned by this user |
+| 413 after an over-budget body | patch 0004 | lingering close: Windows dropped the 413 when the socket closed with unread data |
+| Exports | `.def` from `src/obs-airplay.exports`, patch 0005 | exactly the seven `obs_module_*`; llhttp no longer exports its API (it did: 33 `llhttp_*` symbols, missed by the first scoping report) |
+| macOS-only pieces | `src/airplay-ble-helper-stub.cpp`, `src/airplay-source.cpp` | no BLE helper, no self-updater; "Check for updates" hidden |
+| Portability fixes | `src/media-url-policy.cpp`, `src/uxplay-integration.cpp`, tests | Winsock, `inet_aton` → `RtlIpv4StringToAddressA` (same lenient forms Windows resolves), `localtime_s`, `%zu` → `%llu` |
+| Packaging | `scripts/package-windows.sh`, `windows/installer/obs-airplay.iss` | zip in OBS 30+'s `%ProgramData%\obs-studio\plugins\obs-airplay` layout; Inno Setup installer with a firewall rule for `obs64.exe` (private networks), removed on uninstall; symbols zip; refuses a DLL with unexpected imports or exports |
+| Support | `diagnose.ps1` | install, Bonjour or the DNS service, network profile, firewall, ports, OBS log; shipped in the package |
+| CI | `.github/workflows/ci.yml` job `windows` | release configuration, all tests, package, artifact `obs-airplay-windows-x64` |
+| Release hook | job `release-windows` | attaches a tag's Windows packages to the draft release after approval; off until the repository variable `OBS_AIRPLAY_RELEASE_WINDOWS` is `true` |
+| Notices | `THIRD_PARTY_NOTICES.md`, `licenses/` | Windows section; MinGW-w64 runtime and winpthreads texts |
 
-Gating `ctest`: **26/26 pass**. Non-gating protocol step: 2/2 fail at the
-two documented points only; `large_blob_transfer` (96 MB upload, receiver
-stays responsive) passes, and `session_binding` (an IPv6 `::1` peer) passes
-on real Windows although it failed under Wine.
+<!-- CI-RESULTS -->
 
-Two harness fixes were needed on Windows and are in the branch: fixture URLs
-are `file:D:/...` (FFmpeg drops `file:`, so `file://D:/x` became the UNC
-path `//D:/x`), and `sha256sum` output for paths with backslashes.
+## 2. Left to do (development)
 
-The CI job uploads `obs-airplay.dll` as an artifact (14 days) together with
-its import/export report. It is an unsigned test build linked against
-MSYS2's shared FFmpeg/OpenSSL/libplist DLLs, **not** something to hand to
-users (§5).
-
-Before CI, the same tree was cross-built on Linux with Ubuntu's mingw-w64
-(GCC 13, msvcrt) against OpenSSL 3.6.3, libplist 2.7.0 and a minimal static
-FFmpeg 8.1.2 with D3D11VA/DXVA2 (the macOS release configuration with
-VideoToolbox swapped out), and the tests were run under Wine 9:
-
-- every target builds; `obs-airplay.dll` exports exactly the seven
-  `obs_module_*` symbols and imports only Windows system DLLs and `obs.dll`;
-- `unit`: all checks pass except the AAC/ALAC ones, which need FFmpeg
-  *encoders* that the minimal build leaves out (CI has them);
-- `media-url-policy`: passes (including `http://2130706433/` and
-  `http://0x7f.1/` being refused, which exercises the Windows `inet_aton`
-  replacement);
-- `protocol`: everything passes except FCUP spooling (expected, §2.4),
-  `session_binding` (its IPv6 `::1` peer got no answer under Wine; passes
-  on real Windows) and `body_limits` (fails on real Windows too, §2.6).
-
-## 2. Remaining blockers
-
-### 2.1 Discovery: Bonjour (end-user dependency) — must fix before a beta
-
-UxPlay advertises `_airplay._tcp` / `_raop._tcp` through Apple's DNS-SD API.
-On Windows `uxplay/lib/dnssd.c` loads `dnssd.dll` at run time
-(`LoadLibraryA`, lines ~197–220); `dnssd_init` fails with
-`DNSSD_ERROR_LIBNOTFOUND` without it and `UxPlayIntegration::start`
-(`src/uxplay-integration.cpp` ~677) then reports that the receiver could not
-start. So **without Apple's Bonjour service installed, iPhones and iPads
-never see the receiver.**
-
-- Bonjour comes with iTunes / Apple Devices or "Bonjour Print Services for
-  Windows". It may not be redistributed separately without Apple's
-  agreement, so an installer can only detect it and point to the download.
-- Building needs only `dns_sd.h` and an import library;
-  `scripts/windows-bonjour-sdk.sh` fetches Apple's header at a pinned tag
-  (SHA-256 checked) and makes `dnssd.lib` from `windows/bonjour/dnssd.def`.
-  No Bonjour SDK installer, no Apple sign-in. Because the DLL is loaded with
-  `LoadLibrary`, nothing is imported from it at link time.
-- **Recommended:** a second DNS-SD backend on Windows 10 1809+'s built-in
-  mDNS responder (`DnsServiceRegister` / `DnsServiceDeRegister` in
-  `windns.h`, `dnsapi.lib`), with Bonjour as the fallback. That removes the
-  dependency for most users. It lives in `uxplay/lib/dnssd.c` (TXT records
-  become `DnsServiceConstructInstance` key/value arrays; renames re-register).
-  Risk to verify on devices: whether iOS accepts the records the Windows
-  responder publishes, and how it coexists with a running Bonjour service
-  on the same port 5353.
-- The BLE "fast discovery" helper is macOS-only and is stubbed out
-  (`src/airplay-ble-helper-stub.cpp`). A Windows equivalent
-  (`Windows.Devices.Bluetooth.Advertisement` from C++/WinRT) is optional;
-  AirPlay works without it.
-
-### 2.2 TLS trust for AirPlay video (HTTPS URLs) — must fix
-
-`set_tls_options` in `src/media-player.cpp` (~line 73) verifies
-certificates and points OpenSSL at `/etc/ssl/cert.pem`. Windows has no such
-file and OpenSSL has no default trust store there, so every HTTPS AirPlay
-video URL (YouTube, most apps) would fail verification (safe, but broken).
-Fix: build the Windows FFmpeg with `--enable-schannel` and without
-OpenSSL, so FFmpeg's TLS uses Windows' certificate store; `tls_verify=1`
-keeps working. (Alternative: OpenSSL 3.2+'s `org.openssl.winstore` store.)
-UxPlay itself still needs OpenSSL's libcrypto for pairing and FairPlay.
-
-### 2.3 Release dependencies and the C runtime — must fix
-
-- Shipping build: FFmpeg, OpenSSL (libcrypto only) and libplist linked
-  **statically** into `obs-airplay.dll`, like the local cross-build above
-  (a `scripts/build-windows-release-deps.sh` mirroring
-  `scripts/build-macos-release-deps.sh`). OBS 32.0.4 ships its own FFmpeg
-  7.1 as `avcodec-61.dll` etc.; our FFmpeg 8.1 DLLs would be named `-62`
-  and not clash today, but the next OBS FFmpeg bump could load ours or
-  theirs by name, so static (or `--build-suffix`) is the safe choice.
-- libplist's headers mark its API `dllimport` unless `LIBPLIST_STATIC` is
-  defined: a static release build must define it for `uxplay/lib` and the
-  tests (seen in the local static build as `__imp_plist_*` link errors).
-- The MinGW runtime is already linked statically (`CMakeLists.txt`, the
-  `if(WIN32)` block after `add_subdirectory(uxplay/lib)`): UxPlay's
-  `pthread` becomes `libwinpthread.a`, libgcc/libstdc++ are static. The CRT
-  is the UCRT (MSYS2 UCRT64), the same one OBS's MSVC build uses.
-
-### 2.4 FCUP spooling (blob:/file: AirPlay video) — should fix
-
-`uxplay/lib/http_handlers.h` spools reverse-fetched media to a private temp
-file (`mkstemp`, `fchmod 0600`, `F_SETFD`, `getuid`/`lstat` owner checks,
-`/private/tmp`), and `media_url_policy::checkLocalFile`
-(`src/media-url-policy.cpp`) re-checks the owner. None of that exists on
-Windows; the patch makes spooling fail cleanly and the plugin refuses
-`file:` items. Safari "blob:" videos and sender-local files therefore do
-not play on Windows yet. Port: `%LOCALAPPDATA%\Temp`, `CreateFileW` with
-`CREATE_NEW`, an owner-only DACL and `FILE_ATTRIBUTE_TEMPORARY`, and an
-owner check with `GetSecurityInfo`; the media policy must accept
-`C:/...` paths only under that directory.
-
-### 2.5 UxPlay patches belong in the fork — housekeeping
-
-`windows/uxplay-patches/0001-build-uxplay-lib-with-mingw-w64.patch` (applied
-by CI; the submodule pointer is unchanged):
-
-- `media_url_policy.h`: Winsock headers; `inet_aton` mapped to
-  `RtlIpv4StringToAddressA(..., Strict=FALSE)`, Windows' own lenient
-  parser, so short/octal/hex forms classify the same way Windows resolves
-  them; `ntdll` linked.
-- `media_trace.h`: no `memmem` in the Windows CRT.
-- `http_handlers.h`: spooling stubbed (§2.4).
-
-They should become a commit and tag in LZlamian/UxPlay, with the submodule
-bumped. Upstream UxPlay already carries the rest of its Windows support
-(Winsock, `LoadLibrary("dnssd.dll")`, `_WIN32` branches in `netutils.c`,
-`raop_ntp.c`, `raop_rtp_mirror.c`, `httpd.c`).
-
-### 2.6 Smaller items
-
-| Where | What | Status |
+| Item | Effort | Notes |
 |---|---|---|
-| `src/hw-decode-platform.hpp`, `h264-decoder.cpp`, `media-player.cpp` | VideoToolbox → D3D11VA. Frames are copied to system memory (`av_hwframe_transfer_data`) and then to OBS; zero-copy would need a D3D11 shared texture via `obs_source_output_video` alternatives (libobs has no async-source texture input) | done, copy path; verify cost at 4K |
-| `src/uxplay-integration.cpp` `boost_caller_thread_qos_once` | macOS QoS only; Windows could use `AvSetMmThreadCharacteristicsW(L"Games")` (OBS links AVRT already) or `SetThreadPriority` | optional |
-| `src/hardware-decode-option.hpp` | legacy `~/Library/...` flag folder now macOS-only; the per-plugin config folder works on Windows | done |
-| `src/airplay-source.cpp` | "Check for updates" hidden off macOS | done |
-| `src/uxplay-integration.cpp` `recordRefusal` | `localtime_r` → `localtime_s` on Windows | done |
-| `src/plugin-updater.mm`, `update-signature.swift`, `airplay-ble-discovery.mm` | Self-updater is AppKit/CryptoKit; on Windows it would be a separate small helper (WinHTTP + Ed25519 via libcrypto, which is already linked) that swaps the DLL after OBS quits | not started, not needed for a beta |
-| `scripts/package-macos.sh`, `Info.plist.in`, bundle layout | No Windows packaging yet (§5) | not started |
-| `tests/protocol-smoke.cpp` | sockets via helpers (`closeSocket`, `setTimeout`), `SIGPIPE`/`SO_NOSIGPIPE` guarded | done |
-| `tests/video-decoder-smoke.cpp` | CPU time via `GetProcessTimes` | done |
-| `tests/dnssd-stub.c` | test-only `dnssd.dll` stand-in (UxPlay loads the real one even to create a context) | done |
-| `uxplay/lib/httpd.c` (body budget) | On Windows the 413 for a body over the shared in-flight budget did not reach the client (`protocol` smoke `body_limits`, real windows-2022 runner): most likely because the receiver closes the socket with the rest of the body unread, Windows then sends a reset, and a reset discards the response the client had not read yet. The budget itself holds (the next request is not refused). Fix: `shutdown(SD_SEND)` and drain briefly before `closesocket` when answering 413 | 0.5–1 day |
-| `src/plugin-main.cpp:360`, `airplay-server.cpp:121`, `media-player.cpp:1072` | GCC warns that `%zu` is unknown: MinGW checks OBS's `PRINTFATTR` against the old msvcrt `printf`. Harmless at run time (`blog` formats inside `obs.dll` with the UCRT, which has `%zu`), but noisy; build with `-D__USE_MINGW_ANSI_STDIO=1` or cast to `unsigned long long` + `%llu` | 0.5 day |
-| `diagnose.sh`, `build.sh` | macOS-only; a PowerShell `diagnose.ps1` (ports, firewall rule, Bonjour service state) would help support | not started |
+| Commit `windows/uxplay-patches/0001`–`0005` to LZlamian/UxPlay, tag, bump the submodule, drop the patch step from CI and the `_WIN32` guard around `dnssd_get_backend` in `src/uxplay-integration.cpp` | 0.5 day | needs push access to the fork (this session had none). Patch 0004 also changes macOS behaviour (for the better: RFC 9112 lingering close); run the macOS tests after the bump |
+| Code signing (Authenticode) for the installer and DLL | cost decision | without it SmartScreen warns |
+| Fixes from the device test pass (§6) | unknown | discovery through the Windows DNS service is the largest unknown |
+| Optional: MMCSS thread priority for the receiver threads (`boost_caller_thread_qos_once` is macOS QoS only) | 1 day | |
+| Optional: Windows self-updater (WinHTTP + the existing Ed25519 check via libcrypto; swap the DLL after OBS quits) | 4–6 days | |
+| Optional: Bluetooth LE advertiser (`Windows.Devices.Bluetooth.Advertisement`) | 3–4 days | macOS's "fast discovery"; AirPlay works without it |
 
 ## 3. Toolchain: MinGW-w64 (MSYS2 UCRT64), not MSVC
 
-OBS plugins on Windows are normally MSVC-built with the obs-plugintemplate,
-which builds libobs from source. This plugin chose MinGW-w64 because:
+OBS plugins on Windows are usually built with MSVC from obs-plugintemplate,
+which builds libobs from source. This plugin uses MinGW-w64 because:
 
 1. **UxPlay is written for it.** `uxplay/lib` (≈16.8k lines of C) uses
-   pthreads throughout (`threads.h`, 213 call sites of
-   `pthread_*`/`MUTEX_*`/`COND_*`/`THREAD_*`), `unistd.h`/`strings.h`/
-   `dirent.h`/`sys/time.h` (7 files), C11 `stdatomic.h` (`raop.c`), GCC
-   flags in its CMakeLists (`-fPIC`, `-Wall` strings), and upstream UxPlay's
-   only supported Windows build is MSYS2. With MinGW it needed one
-   41-line patch (§2.5). MSVC would need pthreads4w (or OBS's own
-   `w32-pthreads.dll`), POSIX shims, `/experimental:c11atomics`, and a fork
-   of its CMakeLists: a lasting diff against upstream.
-2. **The ABI boundary is plain C.** Everything the plugin calls in libobs
-   is `extern "C"` (`obs-module.h`, `obs.h`, `util/*`); no C++ types, no
-   STL, no exceptions cross it. On x64 there is one calling convention, and
-   C structs lay out identically (MinGW uses MS bitfield layout by default).
-   Memory libobs allocates is freed with `bfree` and vice versa, never with
-   the plugin's own `free`. With UCRT64 even the C runtime is the same
-   `ucrtbase.dll` OBS uses (OBS 32.0.4's `obs.dll` imports
-   `api-ms-win-crt-*`).
-3. **No libobs build needed.** GNU ld links `obs.dll` directly, so CI takes
-   `bin/64bit/obs.dll` from the official OBS release zip (SHA-256 pinned);
-   every libobs function the plugin imports is checked at link time against
-   a real OBS build.
+   pthreads throughout (213 call sites of `pthread_*`/`MUTEX_*`/`COND_*`/
+   `THREAD_*`), `unistd.h`/`strings.h`/`dirent.h`/`sys/time.h`, C11
+   `stdatomic.h` and GCC flags in its CMakeLists; upstream UxPlay's only
+   Windows build is MSYS2. MSVC would need pthreads4w (or OBS's
+   `w32-pthreads.dll`), POSIX shims, `/experimental:c11atomics` and a
+   different CMakeLists: a lasting diff against upstream.
+2. **The ABI boundary is plain C.** Everything the plugin calls in libobs is
+   `extern "C"`; no C++ types or exceptions cross it. x64 has one calling
+   convention, and C structs lay out the same (MinGW uses MS bitfield layout
+   by default). Memory libobs allocates is freed with `bfree`. With UCRT64
+   the C runtime is the same `ucrtbase.dll` OBS uses (OBS 32.0.4's `obs.dll`
+   imports `api-ms-win-crt-*`).
+3. **No libobs build needed.** GNU ld links `obs.dll` itself, taken from the
+   official OBS release zip (SHA-256 pinned in CI), so every libobs function
+   the plugin imports is checked against a real OBS build at link time.
 
-Implications to keep in mind:
+To keep in mind:
 
-- `EXPORT` in `obs-headers/libobs/util/c99defs.h` is `dllexport` only for
-  MSVC; under MinGW it is `visibility("default")`, which does nothing on
-  PE. The module is therefore linked with a `.def` generated from
-  `src/obs-airplay.exports` (exactly the seven `obs_module_*` symbols,
-  checked in CI). Without it GNU ld would export every symbol, statically
-  linked FFmpeg/OpenSSL included.
-- Debug symbols are DWARF, not PDB: OBS's crash handler shows no names for
-  frames in our DLL. Keep the unstripped DLL per release, or use
-  `clang` + `-gcodeview` (MSYS2 CLANG64) if PDBs are wanted later.
-- `long double` and `printf` differ between the runtimes; neither crosses
-  the libobs API (`blog` formats inside `obs.dll`, i.e. with the UCRT, so
-  `%zu`/`%lld` are fine).
-- Should OBS ever require MSVC plugins (it does not today), the port to
-  MSVC is mostly the UxPlay items in (1).
+- OBS's `EXPORT` macro is `dllexport` only for MSVC; under MinGW the module
+  is linked with a `.def` made from `src/obs-airplay.exports`, and
+  `scripts/package-windows.sh` checks that nothing else is exported.
+- The MinGW runtime (libgcc, libstdc++, winpthreads) is linked statically
+  (`CMakeLists.txt`, the `if(WIN32)` block after `add_subdirectory(uxplay/lib)`):
+  OBS ships none of it.
+- Debug symbols are DWARF, not PDB: OBS's crash reports show no names for our
+  frames. Releases keep the unstripped DLL (the symbols zip).
+- GCC checks OBS's printf attribute against msvcrt's `printf`, which lacks
+  `%zu`; log calls use `%llu` with a cast.
+- If OBS ever requires MSVC-built plugins (it does not), the port is mostly
+  the UxPlay items in point 1.
 
-## 4. Firewall and ports
+## 4. Firewall, ports, Bonjour
 
-Same ports as macOS (README "Requirements"): TCP 7000 (7001 if taken), UDP
-ports chosen by UxPlay for timing/control/audio, a TCP mirror data port, and
-outbound HTTP(S) for AirPlay video; mDNS UDP 5353 is handled by the Bonjour
-or Windows DNS service, not by OBS.
+Same ports as macOS: TCP 7000 (7001 if taken), UDP ports chosen by UxPlay
+for timing, control and audio, a TCP mirror data port, and outbound HTTP(S)
+for AirPlay video. mDNS (UDP 5353) is handled by Bonjour or the Windows DNS
+service, not by OBS.
 
-- Windows Defender Firewall prompts "Allow obs64.exe to communicate" the
-  first time OBS listens; users who dismiss it (or are on a "Public"
-  network profile) block every connection. The installer should add an
-  inbound rule for `obs64.exe` on the Private profile (TCP+UDP), e.g.
-  `netsh advfirewall firewall add rule name="OBS AirPlay" dir=in
-  action=allow program="%ProgramFiles%\obs-studio\bin\64bit\obs64.exe"
-  profile=private`, and say plainly that Public networks are blocked.
-- There is no Windows AirPlay receiver competing for port 7000 by default;
-  other AirPlay receivers (AirServer, LonelyScreen, 5KPlayer, Apple Devices'
-  services) may.
+- Windows asks to allow `obs64.exe` the first time OBS listens; on a
+  **Public** network, or if the prompt is dismissed, devices cannot connect.
+  The installer adds an inbound rule "OBS AirPlay" for `obs64.exe` on
+  private networks; `diagnose.ps1` reports the network profile and the rule.
+- Bonjour is optional. If installed (Apple Devices, iTunes, Bonjour Print
+  Services) the plugin uses it, as UxPlay always has; otherwise the Windows
+  DNS service. Bonjour may not be redistributed, so it is never bundled;
+  only Apple's `dns_sd.h` is used at build time
+  (`scripts/windows-bonjour-sdk.sh`, pinned and SHA-256 checked).
 
-## 5. Packaging and installer
+## 5. Packaging
 
-- OBS 30+ on Windows loads plugins from
-  `%ProgramData%\obs-studio\plugins\obs-airplay\bin\64bit\obs-airplay.dll`
-  with data in `...\obs-airplay\data\` (locale files from `data/`), or the
-  legacy `C:\Program Files\obs-studio\obs-plugins\64bit\`. Portable OBS uses
-  `obs-plugins\64bit` next to `obs64.exe`.
-- Deliverables: a `.zip` in that layout plus an installer (Inno Setup or
-  WiX/MSI) that finds OBS, installs to `%ProgramData%`, adds the firewall
-  rule, checks for the Bonjour service (or, once §2.1 lands, the Windows
-  version), and ships LICENSE, `THIRD_PARTY_NOTICES.md` and `licenses/`
-  (plus Apple's dns_sd.h notice only if Bonjour code is ever bundled; today
-  only the header is used at build time).
-- Code signing: unsigned DLLs/installers trigger SmartScreen warnings; an
-  OV/EV Authenticode certificate (or Azure Trusted Signing) is a cost
-  decision for the maintainer.
-- A `scripts/package-windows.sh` (MSYS2) and a tag-only CI job analogous to
-  the macOS `release` job; the `release` job must stay macOS-only until
-  then (the new `windows` job is not in its `needs:`).
+- OBS 30+ loads per-machine plugins from
+  `%ProgramData%\obs-studio\plugins\obs-airplay\bin\64bit\obs-airplay.dll`,
+  data from `...\obs-airplay\data`. The installer installs there (admin,
+  Windows 10+), warns about a second copy in OBS's own `obs-plugins\64bit`,
+  and closes OBS if it holds the DLL. Portable OBS installs: copy the folder
+  from the zip into `obs-plugins` by hand (untested).
+- Artifacts: `obs-airplay-vX.Y.Z-windows-x64.zip`, `-setup.exe`,
+  `-symbols.zip`; on a tag with `OBS_AIRPLAY_RELEASE_WINDOWS=true`, also
+  `SHA256SUMS-windows` on the draft release.
+- Unsigned: SmartScreen shows "Windows protected your PC"
+  (**More info > Run anyway**).
 
-## 6. Bonjour for end users
+## 6. What needs a real Windows PC and iOS devices
 
-Today: required. `dnssd.dll` comes with Bonjour (Apple Devices / iTunes, or
-Bonjour Print Services for Windows 2.0.2). If it is missing, the plugin logs
-that the receiver could not start and the source shows "unavailable". The
-Windows build should log a specific hint ("Bonjour is not installed: ...")
-instead of the generic failure, which is a small change in
-`UxPlayIntegration::start` keyed on `DNSSD_ERROR_LIBNOTFOUND`. With the
-native `DnsServiceRegister` backend (§2.1) the requirement goes away on
-Windows 10 1809 and later.
+The checklist to run is in [WINDOWS.md](WINDOWS.md#what-to-test). In short:
 
-## 7. What cannot be verified without a real Windows PC and iOS devices
+- OBS loading the DLL from ProgramData (source registration, properties UI,
+  locale, config folder).
+- Discovery through the Windows DNS service (whether iOS accepts its
+  records; the host name it publishes; coexistence with a running Bonjour)
+  and through Bonjour; renames.
+- Pairing and mirroring (1080p, 4K, HEVC, rotation, reconnects); D3D11VA on
+  Intel, AMD and NVIDIA GPUs and its fallback; CPU cost of the frame copy.
+- Audio sync and the re-timer with Windows scheduling and OBS's audio path.
+- AirPlay video: HTTPS through Schannel, HLS, seek, Safari `blob:` spooling.
+- Firewall prompt, Private/Public profiles, VPN adapters, several network
+  adapters (UxPlay picks the interface and MAC differently on Windows).
+- Sleep and resume, quitting OBS during a session.
 
-- OBS actually loading `obs-airplay.dll` (module load, source registration,
-  properties UI, locale files, config folder path).
-- Discovery: iPhone/iPad/Mac seeing the receiver through Bonjour, and
-  through the Windows DNS service backend once written; renames; two
-  receivers on one LAN.
-- Pairing, FairPlay mirroring setup, mirroring at 1080p/4K, HEVC, rotation,
-  reconnects; D3D11VA on Intel/AMD/NVIDIA GPUs (and the software fallback on
-  a GPU without HEVC decode); CPU cost of the surface copy.
-- Audio: mirror audio sync and the re-timer under Windows scheduling and
-  OBS's Windows audio pipeline (WASAPI); AirPlay audio-only.
-- AirPlay video (YouTube, Safari, Photos), HTTPS trust (§2.2), HLS, seek.
-- Windows Firewall prompt behaviour, Private vs Public profiles, VPN
-  adapters, Wi-Fi vs Ethernet, multiple NICs (UxPlay picks the MAC/interface
-  differently on Windows: `netutils.c`).
-- Sleep/resume, OBS shutdown with an active session, studio mode,
-  scene-collection switches.
-- What the CI runner cannot show: real GPUs (the runner has none, so the
-  D3D11VA path falls back to software there), a running Bonjour service,
-  and the Wine-only protocol results in §1.
+The CI runner cannot show any of these: it has no GPU (D3D11VA falls back to
+software there), no Bonjour, no OBS UI and no AirPlay sender.
 
-## 8. Size estimate for the remaining pieces
+## 7. History
 
-| Piece | Effort | Notes |
-|---|---|---|
-| Move the UxPlay patch into the fork, tag, bump submodule | 0.5 day | mechanical |
-| Static release deps script for Windows (FFmpeg w/ Schannel + D3D11VA, libcrypto, libplist with `LIBPLIST_STATIC`) + cache | 2–3 days | the local cross-build in §1 is the starting point |
-| TLS trust (§2.2) | included above; 0.5 day to test | |
-| Bonjour-missing hint in the log/source status | 0.5 day | |
-| Windows DNS service backend for `dnssd.c` (§2.1) | 4–6 days | plus device testing; biggest unknown |
-| FCUP spooling on Windows (§2.4) | 2–3 days | security-sensitive; needs review like the macOS version |
-| Packaging: zip layout, Inno Setup installer, firewall rule, Bonjour check | 3–4 days | + code-signing setup if bought |
-| Tag-time Windows release job (draft release, checksums, Ed25519 signature of the zip for a later updater) | 1–2 days | |
-| `diagnose.ps1` and README/INSTALL for Windows | 1–2 days | |
-| Device test pass and fixes (maintainer + follow-ups) | 1–2 weeks elapsed | unknowns: discovery, timing, GPU drivers |
-| Optional: thread priority (MMCSS), Windows BLE advertiser, Windows self-updater | 1 / 3–4 / 4–6 days | not needed for a beta |
-
-Total to a first public Windows beta: roughly **15–25 working days** of
-development plus the device-testing loop.
+The first scoping pass (same day) found the portable core building with one
+UxPlay patch and listed the blockers: Bonjour as an end-user dependency, no
+TLS trust store for AirPlay video, no static release build, no spooling,
+the lost 413, no packaging. All of these are addressed above; the estimate
+then was 15–25 working days of development plus device testing.
