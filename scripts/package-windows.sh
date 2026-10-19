@@ -38,7 +38,9 @@ fi
 
 # The DLL may need only Windows and OBS (the release links everything else).
 echo "==> Checking ${DLL}"
-imports="$("${OBJDUMP}" -p "${DLL}" | sed -nE 's/^[[:space:]]*DLL Name: (.*)$/\1/p')"
+# (MSYS2's objdump writes CRLF line ends)
+dump="$("${OBJDUMP}" -p "${DLL}" | tr -d '\r')"
+imports="$(printf '%s\n' "${dump}" | sed -nE 's/^[[:space:]]*DLL Name: (.*)$/\1/p')"
 unexpected="$(printf '%s\n' "${imports}" | grep -viE \
   '^(obs|kernel32|user32|advapi32|ole32|ws2_32|bcrypt|crypt32|ncrypt|secur32|ntdll|msvcrt|api-ms-win-crt-[a-z0-9-]+)\.dll$' || true)"
 if [[ -n "${unexpected}" ]]; then
@@ -47,10 +49,12 @@ if [[ -n "${unexpected}" ]]; then
   echo "Build with -DOBS_AIRPLAY_STATIC_DEPS=ON (scripts/build-windows-release-deps.sh)." >&2
   exit 1
 fi
-# Exactly what libobs looks up (src/obs-airplay.exports), nothing else.
-exports="$("${OBJDUMP}" -p "${DLL}" |
+# Exactly what libobs looks up (src/obs-airplay.exports), nothing else. Newer
+# binutils print "[  0] +base[  1]  0000 name", older ones "[  0] name".
+exports="$(printf '%s\n' "${dump}" |
   sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' |
-  sed -nE 's/^[[:space:]]*\[ *[0-9]+\] +([A-Za-z_][A-Za-z0-9_]*)$/\1/p' | sort | tr '\n' ' ')"
+  sed -nE 's/^[[:space:]]*\[ *[0-9]+\] +(\+base\[ *[0-9]+\] +[0-9a-f]+ +)?([A-Za-z_][A-Za-z0-9_]*)$/\2/p' |
+  sort | tr '\n' ' ')"
 expected="$(sed 's/^_//' "${ROOT_DIR}/src/obs-airplay.exports" | sort | tr '\n' ' ')"
 if [[ "${exports}" != "${expected}" ]]; then
   echo "error: obs-airplay.dll exports [${exports}], expected [${expected}]" >&2
