@@ -19,16 +19,23 @@ testing (§8).
 CI job `windows` in `.github/workflows/ci.yml` (windows-2022, MSYS2 UCRT64,
 GCC; the macOS jobs are unchanged and stay green):
 
-| Piece | Builds | Tests on the windows-2022 runner |
+| Piece | Builds | Tests on windows-2022 (run 25, bc370f8) |
 |---|---|---|
-| `uxplay/lib` (libairplay, playfair, llhttp) | yes, with `windows/uxplay-patches/0001-*.patch` | `protocol` smoke: see table below |
-| Mirror decoder (`h264-decoder.cpp`) | yes, D3D11VA + software fallback | `decoder`, `decoder-two-au`, `decoder-colorspace` |
-| Audio decoder, re-timer | yes | `unit` |
-| HLS reader, media URL policy | yes | `unit`, `media-url-policy` |
-| AirPlay video player (`media-player.cpp`) | yes | `media-*` (17 playback modes, HTTP(S) servers) |
-| Plugin module `obs-airplay.dll` | yes, linked against OBS 32.0.4's `obs.dll` | export/import check only (not loaded into OBS) |
+| `uxplay/lib` (libairplay, playfair, llhttp) | yes, with `windows/uxplay-patches/0001-*.patch` | `protocol`, `protocol-large-blob`: everything passes **except** FCUP spooling (`blob=failed file=failed`, §2.4) and `body_limits` (§2.6); run as a separate non-gating step |
+| Mirror decoder (`h264-decoder.cpp`) | yes, D3D11VA + software fallback | `decoder`, `decoder-two-au`, `decoder-colorspace`: pass (the D3D11VA path itself is unverified: the runner has no GPU) |
+| Audio decoder, re-timer | yes | `unit`: pass |
+| HLS reader, media URL policy | yes | `unit`, `media-url-policy`, `media-nested-policy`: pass |
+| AirPlay video player (`media-player.cpp`) | yes | all 17 `media-*` playback modes, `media-tls-verify`, `media-resilient-http`: pass |
+| Plugin module `obs-airplay.dll` | yes, linked against OBS 32.0.4's `obs.dll` | exports exactly the seven `obs_module_*`; imports the UCRT (`api-ms-win-crt-*`), system DLLs, `obs.dll` and (CI only) MSYS2's FFmpeg/libcrypto/libplist DLLs. Not loaded into OBS |
 
-<!-- CI-RESULTS -->
+Gating `ctest`: **26/26 pass**. Non-gating protocol step: 2/2 fail at the
+two documented points only; `large_blob_transfer` (96 MB upload, receiver
+stays responsive) passes, and `session_binding` (an IPv6 `::1` peer) passes
+on real Windows although it failed under Wine.
+
+Two harness fixes were needed on Windows and are in the branch: fixture URLs
+are `file:D:/...` (FFmpeg drops `file:`, so `file://D:/x` became the UNC
+path `//D:/x`), and `sha256sum` output for paths with backslashes.
 
 The CI job uploads `obs-airplay.dll` as an artifact (14 days) together with
 its import/export report. It is an unsigned test build linked against
@@ -48,9 +55,8 @@ VideoToolbox swapped out), and the tests were run under Wine 9:
   `http://0x7f.1/` being refused, which exercises the Windows `inet_aton`
   replacement);
 - `protocol`: everything passes except FCUP spooling (expected, §2.4),
-  `session_binding` (its IPv6 `::1` peer got no answer under Wine) and
-  `body_limits` (the over-budget connection saw no 413). The windows-2022
-  results above say which of these are Wine artefacts.
+  `session_binding` (its IPv6 `::1` peer got no answer under Wine; passes
+  on real Windows) and `body_limits` (fails on real Windows too, §2.6).
 
 ## 2. Remaining blockers
 
