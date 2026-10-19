@@ -24,7 +24,8 @@ the fork (§2), are what is left before a release.
 | AirPlay video spooling (Safari `blob:`, sender-local files) | patch 0003, `src/media-url-policy.cpp` | private files in the user's temp folder (`CREATE_NEW`, random name, DACL for the user and SYSTEM); the media policy accepts only such files owned by this user |
 | 413 after an over-budget body | patch 0004 | lingering close: Windows dropped the 413 when the socket closed with unread data |
 | Exports | `.def` from `src/obs-airplay.exports`, patch 0005 | exactly the seven `obs_module_*`; llhttp no longer exports its API (it did: 33 `llhttp_*` symbols, missed by the first scoping report) |
-| macOS-only pieces | `src/airplay-ble-helper-stub.cpp`, `src/airplay-source.cpp` | no BLE helper, no self-updater; "Check for updates" hidden |
+| Bluetooth LE advertiser | `src/windows-ble.cpp`, `src/windows-helper.cpp` | the macOS helper's empty advertisement through WinRT's `BluetoothLEAdvertisementPublisher` (combase.dll loaded at run time), in OBS's process; restarted after the radio returns. Smoke test `windows-ble` checks the declared interface against Windows |
+| Self-updater | `src/windows-update.cpp`, `src/windows-helper.cpp`, `windows/installer/obs-airplay.iss` | daily WinHTTP check of the latest release; the `-windows-x64-setup.exe` must carry GitHub's SHA-256 and a `.sig` by the macOS updater's Ed25519 key (`src/update-trusted-keys.h`, `scripts/sign-release.sh`); prompt (Install / View Release / Later / Skip), never while live; installer started elevated with `/WAITPID`, installs after OBS quits. Test `windows-update` |
 | Receiver thread priority | `src/uxplay-integration.cpp` | the mirror video and audio threads join MMCSS's "Playback" task (macOS: QoS user-interactive) |
 | Portability fixes | `src/media-url-policy.cpp`, `src/uxplay-integration.cpp`, tests | Winsock, `inet_aton` → `RtlIpv4StringToAddressA` (same lenient forms Windows resolves), `localtime_s`, `%zu` → `%llu` |
 | Packaging | `scripts/package-windows.sh`, `windows/installer/obs-airplay.iss` | zip in OBS 30+'s `%ProgramData%\obs-studio\plugins\obs-airplay` layout; Inno Setup installer with a firewall rule for `obs64.exe` (private networks), removed on uninstall; symbols zip; refuses a DLL with unexpected imports or exports |
@@ -52,8 +53,7 @@ unchanged and green.
 | Commit `windows/uxplay-patches/0001`–`0005` to LZlamian/UxPlay, tag, bump the submodule, drop the patch step from CI and the `_WIN32` guard around `dnssd_get_backend` in `src/uxplay-integration.cpp` | 0.5 day | needs push access to the fork (this session had none). Patch 0004 also changes macOS behaviour (for the better: RFC 9112 lingering close); run the macOS tests after the bump |
 | Code signing (Authenticode) for the installer and DLL | cost decision | without it SmartScreen warns |
 | Fixes from the device test pass (§6) | unknown | discovery through the Windows DNS service is the largest unknown |
-| Optional: Windows self-updater (WinHTTP + the existing Ed25519 check via libcrypto; swap the DLL after OBS quits) | 4–6 days | |
-| Optional: Bluetooth LE advertiser (`Windows.Devices.Bluetooth.Advertisement`) | 3–4 days | macOS's "fast discovery"; AirPlay works without it |
+| Device test of the updater (a signed test release) and BLE (a PC with Bluetooth, an iPhone) | 0.5 day | [WINDOWS.md](WINDOWS.md#what-to-test) items 8–9 |
 
 ## 3. Toolchain: MinGW-w64 (MSYS2 UCRT64), not MSVC
 

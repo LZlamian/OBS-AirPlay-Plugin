@@ -159,8 +159,11 @@ The same works on Linux with mingw-w64 (posix threads):
 toolchain file for that compiler.
 
 Differences from macOS, all behind `_WIN32`/`WIN32`: D3D11VA instead of
-VideoToolbox (`src/hw-decode-platform.hpp`); no discovery helper, BLE or
-self-updater (`src/airplay-ble-helper-stub.cpp`); the DLL exports only
+VideoToolbox (`src/hw-decode-platform.hpp`); the BLE advertisement and the
+self-updater run inside OBS (`src/windows-helper.cpp`: WinRT's advertisement
+publisher in `src/windows-ble.cpp`; release rules and signature check in
+`src/windows-update.cpp`; the update is the release's installer, started
+elevated and waiting for OBS to quit); the DLL exports only
 `obs_module_*` through a `.def` made from `src/obs-airplay.exports`, and
 carries its MinGW runtime. UxPlay's Windows changes are the patches in
 `windows/uxplay-patches/` (made with `git format-patch` from a branch on
@@ -195,7 +198,10 @@ behind `_WIN32` until the submodule moves.
    `true` (Settings > Secrets and variables > Actions > Variables), the
    `release-windows` job attaches the tag's Windows packages
    (`obs-airplay-vX.Y.Z-windows-x64.zip`, `-setup.exe`, `-symbols.zip`,
-   `SHA256SUMS-windows`) to the draft after the same approval. Leave it unset
+   `SHA256SUMS-windows`) to the draft after the same approval, and with the
+   signing key secret also `-setup.exe.sig`. The Windows self-updater needs
+   the asset name `obs-airplay-vX.Y.Z-windows-x64-setup.exe`, its `.sig`,
+   and GitHub's published digest. Leave it unset
    until Windows has been tested on devices; the `windows` job still builds
    and uploads the packages as a CI artifact for every push and tag.
 

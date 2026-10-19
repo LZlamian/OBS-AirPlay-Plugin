@@ -73,14 +73,27 @@ profile and ports and reads the OBS log.
 7. **Firewall and network:** with the network set to **Public** devices
    cannot connect (expected); Wi-Fi and Ethernet; a VPN running.
 
+8. **Bluetooth:** with Bluetooth on, the OBS log shows `[BLE] discovery
+   helper Bluetooth state: on`; turn Bluetooth off and on in Windows
+   settings: it logs "off or not supported", then "on" again within about
+   30 s. With no adapter: "unavailable" and nothing else.
+9. **Updates** (needs a signed test release, or wait for the next one):
+   the prompt appears about a minute after OBS starts, never while
+   streaming or recording; **Install** asks for administrator rights,
+   and the update installs after OBS quits. **Later** and **Skip This
+   Version** are remembered (`updater.json` in the plugin's config folder).
+
 Please report each item as works / fails with the OBS log (it names your
 network; read it first), the `diagnose.ps1` output and the Windows build.
 On a crash, OBS writes a crash log; attach it with the matching symbols zip.
 
 ## Known gaps
 
-- No self-updater and no Bluetooth "fast discovery" helper on Windows (both
-  are macOS-only); discovery uses mDNS only.
+- The self-updater and the Bluetooth "fast discovery" advertisement exist on
+  Windows but are untested on real hardware (see below). The log says
+  whether Bluetooth advertising runs (`[BLE] ...`); AirPlay works without it.
+- The self-updater only offers a release that carries a signed
+  `-windows-x64-setup.exe`; there is none yet, so it stays quiet for now.
 - Not code-signed: SmartScreen warns about the installer.
 - `UXPLAY_DNSSD_BACKEND=windows` or `=bonjour` (environment variable, set
   before starting OBS) forces one discovery backend, for testing.
