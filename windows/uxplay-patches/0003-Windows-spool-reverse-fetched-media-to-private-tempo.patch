@@ -1,7 +1,7 @@
 From 9fd3ac35795a940370720bd3165b8ba27a54673c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 11:12:44 +0000
-Subject: [PATCH 3/4] Windows: spool reverse-fetched media to private temporary
+Subject: [PATCH 3/5] Windows: spool reverse-fetched media to private temporary
  files
 
 On Windows spool files are created in the user's temporary folder with

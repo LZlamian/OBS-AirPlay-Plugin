@@ -1,7 +1,7 @@
 From 2a1b3586ebdc9a8a67065b3bfd380d8339d74108 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 11:12:44 +0000
-Subject: [PATCH 2/4] Windows: DNS-SD through the Windows DNS service when
+Subject: [PATCH 2/5] Windows: DNS-SD through the Windows DNS service when
  Bonjour is missing
 
 dnssd_init loads Bonjour's dnssd.dll as before; without it (or with

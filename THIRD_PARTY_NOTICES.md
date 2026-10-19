@@ -51,13 +51,45 @@ without `--enable-gpl` or `--enable-nonfree`, configured with:
 You may replace the FFmpeg libraries in `Contents/Frameworks` with your own
 compatible build; re-sign the bundle afterwards (`codesign --force --deep --sign -`).
 
+## Windows package
+
+The Windows package (`obs-airplay\bin\64bit\obs-airplay.dll`, license
+texts in `obs-airplay\licenses\`) contains the same components, built by
+`scripts/build-windows-release-deps.sh` and linked statically into the DLL:
+FFmpeg 8.1.2 (LGPL-2.1-or-later, without `--enable-gpl` or
+`--enable-nonfree`), OpenSSL 3.6.3's libcrypto and libplist 2.7.0. FFmpeg
+is configured as above with these differences:
+
+```
+--enable-static --disable-shared --enable-w32threads --enable-schannel
+(instead of --enable-openssl) --enable-d3d11va --enable-dxva2
+--enable-hwaccel=h264_d3d11va,hevc_d3d11va,h264_d3d11va2,hevc_d3d11va2,h264_dxva2,hevc_dxva2
+(instead of VideoToolbox)
+```
+
+To use your own compatible FFmpeg build, build the release dependencies
+with it and relink the DLL from this source (see `docs/DEVELOPMENT.md`).
+
+It also contains the MinGW-w64 toolchain's runtime, linked statically:
+
+| Component | License | Text |
+|---|---|---|
+| MinGW-w64 runtime (C runtime startup and support code) | ZPL-2.1 and others | `mingw-w64-runtime.txt` |
+| winpthreads (MinGW-w64) | MIT; parts BSD-3-Clause | `mingw-w64-winpthreads.txt` |
+| libgcc, libstdc++ (GCC) | GPL-3.0 with the GCC Runtime Library Exception | `GPL-3.0.txt` |
+
+Bonjour (`dnssd.dll`) is not shipped: when it is installed the plugin uses
+it; otherwise it uses the Windows DNS service. Apple's `dns_sd.h` is used
+only at build time.
+
 ## Not shipped
 
 - **libobs** (OBS Studio, GPL-2.0-or-later) is linked dynamically from the
   user's OBS installation. Headers from OBS Studio are kept in `obs-headers/`
   for building only.
 - Apple system frameworks (Foundation, AppKit, CoreBluetooth, CryptoKit,
-  VideoToolbox) are part of macOS.
+  VideoToolbox) are part of macOS; Windows system libraries (Winsock,
+  Schannel, D3D11, the DNS service API) are part of Windows.
 
 Individual source files keep the copyright and license notices of their
 authors. This file is a summary and does not replace any license text.

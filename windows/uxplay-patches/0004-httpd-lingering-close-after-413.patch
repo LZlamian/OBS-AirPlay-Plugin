@@ -1,7 +1,7 @@
 From 24e4d17e678d255b31da107af7f76df287d2606c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 11:12:44 +0000
-Subject: [PATCH 4/4] httpd: lingering close after 413
+Subject: [PATCH 4/5] httpd: lingering close after 413
 
 The 413 for a body over its limit was sent and the socket closed with the
 rest of the body unread, so TCP answered the peer with a reset; Windows

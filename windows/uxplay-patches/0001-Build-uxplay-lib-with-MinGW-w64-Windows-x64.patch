@@ -1,7 +1,7 @@
 From 68697b6a96d8db9246b9311571d6a050ca9e0041 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Mon, 19 Oct 2026 11:12:28 +0000
-Subject: [PATCH 1/4] Build uxplay/lib with MinGW-w64 (Windows x64)
+Subject: [PATCH 1/5] Build uxplay/lib with MinGW-w64 (Windows x64)
 
 - media_url_policy.h: Winsock headers; inet_aton from Windows' own lenient
   IPv4 parser (RtlIpv4StringToAddressA, Strict=FALSE), which takes the

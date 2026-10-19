@@ -129,6 +129,45 @@ callbacks the plugin relies on that upstream does not use (`conn_teardown`,
 called without a NULL check, asserts on request paths, and the shape of
 `httpd_thread` (the fork's staged first read and dead-connection sweep).
 
+## Windows
+
+Windows x64 is built with MinGW-w64 in MSYS2's UCRT64 environment (the C
+runtime OBS itself uses); why not MSVC is in
+[WINDOWS_PORT_SCOPE.md](WINDOWS_PORT_SCOPE.md), testing in
+[WINDOWS.md](WINDOWS.md). In an MSYS2 UCRT64 shell:
+
+```bash
+pacman -S git make perl unzip mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,nasm,pkgconf,python,ffmpeg}
+for p in windows/uxplay-patches/*.patch; do git -C uxplay apply "../$p"; done
+scripts/build-windows-release-deps.sh          # once; ~/.cache/obs-airplay-release-deps
+scripts/windows-bonjour-sdk.sh "$HOME/bonjour-sdk"
+# obs.dll: bin/64bit/obs.dll from the OBS Studio 32.0.4 Windows zip
+deps="$HOME/.cache/obs-airplay-release-deps/windows-x64"
+BONJOUR_SDK_HOME="$HOME/bonjour-sdk" PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" \
+  cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+  -DOBS_AIRPLAY_STATIC_DEPS=ON -DOPENSSL_ROOT_DIR="$deps" -DOBS_LIBOBS=/path/to/obs.dll
+cmake --build build-windows && ctest --test-dir build-windows
+scripts/package-windows.sh                     # dist/: zip, setup.exe (Inno Setup 6), symbols
+```
+
+(`mingw-w64-ucrt-x86_64-ffmpeg` is only for the `ffmpeg` tool that makes the
+test media; the build links the static FFmpeg from the deps script.)
+The same works on Linux with mingw-w64 (posix threads):
+`OBS_AIRPLAY_CROSS=x86_64-w64-mingw32` for both scripts and a CMake
+toolchain file for that compiler.
+
+Differences from macOS, all behind `_WIN32`/`WIN32`: D3D11VA instead of
+VideoToolbox (`src/hw-decode-platform.hpp`); no discovery helper, BLE or
+self-updater (`src/airplay-ble-helper-stub.cpp`); the DLL exports only
+`obs_module_*` through a `.def` made from `src/obs-airplay.exports`, and
+carries its MinGW runtime. UxPlay's Windows changes are the patches in
+`windows/uxplay-patches/` (made with `git format-patch` from a branch on
+the pinned commit), applied by CI until they are committed to the fork:
+build fixes, DNS-SD through the Windows DNS service when Bonjour is missing,
+private spool files, a lingering close after 413, no llhttp exports. The
+macOS build does not apply them, so plugin code that needs them stays
+behind `_WIN32` until the submodule moves.
+
 ## Releasing
 
 1. Set the version in `CMakeLists.txt` (`project(obs-airplay VERSION X.Y.Z)`);
@@ -150,6 +189,13 @@ called without a NULL check, asserts on request paths, and the shape of
    entry (`ditto -c -k --keepParent`), bundle version equal to the tag, an
    intact code seal, the `.sig` next to it, and GitHub's published digest.
    Do not replace assets of a published release: bump the version instead.
+6. Windows: with the repository variable `OBS_AIRPLAY_RELEASE_WINDOWS` set to
+   `true` (Settings > Secrets and variables > Actions > Variables), the
+   `release-windows` job attaches the tag's Windows packages
+   (`obs-airplay-vX.Y.Z-windows-x64.zip`, `-setup.exe`, `-symbols.zip`,
+   `SHA256SUMS-windows`) to the draft after the same approval. Leave it unset
+   until Windows has been tested on devices; the `windows` job still builds
+   and uploads the packages as a CI artifact for every push and tag.
 
 The release signing key's public half is in `kTrustedUpdateKeys`
 (`src/plugin-updater.mm`). To rotate it, ship one release signed by the old

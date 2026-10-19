@@ -133,15 +133,23 @@ jobs:
           temp="$(cygpath -m "$RUNNER_TEMP")"
           echo "DEPS=$temp/obs-airplay-deps" >> "$GITHUB_ENV"
           echo "TEMP_M=$temp" >> "$GITHUB_ENV"
+      # Restore and save separately: saved as soon as it is built, even if a
+      # later step fails.
       - name: Release dependencies (cached by the script's content)
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/obs-airplay-deps
           key: windows-release-deps-${{ hashFiles('scripts/build-windows-release-deps.sh') }}
       - name: Build release dependencies
         if: steps.deps.outputs.cache-hit != 'true'
         run: OBS_AIRPLAY_DEPS_PREFIX="$DEPS" scripts/build-windows-release-deps.sh
+      - name: Save release dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/obs-airplay-deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
       - name: Bonjour SDK files (dns_sd.h and an import library)
         run: scripts/windows-bonjour-sdk.sh "$TEMP_M/bonjour-sdk"
       - name: OBS Studio release (obs.dll to link against)
@@ -180,12 +188,35 @@ jobs:
         env:
           OBS_AIRPLAY_TIMING_SCALE: "3"
         run: ctest --test-dir build-windows --output-on-failure -j2
+      - name: diagnose.ps1 parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/diagnose.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host "::error::$_" }; exit 1 }
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Package (zip, installer, symbols)
+        env:
+          OBS_AIRPLAY_BUILD_DIR: build-windows
+          OBS_AIRPLAY_DIST_DIR: dist
+          # on a tag, the package must carry the tagged version
+          OBS_AIRPLAY_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: scripts/package-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-airplay-windows-x64
+          path: dist/*
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: obs-airplay-windows-x64-unsigned-ci-build
+          name: obs-airplay-windows-x64-test-logs
           path: |
-            build-windows/obs-airplay.dll
             build-windows/dll-report.txt
             build-windows/Testing/Temporary/LastTest.log
           retention-days: 14
@@ -248,3 +279,33 @@ jobs:
           gh release create "${{ github.ref_name }}" --draft --verify-tag \
             --title "OBS AirPlay ${{ github.ref_name }}" --notes-file "$notes" \
             /Users/runner/obs-airplay-dist/*
+
+  # The Windows packages the windows job built and tested, added to the draft
+  # release the macOS job made. Waits for the same approval. Off until the
+  # repository variable OBS_AIRPLAY_RELEASE_WINDOWS is "true" (docs/WINDOWS.md).
+  release-windows:
+    if: startsWith(github.ref, 'refs/tags/v') && vars.OBS_AIRPLAY_RELEASE_WINDOWS == 'true'
+    needs: [windows, release]
+    runs-on: ubuntu-latest
+    environment: release   # requires a maintainer's approval
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: obs-airplay-windows-x64
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS-windows
+      - name: Attach to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Only a draft is changed; a release published by hand is left alone.
+          draft="$(gh release view "${{ github.ref_name }}" --json isDraft --jq .isDraft)"
+          if [ "$draft" != "true" ]; then
+            echo "release ${{ github.ref_name }} is not a draft; not attaching Windows files"
+            exit 0
+          fi
+          gh release upload "${{ github.ref_name }}" dist/*

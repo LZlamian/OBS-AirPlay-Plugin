@@ -49,6 +49,9 @@ Receiver** also uses port 7000: if devices cannot connect, turn it off in
 allow incoming connections for OBS when asked (or in **System Settings >
 Network > Firewall > Options**); you do not need to turn the firewall off.
 
+**Windows:** a Windows x64 build is in preview (built and tested in CI, not
+yet tried with real devices, not released): see [docs/WINDOWS.md](docs/WINDOWS.md).
+
 ## Installation
 
 ### Before you begin
