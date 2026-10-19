@@ -30,6 +30,16 @@ if [[ -n "${OBS_AIRPLAY_RELEASE_TAG:-}" && "${OBS_AIRPLAY_RELEASE_TAG#v}" != "${
 fi
 BASENAME="obs-airplay-v${VERSION}-windows-x64"
 
+# Absolute: Inno Setup resolves relative paths against the .iss file.
+if [[ ! -d "${BUILD_DIR}" ]]; then
+  echo "error: build directory ${BUILD_DIR} not found" >&2
+  exit 1
+fi
+BUILD_DIR="$(cd "${BUILD_DIR}" && pwd)"
+STAGE_DIR="${BUILD_DIR}/package"
+mkdir -p "${DIST_DIR}"
+DIST_DIR="$(cd "${DIST_DIR}" && pwd)"
+
 DLL="${BUILD_DIR}/obs-airplay.dll"
 if [[ ! -f "${DLL}" ]]; then
   echo "error: ${DLL} not found; build first" >&2
