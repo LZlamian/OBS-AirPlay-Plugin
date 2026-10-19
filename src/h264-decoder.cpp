@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "h264-decoder.hpp"
 #include "hardware-decode-option.hpp"
+#include "hw-decode-platform.hpp"
 #include "video-warmup-data.h"
 #include <obs-module.h>
 #include <util/platform.h>
@@ -135,10 +136,10 @@ H264Decoder::H264Decoder(AVCodecID codec_id, Mode mode)
     if (!reopen()) {
         return;
     }
-    blog(LOG_INFO, "Video decoder initialized for codec id %d (%s)",
+    blog(LOG_INFO, "Video decoder initialized for codec id %d (%s%s)",
          static_cast<int>(codec_id),
-         m_hardware_open ? "VideoToolbox hardware decoding, software fallback"
-                         : "software decoding");
+         m_hardware_open ? kHardwareDecoderName : "software",
+         m_hardware_open ? " hardware decoding, software fallback" : " decoding");
 }
 
 H264Decoder::~H264Decoder()
@@ -160,7 +161,7 @@ enum AVPixelFormat H264Decoder::chooseFormat(AVCodecContext* context,
     auto* self = static_cast<H264Decoder*>(context->opaque);
     const enum AVPixelFormat* software = nullptr;
     for (const enum AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format) {
-        if (*format == AV_PIX_FMT_VIDEOTOOLBOX && self && self->m_hardware_open) {
+        if (*format == kHardwarePixelFormat && self && self->m_hardware_open) {
             return *format;
         }
         const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(*format);
@@ -208,8 +209,8 @@ bool H264Decoder::open(bool allow_hardware)
     m_hardware_refused = false;
     if (allow_hardware) {
         // Fails (and leaves software decoding) when the linked FFmpeg was
-        // built without VideoToolbox.
-        const int result = av_hwdevice_ctx_create(&m_hw_device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        // built without the platform's hardware decoder.
+        const int result = av_hwdevice_ctx_create(&m_hw_device, kHardwareDeviceType,
                                                   nullptr, nullptr, 0);
         if (result >= 0 && m_hw_device) {
             m_codec_context->hw_device_ctx = av_buffer_ref(m_hw_device);
@@ -218,8 +219,8 @@ bool H264Decoder::open(bool allow_hardware)
             m_codec_context->thread_count = 1;
             m_hardware_open = m_codec_context->hw_device_ctx != nullptr;
         } else {
-            blog(LOG_INFO, "VideoToolbox hardware decoding unavailable (%d); using software",
-                 result);
+            blog(LOG_INFO, "%s hardware decoding unavailable (%d); using software",
+                 kHardwareDecoderName, result);
         }
     }
 
@@ -426,8 +427,9 @@ void H264Decoder::noteMode(bool hardware, int width, int height, bool nv12, bool
     m_logged_width = width;
     m_logged_height = height;
     m_logged_full_range = full_range;
-    blog(LOG_INFO, "[DECODE] mirror video %dx%d: %s (%s, %s range)", width, height,
-         hardware ? "VideoToolbox hardware decoding" : "software decoding",
+    blog(LOG_INFO, "[DECODE] mirror video %dx%d: %s%s (%s, %s range)", width, height,
+         hardware ? kHardwareDecoderName : "software",
+         hardware ? " hardware decoding" : " decoding",
          nv12 ? "NV12" : "I420", full_range ? "full" : "video");
 }
 
@@ -574,7 +576,7 @@ bool H264Decoder::collectFrames(int* error)
 // Hands the picture in m_frame to the caller.
 bool H264Decoder::produceFrame(DecodedVideoFrame& out_frame, int* error)
 {
-    const bool hardware = m_frame->format == AV_PIX_FMT_VIDEOTOOLBOX;
+    const bool hardware = m_frame->format == kHardwarePixelFormat;
     const bool produced = hardware ? outputHardwareFrame(out_frame)
                                    : outputSoftwareFrame(m_frame, out_frame);
     if (!produced) {

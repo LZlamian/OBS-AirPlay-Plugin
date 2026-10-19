@@ -87,6 +87,86 @@ jobs:
           cmake --build --preset asan -j4
           ctest --preset asan -j2 -R 'protocol|media-'
 
+  # Windows x64 port in progress (docs/WINDOWS_PORT_SCOPE.md): MinGW-w64
+  # (MSYS2 UCRT64) builds UxPlay, the receiver core and the plugin DLL
+  # against obs.dll from the OBS Studio release the vendored headers match,
+  # and runs the tests that do not need macOS. Not part of any release.
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      OBS_WINDOWS_VERSION: "32.0.4"   # obs-headers/PROVENANCE.md
+      OBS_WINDOWS_SHA256: fd367a7f156319426f1a600720c1288ad0011da168dff41e0f94dbb18cc1dc0f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            git
+            patch
+            unzip
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libplist
+            mingw-w64-ucrt-x86_64-python
+      - name: UxPlay changes for Windows (to be moved into the fork)
+        run: |
+          for patch in windows/uxplay-patches/*.patch; do
+            [ -e "$patch" ] || continue
+            echo "applying $patch"
+            git -C uxplay apply --verbose "../$patch"
+          done
+      - name: Bonjour SDK files (dns_sd.h and an import library)
+        run: scripts/windows-bonjour-sdk.sh "$RUNNER_TEMP/bonjour-sdk"
+      - name: OBS Studio release (obs.dll to link against)
+        id: obs
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/obs-studio
+          key: obs-windows-${{ env.OBS_WINDOWS_VERSION }}
+      - name: Download OBS Studio
+        if: steps.obs.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/obs-studio"
+          cd "$RUNNER_TEMP/obs-studio"
+          curl -L --fail --retry 3 -o obs.zip \
+            "https://github.com/obsproject/obs-studio/releases/download/${OBS_WINDOWS_VERSION}/OBS-Studio-${OBS_WINDOWS_VERSION}-Windows-x64.zip"
+          echo "${OBS_WINDOWS_SHA256}  obs.zip" | sha256sum -c -
+          unzip -q -o obs.zip 'bin/64bit/*' && rm obs.zip
+      - name: Configure
+        run: |
+          BONJOUR_SDK_HOME="$RUNNER_TEMP/bonjour-sdk" cmake -S . -B build-windows -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DOBS_LIBOBS="$RUNNER_TEMP/obs-studio/bin/64bit/obs.dll"
+      - name: Build
+        run: cmake --build build-windows -j4
+      - name: Plugin DLL imports and exports
+        run: |
+          objdump -p build-windows/obs-airplay.dll | grep -E 'DLL Name|^\s+\[ *[0-9]+\]' | tee build-windows/dll-report.txt
+      - name: Test
+        env:
+          OBS_AIRPLAY_TIMING_SCALE: "3"
+        run: ctest --test-dir build-windows --output-on-failure -j2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: obs-airplay-windows-x64-unsigned-ci-build
+          path: |
+            build-windows/obs-airplay.dll
+            build-windows/dll-report.txt
+            build-windows/Testing/Temporary/LastTest.log
+          retention-days: 14
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [lint, build-test, sanitizers]

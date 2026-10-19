@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "media-url-policy.hpp"
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mstcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +30,21 @@ std::atomic<bool> g_local_files_for_testing{false};
 std::atomic<bool> g_sender_only{false};
 
 constexpr const char* kNotSender = "host is not the sending device (only the sending device is allowed)";
+
+#if defined(_WIN32)
+// Windows has no inet_aton. Its own lenient IPv4 parser (what its resolver
+// uses for numeric hosts) takes the same short, octal and hex forms.
+int inet_aton(const char* text, in_addr* address)
+{
+#if defined(__MINGW32__)
+    LPSTR end = nullptr;
+#else
+    PCSTR end = nullptr;
+#endif
+    return RtlIpv4StringToAddressA(text, FALSE, &end, address) == 0 && end && *end == '\0'
+        ? 1 : 0;
+}
+#endif
 
 struct UrlParts {
     std::string host; // lower case, no brackets or IPv6 zone
@@ -151,6 +172,15 @@ std::string checkHost(const std::string& host)
     if (inet_aton(host.c_str(), &v4) == 1) return classifyIpv4(ntohl(v4.s_addr));
     if (isLocalhostName(host) && !g_loopback_for_testing) return "loopback host";
 
+#if defined(_WIN32)
+    // getaddrinfo fails before Winsock is started (the receiver starts it,
+    // a test may not); a failed lookup would let the URL through.
+    static const bool winsock_started = [] {
+        WSADATA data;
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    (void)winsock_started;
+#endif
     addrinfo hints = {};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -297,12 +327,17 @@ std::string checkLocalFile(const std::string& location)
     }
     const std::string name = location.substr(location.rfind('/') + 1);
     if (name.rfind("obs-airplay-fcup-", 0) != 0) return "not a receiver spool file";
+#if defined(_WIN32)
+    // UxPlay does not spool on Windows yet (no owner check to match).
+    return "spool files are not supported on Windows";
+#else
     struct stat info = {};
     if (lstat(location.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
         info.st_uid != getuid()) {
         return "spool file is not a regular file owned by this user";
     }
     return "";
+#endif
 }
 
 } // namespace media_url_policy

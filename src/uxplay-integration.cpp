@@ -945,7 +945,12 @@ void UxPlayIntegration::recordRefusal(const std::string& reason)
     char when[16] = "";
     const time_t now = time(nullptr);
     struct tm local = {};
-    if (localtime_r(&now, &local)) strftime(when, sizeof(when), "%H:%M:%S", &local);
+#if defined(_WIN32)
+    const bool have_time = localtime_s(&local, &now) == 0;
+#else
+    const bool have_time = localtime_r(&now, &local) != nullptr;
+#endif
+    if (have_time) strftime(when, sizeof(when), "%H:%M:%S", &local);
     std::function<void()> callback;
     {
         std::lock_guard<std::mutex> lock(m_status_mutex);

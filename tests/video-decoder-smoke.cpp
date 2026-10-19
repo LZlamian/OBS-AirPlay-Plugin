@@ -26,7 +26,11 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/resource.h>
+#endif
 #include <vector>
 
 extern "C" {
@@ -128,10 +132,19 @@ Picture copyPicture(const DecodedVideoFrame& frame, bool hardware)
 // CPU time used by this process so far (all threads), in milliseconds.
 double processCpuMs()
 {
+#if defined(_WIN32)
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+    const auto ticks = [](const FILETIME& time) {  // 100 ns units
+        return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
+    return (ticks(kernel) + ticks(user)) / 10000.0;
+#else
     struct rusage usage {};
     getrusage(RUSAGE_SELF, &usage);
     return (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000.0 +
            (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1000.0;
+#endif
 }
 
 // Decodes a stream without keeping pictures and returns CPU ms per frame.

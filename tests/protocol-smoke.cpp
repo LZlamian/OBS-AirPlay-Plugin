@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -27,6 +32,34 @@ extern "C" {
 }
 
 namespace {
+
+#if defined(_WIN32)
+// Winsock sockets are handles, closed with closesocket(); the receiver
+// (raop_init) has started Winsock.
+void closeSocket(int fd) { closesocket(static_cast<SOCKET>(fd)); }
+void setTimeout(int fd, int option, int ms)
+{
+    const DWORD timeout = static_cast<DWORD>(ms);
+    setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, option,
+               reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+}
+void setIntOption(int fd, int option, int value)
+{
+    setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, option,
+               reinterpret_cast<const char*>(&value), sizeof(value));
+}
+#else
+void closeSocket(int fd) { close(fd); }
+void setTimeout(int fd, int option, int ms)
+{
+    timeval timeout = {ms / 1000, (ms % 1000) * 1000};
+    setsockopt(fd, SOL_SOCKET, option, &timeout, sizeof(timeout));
+}
+void setIntOption(int fd, int option, int value)
+{
+    setsockopt(fd, SOL_SOCKET, option, &value, sizeof(value));
+}
+#endif
 
 void receiverLog(void*, int level, const char* message)
 {
@@ -152,11 +185,10 @@ int connectLocal(unsigned short port)
     address.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
     if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-        close(fd);
+        closeSocket(fd);
         return -1;
     }
-    timeval timeout = {10, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setTimeout(fd, SO_RCVTIMEO, 10000);
     return fd;
 }
 
@@ -170,11 +202,10 @@ int connectLocal6(unsigned short port)
     address.sin6_port = htons(port);
     address.sin6_addr = in6addr_loopback;
     if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-        close(fd);
+        closeSocket(fd);
         return -1;
     }
-    timeval timeout = {10, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setTimeout(fd, SO_RCVTIMEO, 10000);
     return fd;
 }
 
@@ -182,7 +213,7 @@ bool sendAll(int fd, const void* data, size_t size)
 {
     const auto* bytes = static_cast<const char*>(data);
     while (size > 0) {
-        const ssize_t sent = send(fd, bytes, size, 0);
+        const ssize_t sent = send(fd, bytes, static_cast<int>(std::min<size_t>(size, 1 << 20)), 0);
         if (sent <= 0) return false;
         bytes += sent;
         size -= static_cast<size_t>(sent);
@@ -213,11 +244,11 @@ std::string httpExchange(unsigned short port, const std::string& request)
 {
     const int fd = connectLocal(port);
     if (fd < 0 || !sendAll(fd, request.data(), request.size())) {
-        if (fd >= 0) close(fd);
+        if (fd >= 0) closeSocket(fd);
         return {};
     }
     const std::string response = receiveResponse(fd);
-    close(fd);
+    closeSocket(fd);
     return response;
 }
 
@@ -240,7 +271,7 @@ std::string binaryPlistExchange(unsigned short port, const char* path,
         sendAll(fd, body, body_size);
     free(body);
     const std::string response = sent ? receiveResponse(fd) : std::string();
-    if (fd >= 0) close(fd);
+    if (fd >= 0) closeSocket(fd);
     return response;
 }
 
@@ -254,7 +285,9 @@ int main(int argc, char** argv)
         return 2;
     }
     // A peer the receiver drops must fail the test, not kill it.
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
     TestState state;
     raop_callbacks_t callbacks = {};
     callbacks.cls = &state;
@@ -396,7 +429,7 @@ int main(int argc, char** argv)
     free(stateless_body);
     const std::string stateless_response = stateless_sent
         ? receiveResponse(stateless_fd) : std::string();
-    if (stateless_fd >= 0) close(stateless_fd);
+    if (stateless_fd >= 0) closeSocket(stateless_fd);
 
     const std::string classic_body =
         "Content-Location: https://example.test/classic.mp4\r\n"
@@ -445,7 +478,7 @@ int main(int argc, char** argv)
         missing_fd >= 0 && sendAll(missing_fd, after_reject_request.data(),
                                    after_reject_request.size())
         ? receiveResponse(missing_fd) : std::string();
-    if (missing_fd >= 0) close(missing_fd);
+    if (missing_fd >= 0) closeSocket(missing_fd);
 
     // Reproduce the device ordering: a stateful sender-local /play can arrive
     // before the sender upgrades the reverse channel. The receiver must retain
@@ -583,7 +616,7 @@ int main(int argc, char** argv)
             usleep(10000);
         }
         if (sent) blob_action_response = receiveResponse(fd);
-        if (fd >= 0) close(fd);
+        if (fd >= 0) closeSocket(fd);
         const double reply_at_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - upload_started).count();
         const auto spool_started = std::chrono::steady_clock::now();
@@ -688,7 +721,7 @@ int main(int argc, char** argv)
     free(selected_body);
     const std::string selected_response = selected_sent
         ? receiveResponse(selected_fd) : std::string();
-    if (selected_fd >= 0) close(selected_fd);
+    if (selected_fd >= 0) closeSocket(selected_fd);
 
     plist_t empty_action = plist_new_dict();
     const std::string action_without_session =
@@ -1015,7 +1048,7 @@ int main(int argc, char** argv)
         std::lock_guard<std::mutex> lock(state.mutex);
         stops_before_close = state.stop_count;
     }
-    if (play_fd >= 0) close(play_fd);
+    if (play_fd >= 0) closeSocket(play_fd);
     int stops_after_close = stops_before_close;
     for (int i = 0; i < 40 && stops_after_close == stops_before_close; ++i) {
         usleep(50000);
@@ -1024,7 +1057,7 @@ int main(int argc, char** argv)
     }
     const bool close_stops = stops_after_close == stops_before_close + 1;
     std::printf("close_without_stop=%s\n", close_stops ? "stopped" : "FAILED");
-    if (reverse_fd >= 0) close(reverse_fd);
+    if (reverse_fd >= 0) closeSocket(reverse_fd);
 
     const std::string info_request = "GET /info RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n";
 
@@ -1087,16 +1120,15 @@ int main(int argc, char** argv)
     std::string stalled_info_response;
     const int info_fd = connectLocal(port);
     if (info_fd >= 0) {
-        timeval info_timeout = {3, 0};
-        setsockopt(info_fd, SOL_SOCKET, SO_RCVTIMEO, &info_timeout, sizeof(info_timeout));
+        setTimeout(info_fd, SO_RCVTIMEO, 3000);
         if (sendAll(info_fd, info_request.data(), info_request.size())) {
             stalled_info_response = receiveResponse(info_fd);
         }
-        close(info_fd);
+        closeSocket(info_fd);
     }
     const auto info_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - info_started).count();
-    if (stalled_fd >= 0) close(stalled_fd);
+    if (stalled_fd >= 0) closeSocket(stalled_fd);
     const bool stall_ok = stalled_sent &&
         stalled_info_response.find("200 OK") != std::string::npos && info_ms < 2000;
     std::printf("one_byte_stall=%s info_ms=%lld\n", stall_ok ? "not-blocking" : "FAILED",
@@ -1225,7 +1257,7 @@ int main(int argc, char** argv)
         const int fd = connectLocal6(port);
         std::string response;
         if (fd >= 0 && sendAll(fd, request.data(), request.size())) response = receiveResponse(fd);
-        if (fd >= 0) close(fd);
+        if (fd >= 0) closeSocket(fd);
         return response;
     };
     // The owner keeps its AirPlay connection open, as a sender does.
@@ -1272,7 +1304,7 @@ int main(int argc, char** argv)
         if (owner_fd >= 0 && sendAll(owner_fd, request.data(), request.size())) {
             owner_stop = receiveResponse(owner_fd);
         }
-        if (owner_fd >= 0) close(owner_fd);
+        if (owner_fd >= 0) closeSocket(owner_fd);
         usleep(100000);
     }
     // With the session over, any peer may control again.
@@ -1319,12 +1351,11 @@ int main(int argc, char** argv)
     // Only the connection that went over the budget has been answered.
     for (int i = 0; i < 3; ++i) {
         if (held[i] < 0) continue;
-        timeval quick = {0, 300000};
-        setsockopt(held[i], SOL_SOCKET, SO_RCVTIMEO, &quick, sizeof(quick));
+        setTimeout(held[i], SO_RCVTIMEO, 300);
         held_response[i] = receiveResponse(held[i]);
     }
     for (int& fd : held) {
-        if (fd >= 0) close(fd);
+        if (fd >= 0) closeSocket(fd);
     }
     usleep(300000);
     // With the held bodies gone, the budget is free again.
@@ -1337,7 +1368,7 @@ int main(int argc, char** argv)
             sendAll(fd, body.data(), body.size())) {
             released_response = receiveResponse(fd);
         }
-        if (fd >= 0) close(fd);
+        if (fd >= 0) closeSocket(fd);
     }
     raop_set_plist(raop, "max_inflight_body_mib", 256);
     const bool budget_ok = held_response[0].empty() && held_response[1].empty() &&
@@ -1358,18 +1389,17 @@ int main(int argc, char** argv)
     long long nonreader_ms = 0;
     {
         const int flood_fd = socket(AF_INET, SOCK_STREAM, 0);
-        int small = 1024;
-        setsockopt(flood_fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+        setIntOption(flood_fd, SO_RCVBUF, 1024);
         sockaddr_in address = {};
         address.sin_family = AF_INET;
         address.sin_port = htons(port);
         inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
         int flooded = 0;
         if (connect(flood_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
-            timeval send_timeout = {0, 200000};
-            setsockopt(flood_fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
-            int nosigpipe = 1;
-            setsockopt(flood_fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+            setTimeout(flood_fd, SO_SNDTIMEO, 200);
+#ifdef SO_NOSIGPIPE
+            setIntOption(flood_fd, SO_NOSIGPIPE, 1);
+#endif
             // ~1.5 KB per /info response; well past the socket buffers.
             for (int i = 0; i < 1500; ++i) {
                 if (!sendAll(flood_fd, info_request.data(), info_request.size())) break;
@@ -1381,14 +1411,13 @@ int main(int argc, char** argv)
         std::string response;
         const int fd = connectLocal(port);
         if (fd >= 0) {
-            timeval timeout = {6, 0};
-            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            setTimeout(fd, SO_RCVTIMEO, 6000);
             if (sendAll(fd, info_request.data(), info_request.size())) response = receiveResponse(fd);
-            close(fd);
+            closeSocket(fd);
         }
         nonreader_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started).count();
-        close(flood_fd);
+        closeSocket(flood_fd);
         nonreader_ok = flooded > 0 && response.find("200 OK") != std::string::npos;
         std::printf("non_reading_peer=%s requests=%d info_ms=%lld\n",
                     nonreader_ok ? "dropped" : "FAILED", flooded, nonreader_ms);

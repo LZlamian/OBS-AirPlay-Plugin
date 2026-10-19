@@ -144,6 +144,22 @@ if(APPLE)
     message(STATUS "OBS Headers: ${OBS_INCLUDE_DIR}")
     message(STATUS "OBS Library: ${LIBOBS_LIB}")
     message(STATUS "========================")
+elseif(WIN32)
+    # Windows x64, built with MinGW-w64 (MSYS2 UCRT64): see
+    # docs/WINDOWS_PORT_SCOPE.md. The headers are the vendored ones; libobs
+    # is obs.dll from an OBS Studio release (bin/64bit), which GNU ld links
+    # directly, or an import library for it. Without it only UxPlay and the
+    # tests are built.
+    set(OBS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/obs-headers/libobs")
+    include_directories("${CMAKE_SOURCE_DIR}/obs-headers/simde")
+    set(OBS_LIBOBS "" CACHE FILEPATH
+        "obs.dll (OBS Studio bin/64bit) or an import library for it")
+    if(OBS_LIBOBS)
+        set(LIBOBS_LIB "${OBS_LIBOBS}")
+        message(STATUS "OBS Library: ${LIBOBS_LIB}")
+    else()
+        message(WARNING "OBS_LIBOBS is not set: the plugin module is not built")
+    endif()
 endif()
 
 # Find required libraries
@@ -169,10 +185,29 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/uxplay/lib/CMakeLists.txt")
 endif()
 add_subdirectory(uxplay/lib)
 
+if(WIN32)
+    # Everything built here carries its MinGW runtime (OBS ships no
+    # libstdc++, libgcc or libwinpthread DLL): UxPlay's "pthread" becomes
+    # the static winpthread, and the compiler driver's own trailing
+    # libraries are taken static (system DLLs only have import libraries).
+    foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+        get_target_property(airplay_libs airplay ${property})
+        if(airplay_libs)
+            list(TRANSFORM airplay_libs REPLACE "^pthread$" "-l:libwinpthread.a")
+            list(TRANSFORM airplay_libs REPLACE "^\\$<LINK_ONLY:pthread>$"
+                 "$<LINK_ONLY:-l:libwinpthread.a>")
+            set_property(TARGET airplay PROPERTY ${property} "${airplay_libs}")
+        endif()
+    endforeach()
+    foreach(language C CXX)
+        string(APPEND CMAKE_${language}_STANDARD_LIBRARIES " -static-libgcc -Wl,-Bstatic")
+    endforeach()
+    add_link_options($<$<LINK_LANGUAGE:CXX>:-static-libstdc++>)
+endif()
+
 # Plugin source files
 set(obs-airplay_SOURCES
     src/plugin-main.cpp
-    src/airplay-ble-helper.cpp
     src/airplay-source.cpp
     src/airplay-server.cpp
     src/uxplay-integration.cpp
@@ -195,6 +230,21 @@ set(obs-airplay_HEADERS
     src/media-player.hpp
 )
 
+# The discovery helper (Bluetooth LE advertisement, self-updater) exists
+# only on macOS.
+if(APPLE)
+    list(APPEND obs-airplay_SOURCES src/airplay-ble-helper.cpp)
+else()
+    list(APPEND obs-airplay_SOURCES src/airplay-ble-helper-stub.cpp)
+endif()
+
+if(WIN32)
+    # UxPlay's sockets need Winsock; FFmpeg's D3D11VA and OpenSSL need these
+    # system libraries when linked statically.
+    set(OBS_AIRPLAY_WIN32_LIBS ws2_32 iphlpapi ntdll bcrypt crypt32 ole32 user32 advapi32)
+endif()
+
+if(LIBOBS_LIB)
 # Create the plugin library
 add_library(obs-airplay MODULE
     ${obs-airplay_SOURCES}
@@ -228,6 +278,26 @@ target_link_libraries(obs-airplay PRIVATE
 target_link_directories(obs-airplay PRIVATE
     ${FFMPEG_LIBRARY_DIRS}
 )
+endif()
+
+if(WIN32 AND TARGET obs-airplay)
+    target_include_directories(obs-airplay PRIVATE ${OBS_INCLUDE_DIR})
+    # Export only what libobs looks up (obs_module_*), as on macOS: with
+    # MinGW, OBS's EXPORT macro does not mark anything dllexport, and GNU
+    # ld would otherwise export every symbol, the static UxPlay, OpenSSL
+    # and FFmpeg ones included.
+    file(STRINGS "${CMAKE_SOURCE_DIR}/src/obs-airplay.exports" OBS_AIRPLAY_EXPORTS)
+    set(OBS_AIRPLAY_DEF "LIBRARY obs-airplay\nEXPORTS\n")
+    foreach(symbol ${OBS_AIRPLAY_EXPORTS})
+        string(REGEX REPLACE "^_" "" symbol "${symbol}")
+        string(APPEND OBS_AIRPLAY_DEF "    ${symbol}\n")
+    endforeach()
+    file(WRITE "${CMAKE_BINARY_DIR}/obs-airplay.def" "${OBS_AIRPLAY_DEF}")
+    set_target_properties(obs-airplay PROPERTIES PREFIX "" OUTPUT_NAME "obs-airplay")
+    target_link_options(obs-airplay PRIVATE
+        "${CMAKE_BINARY_DIR}/obs-airplay.def")
+    target_link_libraries(obs-airplay PRIVATE ${OBS_AIRPLAY_WIN32_LIBS})
+endif()
 
 # macOS-specific settings
 if(APPLE)
@@ -396,9 +466,11 @@ if(APPLE)
 endif()
 
 # Installation
-install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
-        DESTINATION "$ENV{HOME}/Library/Application Support/obs-studio/plugins"
-        USE_SOURCE_PERMISSIONS)
+if(APPLE)
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
+            DESTINATION "$ENV{HOME}/Library/Application Support/obs-studio/plugins"
+            USE_SOURCE_PERMISSIONS)
+endif()
 
 # Warnings for this project's own code (UxPlay keeps its upstream flags).
 set(OBS_AIRPLAY_WARNING_FLAGS -Wall -Wextra)
@@ -497,6 +569,9 @@ if(BUILD_TESTING)
                    obs-airplay-protocol-smoke obs-airplay-unit-tests)
         if(TARGET ${target})
             target_compile_options(${target} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+            if(WIN32)
+                target_link_libraries(${target} PRIVATE ${OBS_AIRPLAY_WIN32_LIBS})
+            endif()
         endif()
     endforeach()
     target_include_directories(obs-airplay-protocol-smoke PRIVATE
@@ -506,6 +581,13 @@ if(BUILD_TESTING)
     target_link_libraries(obs-airplay-protocol-smoke PRIVATE
         airplay
     )
+    if(WIN32)
+        # UxPlay loads Bonjour's dnssd.dll even to create the DNS-SD context
+        # GET /info reads; the test gets a stand-in next to it.
+        add_library(obs-airplay-dnssd-stub SHARED tests/dnssd-stub.c)
+        set_target_properties(obs-airplay-dnssd-stub PROPERTIES PREFIX "" OUTPUT_NAME dnssd)
+        add_dependencies(obs-airplay-protocol-smoke obs-airplay-dnssd-stub)
+    endif()
     # Fuzz targets for input from the network: HLS playlists, mirror access
     # units, HTTP requests. With libFuzzer's runtime they are libFuzzer
     # binaries; otherwise (Apple's clang) tests/fuzz/fuzz-driver.cpp runs
@@ -573,11 +655,17 @@ if(BUILD_TESTING)
     add_test(NAME protocol COMMAND obs-airplay-protocol-smoke)
     add_test(NAME protocol-large-blob COMMAND obs-airplay-protocol-smoke --large-blob)
 
+    # The test scripts are bash; on Windows CTest runs them through MSYS2's.
+    if(WIN32)
+        find_program(OBS_AIRPLAY_BASH bash REQUIRED)
+        set(OBS_AIRPLAY_SH "${OBS_AIRPLAY_BASH}")
+    endif()
+
     find_program(OBS_AIRPLAY_FFMPEG ffmpeg)
     set(OBS_AIRPLAY_FIXTURES "${CMAKE_BINARY_DIR}/test-fixtures")
     if(OBS_AIRPLAY_FFMPEG)
         add_test(NAME fixtures
-            COMMAND "${CMAKE_SOURCE_DIR}/tests/make-fixtures.sh" "${OBS_AIRPLAY_FFMPEG}"
+            COMMAND ${OBS_AIRPLAY_SH} "${CMAKE_SOURCE_DIR}/tests/make-fixtures.sh" "${OBS_AIRPLAY_FFMPEG}"
                     "${OBS_AIRPLAY_FIXTURES}")
         set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP media TIMEOUT 600)
 
@@ -613,15 +701,15 @@ if(BUILD_TESTING)
 
         # Local HTTP(S) servers on fixed ports: one test at a time.
         add_test(NAME media-nested-policy
-            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+            COMMAND ${OBS_AIRPLAY_SH} "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --nested-policy
                     http://127.0.0.1:18901/same.m3u8 http://127.0.0.1:18901/cross.m3u8)
         add_test(NAME media-tls-verify
-            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+            COMMAND ${OBS_AIRPLAY_SH} "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --tls-verify
                     https://localhost:18443/clip.mp4)
         add_test(NAME media-resilient-http
-            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+            COMMAND ${OBS_AIRPLAY_SH} "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --resilient
                     http://127.0.0.1:18903/clip8.mp4)
         set_tests_properties(media-nested-policy media-tls-verify media-resilient-http PROPERTIES

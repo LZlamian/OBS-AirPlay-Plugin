@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "media-player.hpp"
 #include "hardware-decode-option.hpp"
+#include "hw-decode-platform.hpp"
 #include "hls-playlist.hpp"
 #include "media-url-policy.hpp"
 
@@ -1210,7 +1211,7 @@ private:
         if (result >= 0 && stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             AVBufferRef* device = nullptr;
             if (allow_hardware && hardware_decode_requested() &&
-                av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                av_hwdevice_ctx_create(&device, kHardwareDeviceType,
                                        nullptr, nullptr, 0) >= 0 && device) {
                 // FFmpeg's default format choice uses the device when the
                 // stream can be decoded in hardware. The hardware decoder
@@ -1560,7 +1561,7 @@ private:
     void emitVideo(AVFrame* decoded, AVStream* stream, double format_start_seconds,
                    VideoOutput* out)
     {
-        const bool hardware_frame = decoded->format == AV_PIX_FMT_VIDEOTOOLBOX;
+        const bool hardware_frame = decoded->format == kHardwarePixelFormat;
         if (out->hardware && !hardware_frame) {
             // The stream cannot be decoded in hardware and FFmpeg carried on
             // in software inside the single-threaded hardware context:
@@ -1613,9 +1614,10 @@ private:
                            decoded->colorspace == AVCOL_SPC_BT470BG;
         if (!out->mode_logged) {
             out->mode_logged = true;
-            blog(LOG_INFO, "[MEDIA] video %dx%d: %s decoding (%s, %s range%s%s)",
+            blog(LOG_INFO, "[MEDIA] video %dx%d: %s%s decoding (%s, %s range%s%s)",
                  picture.width, picture.height,
-                 hardware_frame ? "VideoToolbox hardware" : "software",
+                 hardware_frame ? kHardwareDecoderName : "software",
+                 hardware_frame ? " hardware" : "",
                  av_get_pix_fmt_name(static_cast<AVPixelFormat>(picture.format)),
                  full_range ? "full" : "video",
                  out->turns ? ", rotated upright" : "",

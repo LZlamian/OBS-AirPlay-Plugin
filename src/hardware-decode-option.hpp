@@ -32,15 +32,17 @@ inline bool flag_file_exists(const char* name)
         if (directory.back() != '/') directory += '/';
         if (stat((directory + name).c_str(), &st) == 0) return true;
     }
+#if defined(__APPLE__)
     if (const char* home = std::getenv("HOME")) {
         const std::string legacy =
             std::string(home) + "/Library/Application Support/obs-studio/" + name;
         if (stat(legacy.c_str(), &st) == 0) return true;
     }
+#endif
     return false;
 }
 
-// Hardware (VideoToolbox) decoding is on by default. OBS_AIRPLAY_HW_DECODE=0,
+// Hardware (VideoToolbox, D3D11VA on Windows) decoding is on by default. OBS_AIRPLAY_HW_DECODE=0,
 // or a file named obs-airplay-software-decode in the plugin's config folder,
 // forces software decoding (for troubleshooting). Read when a decoder is
 // created: it takes effect for the next stream; restart OBS to be sure.

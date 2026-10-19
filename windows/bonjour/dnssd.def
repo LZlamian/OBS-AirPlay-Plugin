@@ -1,0 +1,13 @@
+; The part of Bonjour's dnssd.dll UxPlay uses (uxplay/lib/dnssd.c). UxPlay
+; loads the DLL at run time (LoadLibrary), so the import library made from
+; this only satisfies its CMakeLists, which links dnssd.lib from the Bonjour
+; SDK; no import is recorded. See scripts/windows-bonjour-sdk.sh.
+LIBRARY dnssd.dll
+EXPORTS
+    DNSServiceRegister
+    DNSServiceRefDeallocate
+    TXTRecordCreate
+    TXTRecordSetValue
+    TXTRecordGetLength
+    TXTRecordGetBytesPtr
+    TXTRecordDeallocate
