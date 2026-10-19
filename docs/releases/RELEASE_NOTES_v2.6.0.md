@@ -68,7 +68,7 @@ AirPlay code underneath is now based on the UxPlay v1.73.7 release.
 **Video from websites is no longer played by default.** Screen mirroring, and
 AirPlay video that the device serves itself, work as before. To AirPlay
 videos from websites (Safari, YouTube and similar apps) to OBS again, open the
-AirPlay source's properties, tick **Show advanced settings** and set **AirPlay
+AirPlay source's properties, click **Show advanced settings** and set **AirPlay
 video** to **From any web address**.
 
 - **From v2.4.0 or later:** click **Install Update** in the prompt, then quit

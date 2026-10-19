@@ -142,7 +142,7 @@ When the device stops, the source goes empty about half a second later.
 ### Settings
 
 All AirPlay sources share these settings (there is one receiver per OBS). The
-server name and status are always shown; tick **Show advanced settings** for
+server name and status are always shown; click **Show advanced settings** for
 the rest:
 
 - **Server Name**: the name devices show. Applied about a second after you stop
