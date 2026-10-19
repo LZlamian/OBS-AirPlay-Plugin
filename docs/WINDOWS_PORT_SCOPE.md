@@ -157,6 +157,8 @@ bumped. Upstream UxPlay already carries the rest of its Windows support
 | `tests/protocol-smoke.cpp` | sockets via helpers (`closeSocket`, `setTimeout`), `SIGPIPE`/`SO_NOSIGPIPE` guarded | done |
 | `tests/video-decoder-smoke.cpp` | CPU time via `GetProcessTimes` | done |
 | `tests/dnssd-stub.c` | test-only `dnssd.dll` stand-in (UxPlay loads the real one even to create a context) | done |
+| `uxplay/lib/httpd.c` (body budget) | On Windows the 413 for a body over the shared in-flight budget did not reach the client (`protocol` smoke `body_limits`, real windows-2022 runner): most likely because the receiver closes the socket with the rest of the body unread, Windows then sends a reset, and a reset discards the response the client had not read yet. The budget itself holds (the next request is not refused). Fix: `shutdown(SD_SEND)` and drain briefly before `closesocket` when answering 413 | 0.5–1 day |
+| `src/plugin-main.cpp:360`, `airplay-server.cpp:121`, `media-player.cpp:1072` | GCC warns that `%zu` is unknown: MinGW checks OBS's `PRINTFATTR` against the old msvcrt `printf`. Harmless at run time (`blog` formats inside `obs.dll` with the UCRT, which has `%zu`), but noisy; build with `-D__USE_MINGW_ANSI_STDIO=1` or cast to `unsigned long long` + `%llu` | 0.5 day |
 | `diagnose.sh`, `build.sh` | macOS-only; a PowerShell `diagnose.ps1` (ports, firewall rule, Bonjour service state) would help support | not started |
 
 ## 3. Toolchain: MinGW-w64 (MSYS2 UCRT64), not MSVC
