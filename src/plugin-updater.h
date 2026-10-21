@@ -72,6 +72,15 @@ void OBSAirPlayDownloadAndStageUpdate(OBSAirPlayReleaseAsset *asset, NSURL *plug
                                       NSString *userAgent,
                                       void (^completion)(NSError *_Nullable error));
 
+// GET with a byte limit, enforced while the data arrives (a response is
+// cancelled once it is larger): NSURLSession itself takes whatever a server
+// or an interposer sends. `completion` runs once, on a background queue,
+// with the body or an error.
+void OBSAirPlayFetchLimited(NSURLRequest *request, NSUInteger limit,
+                            void (^completion)(NSData *_Nullable data,
+                                               NSHTTPURLResponse *_Nullable response,
+                                               NSError *_Nullable error));
+
 // The version of an update staged earlier for `pluginURL`, or nil.
 NSString *_Nullable OBSAirPlayStagedUpdateVersion(NSURL *pluginURL);
 

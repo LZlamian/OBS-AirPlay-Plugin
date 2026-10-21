@@ -3,7 +3,9 @@
 #include "hardware-decode-option.hpp"
 #include "hw-decode-platform.hpp"
 #include "hls-playlist.hpp"
+#include "media-fetch.hpp"
 #include "media-url-policy.hpp"
+#include "scope-exit.hpp"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -68,61 +70,23 @@ std::string ffmpeg_error(int error)
     return buffer;
 }
 
-// Options for every HTTP(S) fetch: web protocols only, bounded redirects,
-// and certificate verification unless the user allowed self-signed servers.
+// Options for every HTTP(S) fetch: web protocols only and certificate
+// verification unless the user allowed self-signed servers. Redirects are
+// followed by media_fetch::Session, not FFmpeg.
 void set_tls_options(AVDictionary** options)
 {
-    if (g_allow_insecure_tls.load(std::memory_order_relaxed)) {
-        av_dict_set(options, "tls_verify", "0", 0);
-        return;
-    }
-    av_dict_set(options, "tls_verify", "1", 0);
-    // The release build's OpenSSL has no default trust store of its own.
-    static const bool system_bundle = access("/etc/ssl/cert.pem", R_OK) == 0;
-    if (system_bundle) av_dict_set(options, "ca_file", "/etc/ssl/cert.pem", 0);
+    media_fetch::setTlsOptions(options, g_allow_insecure_tls.load(std::memory_order_relaxed));
 }
 
 void set_network_options(AVDictionary** options)
 {
     av_dict_set(options, "protocol_whitelist", "http,https,tcp,tls,crypto", 0);
-    av_dict_set(options, "max_redirects", "8", 0);
     set_tls_options(options);
-}
-
-// The URL an opened HTTP context ended up at after redirects, or empty.
-std::string effective_location(void* av_object)
-{
-    uint8_t* location = nullptr;
-    std::string result;
-    if (av_opt_get(av_object, "location", AV_OPT_SEARCH_CHILDREN, &location) >= 0 && location) {
-        result = reinterpret_cast<char*>(location);
-    }
-    av_free(location);
-    return result;
 }
 
 std::string safe_location_for_log(std::string location)
 {
-    // Media URLs frequently carry short-lived authentication tokens. Keep the
-    // useful scheme/host/path diagnostic without writing those credentials to
-    // the OBS log.
-    const size_t scheme = location.find("://");
-    if (scheme != std::string::npos) {
-        const size_t authority_start = scheme + 3;
-        const size_t authority_end = location.find('/', authority_start);
-        const size_t at = location.find('@', authority_start);
-        if (at != std::string::npos &&
-            (authority_end == std::string::npos || at < authority_end)) {
-            location.replace(authority_start, at - authority_start + 1,
-                             "[redacted]@");
-        }
-    }
-    const size_t sensitive = location.find_first_of("?#");
-    if (sensitive != std::string::npos) {
-        location.erase(sensitive);
-        location += "?[redacted]";
-    }
-    return location;
+    return media_fetch::safeForLog(std::move(location));
 }
 
 // See hls::kTargetBitrate: the manifest preflight and FFmpeg's program
@@ -153,6 +117,23 @@ double stream_start_seconds(const AVFormatContext* format)
 {
     return format && format->start_time != AV_NOPTS_VALUE
         ? format->start_time / static_cast<double>(AV_TIME_BASE) : 0.0;
+}
+
+// Sender positions are finite but otherwise unchecked (an item of unknown
+// duration has nothing to clamp them to): about 115 days at most, so they
+// convert to int64_t microseconds.
+constexpr double kMaxPositionSeconds = 1e7;
+
+double clamp_position(double seconds)
+{
+    if (!std::isfinite(seconds)) return 0.0;
+    return std::min(std::max(0.0, seconds), kMaxPositionSeconds);
+}
+
+// av_seek_frame's timestamp for a position (both clamped first).
+int64_t seek_timestamp(double position, double start_seconds)
+{
+    return std::llrint((clamp_position(position) + clamp_position(start_seconds)) * AV_TIME_BASE);
 }
 
 int64_t variant_bitrate(const AVFormatContext* format, const AVProgram* program)
@@ -389,8 +370,8 @@ void rotate_plane(const uint8_t* src, int src_stride, int width, int height, int
 // sees complete data.
 class ResilientHttpIo {
 public:
-    ResilientHttpIo(std::string url, AVIOInterruptCB interrupt)
-        : m_url(std::move(url)), m_interrupt(interrupt)
+    ResilientHttpIo(std::string url, AVIOInterruptCB interrupt, media_fetch::Session& fetch)
+        : m_url(std::move(url)), m_interrupt(interrupt), m_fetch(fetch)
     {
     }
 
@@ -410,7 +391,9 @@ public:
     // to FFmpeg's own HTTP input (live or unsized content).
     bool open()
     {
-        if (!reopen(0) || m_size <= 0) return false;
+        const Reopen opened = reopen(0);
+        m_refused = opened == Reopen::Refused;
+        if (opened != Reopen::Opened || m_size <= 0) return false;
         constexpr int kBufferSize = 256 * 1024;
         auto* buffer = static_cast<unsigned char*>(av_malloc(kBufferSize));
         if (!buffer) return false;
@@ -439,6 +422,9 @@ public:
         return result;
     }
     int reopens() const { return m_reopens; }
+    // open() failed because the policy refused the URL or a redirect
+    // (already reported): no other input may try it again.
+    bool refused() const { return m_refused; }
 
 private:
     static constexpr int kMaxAttempts = 5;
@@ -460,7 +446,10 @@ private:
         return !interrupted();
     }
 
-    bool reopen(int64_t offset)
+    // Refused: the policy refused the URL or a redirect; retrying cannot help.
+    enum class Reopen { Opened, Failed, Refused };
+
+    Reopen reopen(int64_t offset)
     {
         if (m_inner) avio_closep(&m_inner);
         AVDictionary* options = nullptr;
@@ -469,30 +458,27 @@ private:
         set_network_options(&options);
         av_dict_set_int(&options, "offset", offset, 0);
         AVIOInterruptCB interrupt = m_interrupt;
-        const int result = avio_open2(&m_inner, m_url.c_str(), AVIO_FLAG_READ, &interrupt, &options);
+        std::string final_url;
+        const int result = m_fetch.open(
+            m_url, false, &options,
+            [&](const std::string& url, AVDictionary** used) {
+                return avio_open2(&m_inner, url.c_str(), AVIO_FLAG_READ, &interrupt, used);
+            },
+            &final_url);
         av_dict_free(&options);
         if (result < 0) {
             m_inner = nullptr;
-            return false;
+            return result == AVERROR(EPERM) ? Reopen::Refused : Reopen::Failed;
         }
-        const std::string redirected = effective_location(m_inner);
-        if (!redirected.empty() && redirected != m_url) {
-            const std::string refused = media_url_policy::checkNested(redirected, m_url);
-            if (!refused.empty()) {
-                blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
-                     safe_location_for_log(redirected).c_str(), refused.c_str());
-                report_refusal(refused);
-                avio_closep(&m_inner);
-                return false;
-            }
-        }
+        // Later range requests go straight to where the redirects led.
+        if (!final_url.empty()) m_url = final_url;
         if (m_size <= 0) {
             const int64_t reported = avio_size(m_inner);
             // With an offset the server reports the whole file size.
             m_size = reported > 0 ? reported : -1;
         }
         m_position = offset;
-        return true;
+        return Reopen::Opened;
     }
 
     static int read(void* opaque, uint8_t* buffer, int wanted)
@@ -513,7 +499,9 @@ private:
             if (self->m_size <= 0 || self->m_position >= self->m_size) return last;
             // Stopped short of the known size: continue on a fresh request.
             ++self->m_reopens;
-            if (!self->reopen(self->m_position) && !self->backOff(attempt)) {
+            const Reopen reopened = self->reopen(self->m_position);
+            if (reopened == Reopen::Refused) return AVERROR(EPERM);
+            if (reopened == Reopen::Failed && !self->backOff(attempt)) {
                 return AVERROR_EXIT;
             }
         }
@@ -550,7 +538,9 @@ private:
         }
         for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
             if (self->interrupted()) return AVERROR_EXIT;
-            if (self->reopen(target)) return target;
+            const Reopen reopened = self->reopen(target);
+            if (reopened == Reopen::Opened) return target;
+            if (reopened == Reopen::Refused) return AVERROR(EPERM);
             if (!self->backOff(attempt)) return AVERROR_EXIT;
         }
         return AVERROR(EIO);
@@ -558,11 +548,13 @@ private:
 
     std::string m_url;
     AVIOInterruptCB m_interrupt;
+    media_fetch::Session& m_fetch;
     AVIOContext* m_inner = nullptr;
     AVIOContext* m_context = nullptr;
     int64_t m_position = 0;
     int64_t m_size = -1;
     int m_reopens = 0;
+    bool m_refused = false;
 };
 
 } // namespace
@@ -573,15 +565,6 @@ std::atomic<int> g_open_delay_for_testing_ms{0};
 std::atomic<int> g_seek_worker_delay_for_testing_ms{0};
 std::atomic<int> g_seek_presenter_delay_for_testing_ms{0};
 }
-
-// Runs a cleanup when the scope ends (early returns included).
-struct ScopeExit {
-    std::function<void()> cleanup;
-    ~ScopeExit()
-    {
-        if (cleanup) cleanup();
-    }
-};
 
 // Planes of a picture to hand on: an AVFrame's, or a locked pixel buffer's.
 struct PictureView {
@@ -694,91 +677,96 @@ public:
 
     void setVideoCallback(MediaVideoCallback callback)
     {
-        std::lock_guard<std::mutex> lock(callback_mutex);
-        video_callback = std::move(callback);
+        std::lock_guard<std::mutex> lock(m_callback_mutex);
+        m_video_callback = std::move(callback);
     }
 
     void setAudioCallback(MediaAudioCallback callback)
     {
-        std::lock_guard<std::mutex> lock(callback_mutex);
-        audio_callback = std::move(callback);
+        std::lock_guard<std::mutex> lock(m_callback_mutex);
+        m_audio_callback = std::move(callback);
     }
 
     void play(const std::string& location, double start_position, float initial_rate = 1.0f)
     {
-        // control_mutex serialises play() and stop(), which run on the HTTP
+        // m_control_mutex serialises play() and stop(), which run on the HTTP
         // thread, the UxPlay mirror thread, the deferred-clear thread and the
-        // OBS main thread; `worker` is only touched under it.
-        std::lock_guard<std::mutex> control(control_mutex);
+        // OBS main thread; `m_worker` is only touched under it.
+        std::lock_guard<std::mutex> control(m_control_mutex);
         stopLocked(HeldLock(control));
         // The start position comes from the sender: +inf survives max(0, x)
-        // and converting it to int64_t is undefined.
-        if (!std::isfinite(start_position)) start_position = 0.0;
-        start_position = std::max(0.0, start_position);
+        // and converting a huge one to int64_t is undefined.
+        start_position = clamp_position(start_position);
         {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            info = {};
-            current_location = location;
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            m_info = {};
+            m_current_location = location;
             // Scrub-burst detection compares against the previous item's seeks.
-            seek_generation = 0;
-            last_seek_at = {};
-            coarse_preview_after = {};
-            info.position = start_position;
-            info.rate = initial_rate;
-            anchor_valid = initial_rate > 0.0f;
-            anchor_position = info.position;
-            anchor_wall_time = std::chrono::steady_clock::now();
-            catching_up_video = catching_up_audio = true;
-            skipped_video_frames = 0;
-            seek_pending = false;
-            seek_target = info.position;
+            m_seek_generation = 0;
+            m_last_seek_at = {};
+            m_coarse_preview_after = {};
+            m_info.position = start_position;
+            m_info.rate = initial_rate;
+            m_anchor_valid = initial_rate > 0.0f;
+            m_anchor_position = m_info.position;
+            m_anchor_wall_time = std::chrono::steady_clock::now();
+            m_catching_up_video = m_catching_up_audio = true;
+            m_skipped_video_frames = 0;
+            m_seek_pending = false;
+            m_seek_target = m_info.position;
             // The demuxer lands on the keyframe before the start position;
             // decode but do not present the frames in between.
-            discard_video_before = discard_audio_before =
-                info.position > 0.0 ? info.position : -1.0;
+            m_discard_video_before = m_discard_audio_before =
+                m_info.position > 0.0 ? m_info.position : -1.0;
             // An item that starts paused (e.g. a still clip) must still show
             // its first frame.
-            preview_pending = true;
-            resync_on_resume = false;
-            last_seek_target = -1.0;
-            scrub_burst = false;
-            coarse_preview_shown = false;
-            clock_initialized = false;
+            m_preview_pending = true;
+            m_resync_on_resume = false;
+            m_last_seek_target = -1.0;
+            m_scrub_burst = false;
+            m_coarse_preview_shown = false;
+            m_clock_initialized = false;
         }
-        stop_requested.store(false, std::memory_order_release);
-        worker = std::thread(&Impl::run, this, location, start_position);
+        m_stop_requested.store(false, std::memory_order_release);
+        // Reached from UxPlay's C HTTP thread: nothing may throw out of here.
+        try {
+            m_worker = std::thread(&Impl::run, this, location, start_position);
+        } catch (const std::exception& e) {
+            m_stop_requested.store(true, std::memory_order_release);
+            markOpenFailure((std::string("could not start the media thread: ") + e.what()).c_str());
+        }
     }
 
     void stop()
     {
-        std::lock_guard<std::mutex> control(control_mutex);
+        std::lock_guard<std::mutex> control(m_control_mutex);
         stopLocked(HeldLock(control));
     }
 
-    void stopLocked(HeldLock /*control_mutex*/)
+    void stopLocked(HeldLock /*m_control_mutex*/)
     {
         {
-            // Stored under state_mutex so the worker cannot miss the wake-up
-            // between checking stop_requested and waiting on state_cv.
-            std::lock_guard<std::mutex> lock(state_mutex);
-            stop_requested.store(true, std::memory_order_release);
+            // Stored under m_state_mutex so the m_worker cannot miss the wake-up
+            // between checking m_stop_requested and waiting on m_state_cv.
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            m_stop_requested.store(true, std::memory_order_release);
         }
-        state_cv.notify_all();
+        m_state_cv.notify_all();
         {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            queue_cv.notify_all();
+            std::lock_guard<std::mutex> lock(m_queue_mutex);
+            m_queue_cv.notify_all();
         }
-        if (worker.joinable()) {
-            worker.join();
+        if (m_worker.joinable()) {
+            m_worker.join();
         }
-        std::lock_guard<std::mutex> lock(state_mutex);
-        info.rate = 0.0f;
-        info.ready_to_play = false;
-        info.playback_buffer_empty = true;
-        info.playback_buffer_full = false;
-        info.playback_likely_to_keep_up = false;
-        clock_initialized = false;
-        anchor_valid = false;
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        m_info.rate = 0.0f;
+        m_info.ready_to_play = false;
+        m_info.playback_buffer_empty = true;
+        m_info.playback_buffer_full = false;
+        m_info.playback_likely_to_keep_up = false;
+        m_clock_initialized = false;
+        m_anchor_valid = false;
     }
 
     void seek(double position)
@@ -787,18 +775,18 @@ public:
             blog(LOG_WARNING, "[MEDIA] scrub to a non-finite position ignored");
             return;
         }
-        position = std::max(0.0, position);
+        position = clamp_position(position);
         std::string restart_location;
         {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            if (info.duration_known && info.duration > 0.0) {
-                position = std::min(position, info.duration);
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            if (m_info.duration_known && m_info.duration > 0.0) {
+                position = std::min(position, m_info.duration);
             }
-            // The worker has finished at the end of the item: nothing would
-            // act on a seek, yet /playback-info would report the new
+            // The m_worker has finished at the end of the item: nothing would
+            // act on a seek, yet /playback-m_info would report the new
             // position. Start the item again there instead, paused.
-            if (info.ended && !current_location.empty()) {
-                restart_location = current_location;
+            if (m_info.ended && !m_current_location.empty()) {
+                restart_location = m_current_location;
             } else {
                 seekLocked(position, HeldLock(lock));
                 return;
@@ -809,24 +797,24 @@ public:
         play(restart_location, position, 0.0f);
     }
 
-    void seekLocked(double position, HeldLock /*state_mutex*/)
+    void seekLocked(double position, HeldLock /*m_state_mutex*/)
     {
         // Senders that keep a local player in sync send small corrective
         // scrubs while playing. A re-seek restarts decoding from a keyframe
         // (a visible hitch), so ignore corrections the output already meets.
         constexpr double kPlayingSeekTolerance = 0.35;
-        if (info.rate > 0.0f && info.ready_to_play && !info.ended && !seek_pending &&
-            clock_initialized && std::fabs(position - info.position) < kPlayingSeekTolerance) {
+        if (m_info.rate > 0.0f && m_info.ready_to_play && !m_info.ended && !m_seek_pending &&
+            m_clock_initialized && std::fabs(position - m_info.position) < kPlayingSeekTolerance) {
             blog(LOG_DEBUG, "[MEDIA] scrub to %.3fs ignored (output at %.3fs)",
-                 position, info.position);
+                 position, m_info.position);
             return;
         }
         // A held scrubber re-sends the same position; the frame for it is
         // already on screen, so do not fetch and decode it again.
         constexpr double kSamePositionTolerance = 0.0005;
-        if (info.rate <= 0.0f && !info.ended && !seek_pending && !preview_pending &&
-            last_seek_target >= 0.0 &&
-            std::fabs(position - last_seek_target) < kSamePositionTolerance) {
+        if (m_info.rate <= 0.0f && !m_info.ended && !m_seek_pending && !m_preview_pending &&
+            m_last_seek_target >= 0.0 &&
+            std::fabs(position - m_last_seek_target) < kSamePositionTolerance) {
             return;
         }
         // Scrubs arriving in quick succession are a drag on the sender's
@@ -835,109 +823,110 @@ public:
         // (see takeCoarsePreview). The exact frame gets half the gap between
         // scrubs, at most 60 ms, to arrive first.
         const auto seek_time = std::chrono::steady_clock::now();
-        const auto scrub_gap = seek_time - last_seek_at;
-        scrub_burst = seek_generation > 0 && scrub_gap < std::chrono::milliseconds(200);
-        if (scrub_burst) {
-            coarse_preview_after = seek_time +
+        const auto scrub_gap = seek_time - m_last_seek_at;
+        m_scrub_burst = m_seek_generation > 0 && scrub_gap < std::chrono::milliseconds(200);
+        if (m_scrub_burst) {
+            m_coarse_preview_after = seek_time +
                 std::min<std::chrono::steady_clock::duration>(
                     scrub_gap / 2, std::chrono::milliseconds(60));
         }
-        last_seek_at = seek_time;
-        coarse_preview_shown = false;
-        last_seek_target = std::max(0.0, position);
-        seek_target = std::max(0.0, position);
-        seek_pending = true;
-        ++seek_generation;
-        // A worker waiting for room in the video queue takes the seek now.
-        queue_cv.notify_all();
-        info.position = seek_target;
+        m_last_seek_at = seek_time;
+        m_coarse_preview_shown = false;
+        m_last_seek_target = std::max(0.0, position);
+        m_seek_target = std::max(0.0, position);
+        m_seek_pending = true;
+        ++m_seek_generation;
+        // A m_worker waiting for room in the video queue takes the seek now.
+        m_queue_cv.notify_all();
+        m_info.position = m_seek_target;
         // The sender is at this position now (if it is playing).
-        anchor_valid = info.rate > 0.0f;
-        anchor_position = seek_target;
-        anchor_wall_time = seek_time;
-        catching_up_video = catching_up_audio = true;
-        skipped_video_frames = 0;
-        discard_video_before = discard_audio_before = seek_target;
-        resync_on_resume = false;
+        m_anchor_valid = m_info.rate > 0.0f;
+        m_anchor_position = m_seek_target;
+        m_anchor_wall_time = seek_time;
+        m_catching_up_video = m_catching_up_audio = true;
+        m_skipped_video_frames = 0;
+        m_discard_video_before = m_discard_audio_before = m_seek_target;
+        m_resync_on_resume = false;
         // While paused, show the frame at the new position once so the
         // output follows the sender's scrubber.
-        preview_pending = true;
-        clock_initialized = false;
-        state_cv.notify_all();
+        m_preview_pending = true;
+        m_clock_initialized = false;
+        m_state_cv.notify_all();
     }
 
     void setRate(float rate)
     {
-        std::lock_guard<std::mutex> lock(state_mutex);
+        std::unique_lock<std::mutex> lock(m_state_mutex);
         if (!std::isfinite(rate)) rate = 0.0f;
         // After the end nothing plays; resuming needs a scrub (which reopens
         // the item) or a new /play.
-        if (info.ended && rate > 0.0f) {
+        if (m_info.ended && rate > 0.0f) {
+            lock.unlock();  // no logging under m_state_mutex
             blog(LOG_INFO, "[MEDIA] rate %.2f after the end of the item ignored", rate);
             return;
         }
         // Safari normally sends only 0 (pause) and 1 (play). Positive values
         // are still accepted so protocol diagnostics remain honest.
-        const float previous_rate = info.rate;
-        info.rate = rate > 0.0f ? rate : 0.0f;
+        const float previous_rate = m_info.rate;
+        m_info.rate = rate > 0.0f ? rate : 0.0f;
         const auto rate_time = std::chrono::steady_clock::now();
-        if (info.rate <= 0.0f) {
-            anchor_valid = false;
+        if (m_info.rate <= 0.0f) {
+            m_anchor_valid = false;
         } else if (previous_rate <= 0.0f) {
             // The sender starts playing now, from where the output stands.
-            anchor_valid = true;
-            anchor_position = seek_pending ? seek_target : info.position;
-            anchor_wall_time = rate_time;
-            catching_up_video = catching_up_audio = true;
-            skipped_video_frames = 0;
-        } else if (anchor_valid && previous_rate != info.rate) {
+            m_anchor_valid = true;
+            m_anchor_position = m_seek_pending ? m_seek_target : m_info.position;
+            m_anchor_wall_time = rate_time;
+            m_catching_up_video = m_catching_up_audio = true;
+            m_skipped_video_frames = 0;
+        } else if (m_anchor_valid && previous_rate != m_info.rate) {
             // A new speed: the sender has moved on at the old one since its
             // last command.
-            anchor_position += std::chrono::duration<double>(
-                rate_time - anchor_wall_time).count() * previous_rate;
-            anchor_wall_time = rate_time;
+            m_anchor_position += std::chrono::duration<double>(
+                rate_time - m_anchor_wall_time).count() * previous_rate;
+            m_anchor_wall_time = rate_time;
         }
-        if (clock_initialized) {
+        if (m_clock_initialized) {
             // Continue from the last presented frame at the new rate.
-            clock_media_position = info.position;
-            clock_wall_time = std::chrono::steady_clock::now();
+            m_clock_media_position = m_info.position;
+            m_clock_wall_time = std::chrono::steady_clock::now();
         }
-        if (info.rate > 0.0f) {
-            preview_pending = false;
-            if (resync_on_resume && !seek_pending) {
+        if (m_info.rate > 0.0f) {
+            m_preview_pending = false;
+            if (m_resync_on_resume && !m_seek_pending) {
                 // Audio after a paused seek was skipped to reach the preview
                 // frame; restart both streams from the previewed position.
-                seek_target = info.position;
-                seek_pending = true;
-                discard_video_before = discard_audio_before = seek_target;
+                m_seek_target = m_info.position;
+                m_seek_pending = true;
+                m_discard_video_before = m_discard_audio_before = m_seek_target;
             }
-            resync_on_resume = false;
+            m_resync_on_resume = false;
         }
-        state_cv.notify_all();
-        blog(LOG_INFO, "[MEDIA] playback rate changed to %.3f", info.rate);
+        m_state_cv.notify_all();
+        blog(LOG_INFO, "[MEDIA] playback rate changed to %.3f", m_info.rate);
     }
 
     float pauseForPlaylistRemoval()
     {
-        std::lock_guard<std::mutex> lock(state_mutex);
-        info.rate = 0.0f;
-        clock_initialized = false;
-        anchor_valid = false;
-        state_cv.notify_all();
-        return static_cast<float>(info.position);
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        m_info.rate = 0.0f;
+        m_clock_initialized = false;
+        m_anchor_valid = false;
+        m_state_cv.notify_all();
+        return static_cast<float>(m_info.position);
     }
 
     MediaPlaybackInfo getPlaybackInfo() const
     {
-        std::lock_guard<std::mutex> lock(state_mutex);
-        return info;
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        return m_info;
     }
 
 private:
     static int interruptCallback(void* opaque)
     {
         auto* self = static_cast<Impl*>(opaque);
-        return self && self->stop_requested.load(std::memory_order_acquire) ? 1 : 0;
+        return self && self->m_stop_requested.load(std::memory_order_acquire) ? 1 : 0;
     }
 
     static int policyIoOpen(AVFormatContext* format, AVIOContext** pb, const char* url,
@@ -946,38 +935,29 @@ private:
         auto* self = static_cast<Impl*>(format->opaque);
         std::string target = url ? url : "";
         // The HLS demuxer opens AES-128 segments as "crypto+<url>".
+        std::string prefix;
         if (starts_with_case_insensitive(target, "crypto+") ||
             starts_with_case_insensitive(target, "crypto:")) {
+            prefix = target.substr(0, 7);
             target.erase(0, 7);
         }
-        std::string refused = is_http_url(target)
-            ? media_url_policy::checkNested(target, self->policy_item_url)
-            : std::string("not an HTTP(S) URL");
-        if (!refused.empty()) {
-            blog(LOG_WARNING, "[MEDIA] refused to fetch %s: %s",
-                 safe_location_for_log(target).c_str(), refused.c_str());
-            report_refusal(refused);
+        if (!is_http_url(target) || !self->m_fetch_session) {
+            blog(LOG_WARNING, "[MEDIA] refused to fetch %s: not an HTTP(S) URL",
+                 safe_location_for_log(target).c_str());
+            report_refusal("not an HTTP(S) URL");
             return AVERROR(EPERM);
         }
         // Nested opens do not inherit the item's TLS options.
         AVDictionary* local_options = nullptr;
         AVDictionary** used_options = options ? options : &local_options;
         set_tls_options(used_options);
-        const int result = self->default_io_open(format, pb, url, flags, used_options);
+        const int result = self->m_fetch_session->open(
+            target, false, used_options,
+            [&](const std::string& pinned, AVDictionary** attempt) {
+                return self->m_default_io_open(format, pb, (prefix + pinned).c_str(), flags,
+                                             attempt);
+            });
         av_dict_free(&local_options);
-        if (result < 0 || !*pb) return result;
-        const std::string redirected = effective_location(*pb);
-        if (!redirected.empty() && redirected != target) {
-            refused = media_url_policy::checkNested(redirected, self->policy_item_url);
-            if (!refused.empty()) {
-                blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
-                     safe_location_for_log(redirected).c_str(), refused.c_str());
-                report_refusal(refused);
-                format->io_close2(format, *pb);
-                *pb = nullptr;
-                return AVERROR(EPERM);
-            }
-        }
         return result;
     }
 
@@ -994,11 +974,19 @@ private:
         av_dict_set(&options, "rw_timeout", "7000000", 0);
         set_network_options(&options);
         av_dict_set(&options, "user_agent", "AppleCoreMedia/1.0 OBS-AirPlay/" PLUGIN_VERSION, 0);
-        const int open_result = avio_open2(&io, location.c_str(), AVIO_FLAG_READ,
-                                           &interrupt, &options);
+        // The URL that answered after redirects (each one checked): the
+        // base for the variant URIs.
+        std::string final_location = location;
+        const int open_result = m_fetch_session->open(
+            location, false, &options,
+            [&](const std::string& url, AVDictionary** used) {
+                return avio_open2(&io, url.c_str(), AVIO_FLAG_READ, &interrupt, used);
+            },
+            &final_location);
         av_dict_free(&options);
         if (open_result < 0 || !io) {
-            if (!stop_requested.load(std::memory_order_acquire)) {
+            if (!m_stop_requested.load(std::memory_order_acquire) &&
+                open_result != AVERROR(EPERM)) {
                 blog(LOG_WARNING, "[MEDIA] HLS manifest preflight failed: %s",
                      ffmpeg_error(open_result).c_str());
             }
@@ -1006,29 +994,11 @@ private:
             return location;
         }
 
-        std::string final_location = location;
-        const std::string candidate = effective_location(io);
-        if (is_http_url(candidate)) {
-            final_location = candidate;
-        }
-        if (final_location != location) {
-            const std::string refused = media_url_policy::checkNested(final_location, location);
-            if (!refused.empty()) {
-                // The demuxer's own open follows the same redirect and is
-                // refused by policyIoOpen.
-                blog(LOG_WARNING, "[MEDIA] refused HLS manifest redirect to %s: %s",
-                     safe_location_for_log(final_location).c_str(), refused.c_str());
-                report_refusal(refused);
-                avio_closep(&io);
-                return location;
-            }
-        }
-
         constexpr size_t kMaximumManifestBytes = 1024 * 1024;
         std::string playlist;
         std::vector<uint8_t> buffer(16384);
         bool too_large = false;
-        while (!stop_requested.load(std::memory_order_acquire)) {
+        while (!m_stop_requested.load(std::memory_order_acquire)) {
             const int read = avio_read(io, buffer.data(), static_cast<int>(buffer.size()));
             if (read == AVERROR_EOF || read == 0) break;
             if (read < 0) {
@@ -1081,9 +1051,11 @@ private:
         AVFrame* transfer = nullptr;  // hardware surface copied to memory
         AVFrame* rotated = nullptr;   // upright picture for rotated streams
         int turns = 0;                // clockwise quarter turns to apply
-        bool hardware = false;        // the decoder was opened for hardware
-        int hardware_errors = 0;      // consecutive, since the last picture
-        // Set by the presenter, taken by the worker (which first waits for
+        // Read and written by both the m_worker (decode, send) and the
+        // presenter (picture read-back).
+        std::atomic<bool> hardware{false}; // the decoder was opened for hardware
+        std::atomic<int> hardware_errors{0}; // consecutive, since the last picture
+        // Set by the presenter, taken by the m_worker (which first waits for
         // the presenter to go idle before it changes the fields above).
         std::atomic<bool> reopen_in_software{false};
         bool mode_logged = false;
@@ -1099,24 +1071,24 @@ private:
         uint64_t epoch = 0;
     };
     static constexpr size_t kVideoQueueFrames = 3;
-    std::mutex queue_mutex;
-    std::condition_variable queue_cv;
-    std::deque<QueuedFrame> video_queue;      // under queue_mutex
-    bool presenter_busy = false;              // under queue_mutex
-    bool presenter_quit = false;              // under queue_mutex
-    // Advanced by the worker at every seek it carries out, under state_mutex
-    // as it clears seek_pending; queued frames from an older epoch are dropped.
-    std::atomic<uint64_t> queue_epoch{0};
+    std::mutex m_queue_mutex;
+    std::condition_variable m_queue_cv;
+    std::deque<QueuedFrame> m_video_queue;      // under m_queue_mutex
+    bool m_presenter_busy = false;              // under m_queue_mutex
+    bool m_presenter_quit = false;              // under m_queue_mutex
+    // Advanced by the m_worker at every seek it carries out, under m_state_mutex
+    // as it clears m_seek_pending; queued frames from an older epoch are dropped.
+    std::atomic<uint64_t> m_queue_epoch{0};
     // The epoch of the frame the presenter is showing (presenter thread only):
     // a seek carried out while it waits makes it stale.
-    uint64_t presenting_epoch = 0;
+    uint64_t m_presenting_epoch = 0;
 
     void clearVideoQueue()
     {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        for (QueuedFrame& queued : video_queue) av_frame_free(&queued.frame);
-        video_queue.clear();
-        queue_cv.notify_all();
+        std::lock_guard<std::mutex> lock(m_queue_mutex);
+        for (QueuedFrame& queued : m_video_queue) av_frame_free(&queued.frame);
+        m_video_queue.clear();
+        m_queue_cv.notify_all();
     }
 
     // Worker: hands a decoded frame to the presenter, waiting while the
@@ -1125,34 +1097,63 @@ private:
     {
         AVFrame* copy = av_frame_clone(decoded);
         if (!copy) return;
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        // (Rechecked every 50 ms: seek() notifies without queue_mutex.)
-        while (!(video_queue.size() < kVideoQueueFrames || stopOrSeekPending())) {
-            queue_cv.wait_for(lock, std::chrono::milliseconds(50));
+        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        // (Rechecked every 50 ms: seek() notifies without m_queue_mutex.)
+        while (!(m_video_queue.size() < kVideoQueueFrames || stopOrSeekPending())) {
+            m_queue_cv.wait_for(lock, std::chrono::milliseconds(50));
         }
         if (stopOrSeekPending()) {
             av_frame_free(&copy);
             return;
         }
-        video_queue.push_back({copy, stream, format_start_seconds, queue_epoch.load()});
-        queue_cv.notify_all();
+        m_video_queue.push_back({copy, stream, format_start_seconds, m_queue_epoch.load()});
+        m_queue_cv.notify_all();
     }
 
     bool stopOrSeekPending()
     {
-        if (stop_requested.load(std::memory_order_acquire)) return true;
-        std::lock_guard<std::mutex> lock(state_mutex);
-        return seek_pending;
+        if (m_stop_requested.load(std::memory_order_acquire)) return true;
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        return m_seek_pending;
     }
 
     // Worker: waits until every queued frame has been presented (end of
-    // stream, or before the worker changes what the presenter uses).
+    // stream, or before the m_worker changes what the presenter uses).
+    // At the end of an item: the last picture (or sound) lasts until the
+    // item's stated end on the playback clock, as a player shows it; before,
+    // a still clip's last frame ended the item the moment it appeared. Waits
+    // while paused. False when a seek arrived meanwhile (the caller reads on
+    // from the new position).
+    bool holdUntilEnd(double end)
+    {
+        std::unique_lock<std::mutex> lock(m_state_mutex);
+        for (;;) {
+            if (m_stop_requested.load(std::memory_order_acquire)) return true;
+            if (m_seek_pending) return false;
+            if (end <= m_info.position || !m_clock_initialized) return true;
+            if (m_info.rate <= 0.0f) {
+                m_state_cv.wait_for(lock, std::chrono::milliseconds(250));
+                continue;
+            }
+            const double delta =
+                std::max(0.0, end - m_clock_media_position) / std::max(0.001f, m_info.rate);
+            const auto target = m_clock_wall_time +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(delta));
+            if (std::chrono::steady_clock::now() >= target) {
+                m_info.position = end;
+                return true;
+            }
+            m_state_cv.wait_until(lock, target);
+        }
+    }
+
     void waitForPresenterIdle()
     {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        while (!(video_queue.empty() && !presenter_busy) &&
-               !stop_requested.load(std::memory_order_acquire)) {
-            queue_cv.wait_for(lock, std::chrono::milliseconds(50));
+        std::unique_lock<std::mutex> lock(m_queue_mutex);
+        while (!(m_video_queue.empty() && !m_presenter_busy) &&
+               !m_stop_requested.load(std::memory_order_acquire)) {
+            m_queue_cv.wait_for(lock, std::chrono::milliseconds(50));
         }
     }
 
@@ -1161,32 +1162,32 @@ private:
         for (;;) {
             QueuedFrame queued;
             {
-                std::unique_lock<std::mutex> lock(queue_mutex);
-                queue_cv.wait(lock, [&] {
-                    return presenter_quit || !video_queue.empty() ||
-                           stop_requested.load(std::memory_order_acquire);
+                std::unique_lock<std::mutex> lock(m_queue_mutex);
+                m_queue_cv.wait(lock, [&] {
+                    return m_presenter_quit || !m_video_queue.empty() ||
+                           m_stop_requested.load(std::memory_order_acquire);
                 });
-                if (stop_requested.load(std::memory_order_acquire) ||
-                    (presenter_quit && video_queue.empty())) {
+                if (m_stop_requested.load(std::memory_order_acquire) ||
+                    (m_presenter_quit && m_video_queue.empty())) {
                     break;
                 }
-                queued = video_queue.front();
-                video_queue.pop_front();
-                presenter_busy = true;
-                queue_cv.notify_all();
+                queued = m_video_queue.front();
+                m_video_queue.pop_front();
+                m_presenter_busy = true;
+                m_queue_cv.notify_all();
             }
-            presenting_epoch = queued.epoch;
-            if (queued.epoch == queue_epoch.load()) {
+            m_presenting_epoch = queued.epoch;
+            if (queued.epoch == m_queue_epoch.load()) {
                 emitVideo(queued.frame, queued.stream, queued.format_start_seconds, out);
             }
             av_frame_free(&queued.frame);
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            presenter_busy = false;
-            queue_cv.notify_all();
+            std::lock_guard<std::mutex> lock(m_queue_mutex);
+            m_presenter_busy = false;
+            m_queue_cv.notify_all();
         }
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        presenter_busy = false;
-        queue_cv.notify_all();
+        std::lock_guard<std::mutex> lock(m_queue_mutex);
+        m_presenter_busy = false;
+        m_queue_cv.notify_all();
     }
 
     bool openDecoder(AVFormatContext* format, int stream_index, AVCodecContext** decoder,
@@ -1252,16 +1253,16 @@ private:
     // A single jump is not a burst and goes straight to the exact frame.
     bool takeCoarsePreview(double position)
     {
-        std::lock_guard<std::mutex> lock(state_mutex);
+        std::lock_guard<std::mutex> lock(m_state_mutex);
         constexpr double kWorthwhileGap = 0.15;
-        if (seek_pending || presenting_epoch != queue_epoch.load() ||
-            info.rate > 0.0f || !preview_pending || !scrub_burst ||
-            coarse_preview_shown || discard_video_before < 0.0 ||
-            discard_video_before - position < kWorthwhileGap ||
-            std::chrono::steady_clock::now() < coarse_preview_after) {
+        if (m_seek_pending || m_presenting_epoch != m_queue_epoch.load() ||
+            m_info.rate > 0.0f || !m_preview_pending || !m_scrub_burst ||
+            m_coarse_preview_shown || m_discard_video_before < 0.0 ||
+            m_discard_video_before - position < kWorthwhileGap ||
+            std::chrono::steady_clock::now() < m_coarse_preview_after) {
             return false;
         }
-        coarse_preview_shown = true;
+        m_coarse_preview_shown = true;
         return true;
     }
 
@@ -1269,12 +1270,12 @@ private:
     // duration; 0 when unknown, and for audio).
     bool shouldDiscard(double position, bool is_video, double shown_for = 0.0)
     {
-        std::lock_guard<std::mutex> lock(state_mutex);
+        std::lock_guard<std::mutex> lock(m_state_mutex);
         // Frames still in the decoder from before a pending seek are stale,
         // and so is a frame the presenter took from the queue before the
-        // worker carried the seek out: checked here, under state_mutex, it
-        // must not clear discard_video_before for the new target.
-        if (seek_pending || (is_video && presenting_epoch != queue_epoch.load())) {
+        // m_worker carried the seek out: checked here, under m_state_mutex, it
+        // must not clear m_discard_video_before for the new target.
+        if (m_seek_pending || (is_video && m_presenting_epoch != m_queue_epoch.load())) {
             return true;
         }
         constexpr double kFrameTolerance = 0.020;
@@ -1287,11 +1288,11 @@ private:
         // clip of one frame a second, or of a single frame). Each stream
         // catches up by itself: audio reaching the sender's position first
         // must not let the video frames it skipped be shown in a burst.
-        bool& catching_up = is_video ? catching_up_video : catching_up_audio;
+        bool& catching_up = is_video ? m_catching_up_video : m_catching_up_audio;
         if (catching_up) {
             if (followsSenderClock(HeldLock(lock)) &&
                 position + std::max(0.0, shown_for) + kFrameTolerance < catchUpPositionLocked(HeldLock(lock))) {
-                if (is_video) ++skipped_video_frames;
+                if (is_video) ++m_skipped_video_frames;
                 return true;
             }
             if (is_video && followsSenderClock(HeldLock(lock))) {
@@ -1300,12 +1301,12 @@ private:
                      "%.3fs, %.0f ms after its command (%u frames skipped)",
                      position, senderPositionLocked(HeldLock(lock)),
                      std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - anchor_wall_time).count(),
-                     skipped_video_frames);
+                         std::chrono::steady_clock::now() - m_anchor_wall_time).count(),
+                     m_skipped_video_frames);
             }
             catching_up = false;
         }
-        double& discard_before = is_video ? discard_video_before : discard_audio_before;
+        double& discard_before = is_video ? m_discard_video_before : m_discard_audio_before;
         if (discard_before < 0.0) return false;
         if (position + kFrameTolerance < discard_before) return true;
         discard_before = -1.0;
@@ -1313,65 +1314,68 @@ private:
     }
 
     // Audio is handed to OBS this much before it is due, stamped with its
-    // own time: OBS buffers it, and the worker is free to decode video.
+    // own time: OBS buffers it, and the m_worker is free to decode video.
     static constexpr double kAudioLeadSeconds = 0.150;
 
     bool waitForPresentation(double position, uint64_t* timestamp_ns, bool is_video)
     {
-        std::unique_lock<std::mutex> lock(state_mutex);
+        std::unique_lock<std::mutex> lock(m_state_mutex);
         std::chrono::steady_clock::time_point target;
         for (;;) {
-            if (stop_requested.load(std::memory_order_acquire) || seek_pending ||
-                (is_video && presenting_epoch != queue_epoch.load())) {
+            if (m_stop_requested.load(std::memory_order_acquire) || m_seek_pending ||
+                (is_video && m_presenting_epoch != m_queue_epoch.load())) {
                 return false;
             }
-            if (info.rate <= 0.0f) {
+            if (m_info.rate <= 0.0f) {
                 // (An audio-only item has no picture to preview: it simply
                 // waits for playback to start.)
-                if (preview_pending && info.has_video) {
+                if (m_preview_pending && m_info.has_video) {
                     if (!is_video) {
                         // Keep decoding until the video frame at the seek
                         // target is reached; resume re-seeks, so no audio is lost.
                         return false;
                     }
-                    preview_pending = false;
-                    resync_on_resume = true;
-                    info.position = position;
-                    clock_initialized = false;
+                    m_preview_pending = false;
+                    m_resync_on_resume = true;
+                    m_info.position = position;
+                    m_clock_initialized = false;
                     *timestamp_ns = os_gettime_ns();
                     return true;
                 }
-                if (!pause_before_first_frame_logged.exchange(true)) {
+                if (!m_pause_before_first_frame_logged.exchange(true)) {
+                    lock.unlock();  // no logging under m_state_mutex
                     blog(LOG_INFO, "[MEDIA] playback paused; waiting for rate > 0");
+                    lock.lock();
+                    continue;
                 }
                 // A frame that was waiting when playback paused is kept and
                 // shown at its proper time after resume, not dropped.
-                state_cv.wait_for(lock, std::chrono::milliseconds(250), [&] {
-                    return stop_requested.load(std::memory_order_acquire) || seek_pending ||
-                           info.rate > 0.0f || (preview_pending && info.has_video) ||
-                           (is_video && presenting_epoch != queue_epoch.load());
+                m_state_cv.wait_for(lock, std::chrono::milliseconds(250), [&] {
+                    return m_stop_requested.load(std::memory_order_acquire) || m_seek_pending ||
+                           m_info.rate > 0.0f || (m_preview_pending && m_info.has_video) ||
+                           (is_video && m_presenting_epoch != m_queue_epoch.load());
                 });
                 continue;
             }
 
             const auto now = std::chrono::steady_clock::now();
-            if (!clock_initialized) {
-                clock_initialized = true;
+            if (!m_clock_initialized) {
+                m_clock_initialized = true;
                 if (followsSenderClock(HeldLock(lock))) {
                     // Timed from the sender's command, not from this frame.
-                    clock_media_position = anchor_position;
-                    clock_wall_time = anchor_wall_time;
+                    m_clock_media_position = m_anchor_position;
+                    m_clock_wall_time = m_anchor_wall_time;
                 } else {
-                    clock_media_position = position;
-                    clock_wall_time = now;
+                    m_clock_media_position = position;
+                    m_clock_wall_time = now;
                 }
             }
             // Recomputed on every wake-up: setRate() re-anchors the clock at
             // the last presented frame, so rate changes apply immediately
             // and never collapse the gap to a sparse next frame.
-            const double delta = std::max(0.0, position - clock_media_position) /
-                                 std::max(0.001f, info.rate);
-            target = clock_wall_time +
+            const double delta = std::max(0.0, position - m_clock_media_position) /
+                                 std::max(0.001f, m_info.rate);
+            target = m_clock_wall_time +
                 std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(delta));
             const auto wake = is_video ? target
@@ -1380,18 +1384,18 @@ private:
             if (now >= wake) {
                 break;
             }
-            state_cv.wait_until(lock, wake);
+            m_state_cv.wait_until(lock, wake);
         }
 
         // The output's position follows the picture (audio, sent ahead,
         // only for an audio-only item, and then by what is audible).
         if (is_video) {
-            info.position = std::max(info.position, position);
-        } else if (!info.has_video) {
+            m_info.position = std::max(m_info.position, position);
+        } else if (!m_info.has_video) {
             const double audible = position -
                 std::max(0.0, std::chrono::duration<double>(
-                    target - std::chrono::steady_clock::now()).count() * info.rate);
-            info.position = std::max(info.position, audible);
+                    target - std::chrono::steady_clock::now()).count() * m_info.rate);
+            m_info.position = std::max(m_info.position, audible);
         }
         const auto target_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             target.time_since_epoch()).count();
@@ -1427,27 +1431,27 @@ private:
     {
         double target = 0.0;
         {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            if (!seek_pending) {
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            if (!m_seek_pending) {
                 return false;
             }
-            target = seek_target;
-            seek_pending = false;
-            clock_initialized = false;
+            target = m_seek_target;
+            m_seek_pending = false;
+            m_clock_initialized = false;
             // Frames decoded before the seek are not shown, including one the
             // presenter is waiting with. Advanced together with clearing
-            // seek_pending, so the presenter's checks under state_mutex
+            // m_seek_pending, so the presenter's checks under m_state_mutex
             // (shouldDiscard, waitForPresentation) see one or the other.
-            queue_epoch.fetch_add(1);
-            state_cv.notify_all();
+            m_queue_epoch.fetch_add(1);
+            m_state_cv.notify_all();
         }
         if (const int delay = g_seek_worker_delay_for_testing_ms.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
         clearVideoQueue();
 
-        const int64_t timestamp = static_cast<int64_t>(
-            (std::max(0.0, target - preroll) + stream_start_seconds(format)) * AV_TIME_BASE);
+        const int64_t timestamp =
+            seek_timestamp(target - preroll, stream_start_seconds(format));
         const int result = av_seek_frame(format, -1, timestamp, AVSEEK_FLAG_BACKWARD);
         if (result < 0) {
             blog(LOG_WARNING, "[MEDIA] seek to %.3fs failed: %s",
@@ -1570,7 +1574,7 @@ private:
         }
 
         const double position = timestamp_seconds(decoded, stream, format_start_seconds);
-        if (position < 0.0 || presenting_epoch != queue_epoch.load()) {
+        if (position < 0.0 || m_presenting_epoch != m_queue_epoch.load()) {
             return;
         }
         bool coarse_preview = false;
@@ -1643,8 +1647,8 @@ private:
 
         MediaVideoCallback callback;
         {
-            std::lock_guard<std::mutex> lock(callback_mutex);
-            callback = video_callback;
+            std::lock_guard<std::mutex> lock(m_callback_mutex);
+            callback = m_video_callback;
         }
         if (callback) {
             // The planes are valid only during the call (a locked buffer is
@@ -1663,7 +1667,7 @@ private:
             callback(frame);
         }
 
-        if (!first_video_logged.exchange(true)) {
+        if (!m_first_video_logged.exchange(true)) {
             blog(LOG_INFO, "[MEDIA] first decoded video frame (%dx%d, %.3fs)",
                  picture.width, picture.height, position);
         }
@@ -1684,10 +1688,29 @@ private:
         }
     }
 
+    // The converter for audio OBS cannot take as decoded, and the input it
+    // was set up for (m_worker thread only).
+    struct AudioConversion {
+        SwrContext* resampler = nullptr;
+        AVChannelLayout input_layout = {};
+        int input_rate = 0;
+        AVSampleFormat input_format = AV_SAMPLE_FMT_NONE;
+
+        AudioConversion() = default;
+        AudioConversion(const AudioConversion&) = delete;
+        AudioConversion& operator=(const AudioConversion&) = delete;
+        ~AudioConversion() { reset(); }
+        void reset()
+        {
+            swr_free(&resampler);
+            av_channel_layout_uninit(&input_layout);
+            input_rate = 0;
+            input_format = AV_SAMPLE_FMT_NONE;
+        }
+    };
+
     void emitAudio(AVFrame* decoded, AVStream* stream, AVCodecContext* decoder,
-                   double format_start_seconds, SwrContext** resampler,
-                   AVChannelLayout* input_layout, int* input_rate,
-                   AVSampleFormat* input_format)
+                   double format_start_seconds, AudioConversion& conversion)
     {
         const double position = timestamp_seconds(decoded, stream, format_start_seconds);
         if (position < 0.0 || shouldDiscard(position, false)) {
@@ -1712,52 +1735,51 @@ private:
             return;
         }
 
-        const bool layout_changed = input_layout->nb_channels == 0 ||
-            av_channel_layout_compare(input_layout, layout) != 0;
-        if (!*resampler || layout_changed || *input_rate != sample_rate ||
-            *input_format != sample_format) {
-            swr_free(resampler);
-            av_channel_layout_uninit(input_layout);
-            if (av_channel_layout_copy(input_layout, layout) < 0) {
+        const bool layout_changed = conversion.input_layout.nb_channels == 0 ||
+            av_channel_layout_compare(&conversion.input_layout, layout) != 0;
+        if (!conversion.resampler || layout_changed || conversion.input_rate != sample_rate ||
+            conversion.input_format != sample_format) {
+            conversion.reset();
+            if (av_channel_layout_copy(&conversion.input_layout, layout) < 0) {
                 return;
             }
             AVChannelLayout stereo;
             av_channel_layout_default(&stereo, 2);
             const int result = swr_alloc_set_opts2(
-                resampler, &stereo, AV_SAMPLE_FMT_FLTP, sample_rate,
-                input_layout, sample_format, sample_rate, 0, nullptr);
+                &conversion.resampler, &stereo, AV_SAMPLE_FMT_FLTP, sample_rate,
+                &conversion.input_layout, sample_format, sample_rate, 0, nullptr);
             av_channel_layout_uninit(&stereo);
-            if (result < 0 || !*resampler || swr_init(*resampler) < 0) {
+            if (result < 0 || !conversion.resampler || swr_init(conversion.resampler) < 0) {
                 blog(LOG_ERROR, "[MEDIA] failed to configure audio converter");
-                swr_free(resampler);
+                swr_free(&conversion.resampler);
                 return;
             }
-            *input_rate = sample_rate;
-            *input_format = sample_format;
+            conversion.input_rate = sample_rate;
+            conversion.input_format = sample_format;
         }
 
         const int capacity = static_cast<int>(av_rescale_rnd(
-            swr_get_delay(*resampler, sample_rate) + decoded->nb_samples,
+            swr_get_delay(conversion.resampler, sample_rate) + decoded->nb_samples,
             sample_rate, sample_rate, AV_ROUND_UP));
         if (capacity <= 0) {
             return;
         }
-        // Reused across packets (worker thread only); grows, never shrinks.
-        if (audio_left.size() < static_cast<size_t>(capacity)) {
-            audio_left.resize(static_cast<size_t>(capacity));
-            audio_right.resize(static_cast<size_t>(capacity));
+        // Reused across packets (m_worker thread only); grows, never shrinks.
+        if (m_audio_left.size() < static_cast<size_t>(capacity)) {
+            m_audio_left.resize(static_cast<size_t>(capacity));
+            m_audio_right.resize(static_cast<size_t>(capacity));
         }
         uint8_t* output[2] = {
-            reinterpret_cast<uint8_t*>(audio_left.data()),
-            reinterpret_cast<uint8_t*>(audio_right.data())
+            reinterpret_cast<uint8_t*>(m_audio_left.data()),
+            reinterpret_cast<uint8_t*>(m_audio_right.data())
         };
         const int converted = swr_convert(
-            *resampler, output, capacity,
+            conversion.resampler, output, capacity,
             const_cast<const uint8_t**>(decoded->extended_data), decoded->nb_samples);
         if (converted <= 0) {
             return;
         }
-        presentAudio(audio_left.data(), audio_right.data(), converted, sample_rate, position);
+        presentAudio(m_audio_left.data(), m_audio_right.data(), converted, sample_rate, position);
     }
 
     void presentAudio(const float* left, const float* right, int samples, int sample_rate,
@@ -1770,8 +1792,8 @@ private:
         }
         MediaAudioCallback callback;
         {
-            std::lock_guard<std::mutex> lock(callback_mutex);
-            callback = audio_callback;
+            std::lock_guard<std::mutex> lock(m_callback_mutex);
+            callback = m_audio_callback;
         }
         if (callback) {
             MediaAudioFrame frame;
@@ -1782,7 +1804,7 @@ private:
             frame.timestamp_ns = timestamp_ns;
             callback(frame);
         }
-        if (!first_audio_logged.exchange(true)) {
+        if (!m_first_audio_logged.exchange(true)) {
             blog(LOG_INFO, "[MEDIA] first decoded audio frame (%d Hz, %d samples, %.3fs)",
                  sample_rate, converted, position);
         }
@@ -1790,11 +1812,9 @@ private:
 
     void drainDecoder(AVCodecContext* decoder, AVStream* stream, bool video,
                       double format_start_seconds, VideoOutput* video_output,
-                      SwrContext** resampler,
-                      AVChannelLayout* input_layout, int* input_rate,
-                      AVSampleFormat* input_format, AVFrame* decoded)
+                      AudioConversion& conversion, AVFrame* decoded)
     {
-        while (!stop_requested.load(std::memory_order_acquire)) {
+        while (!m_stop_requested.load(std::memory_order_acquire)) {
             const int result = avcodec_receive_frame(decoder, decoded);
             if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) {
                 break;
@@ -1805,11 +1825,9 @@ private:
                 break;
             }
             if (video) {
-                (void)video_output;
                 queueVideoFrame(decoded, stream, format_start_seconds);
             } else {
-                emitAudio(decoded, stream, decoder, format_start_seconds,
-                          resampler, input_layout, input_rate, input_format);
+                emitAudio(decoded, stream, decoder, format_start_seconds, conversion);
             }
             av_frame_unref(decoded);
         }
@@ -1879,7 +1897,7 @@ private:
             // Every URL the demuxer opens (the item, HLS playlists, segments,
             // keys) goes through the URL policy.
             format->opaque = this;
-            default_io_open = format->io_open;
+            m_default_io_open = format->io_open;
             format->io_open = &Impl::policyIoOpen;
         }
         // Progressive HTTP media goes through the byte-exact input layer;
@@ -1889,7 +1907,8 @@ private:
         bool hls_input = looks_like_hls_url(playback_location);
         if (is_http_url(playback_location) && !hls_input) {
             resilient_io = std::make_unique<ResilientHttpIo>(
-                playback_location, AVIOInterruptCB{&Impl::interruptCallback, this});
+                playback_location, AVIOInterruptCB{&Impl::interruptCallback, this},
+                *m_fetch_session);
             if (resilient_io->open() && is_hls_mime_type(resilient_io->mimeType())) {
                 blog(LOG_INFO, "[MEDIA] the URL serves an HLS playlist (%s)",
                      resilient_io->mimeType().c_str());
@@ -1898,6 +1917,12 @@ private:
             } else if (resilient_io->context()) {
                 format->pb = resilient_io->context();
                 format->flags |= AVFMT_FLAG_CUSTOM_IO;
+            } else if (resilient_io->refused()) {
+                avformat_free_context(format);
+                format = nullptr;
+                resilient_io.reset();
+                markOpenFailure("media URL refused");
+                return false;
             } else {
                 resilient_io.reset();
             }
@@ -1924,7 +1949,7 @@ private:
         av_dict_free(&options);
         if (result < 0) {
             // avformat_open_input has freed the context and cleared `format`.
-            if (!stop_requested.load()) {
+            if (!m_stop_requested.load()) {
                 markOpenFailure(("URL open failed: " + ffmpeg_error(result)).c_str());
             }
             return false;
@@ -1963,10 +1988,12 @@ private:
             return false;
         }
 
+        bool hardware = false;
         if (video_index >= 0 &&
-            !openDecoder(format, video_index, &video_decoder, true, &video_output.hardware)) {
+            !openDecoder(format, video_index, &video_decoder, true, &hardware)) {
             blog(LOG_WARNING, "[MEDIA] video stream will be skipped");
         }
+        video_output.hardware = hardware;
         if (video_decoder) {
             video_output.turns = display_quarter_turns(format->streams[video_index]);
         }
@@ -1983,18 +2010,22 @@ private:
             ? format->duration / static_cast<double>(AV_TIME_BASE) : 0.0;
         format_start_seconds = format->start_time != AV_NOPTS_VALUE
             ? format->start_time / static_cast<double>(AV_TIME_BASE) : 0.0;
+        if (duration_known) start_position = std::min(start_position, duration);
         {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            info.duration = duration;
-            info.seek_start = 0.0;
-            info.seek_duration = duration;
-            info.duration_known = duration_known;
-            info.has_video = video_decoder != nullptr;
-            info.has_audio = audio_decoder != nullptr;
-            info.ready_to_play = true;
-            info.playback_buffer_empty = false;
-            info.playback_buffer_full = true;
-            info.playback_likely_to_keep_up = true;
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            // The sender's start position, reported until frames arrive, and
+            // only ever raised by them: not past the end.
+            if (duration_known) m_info.position = std::min(m_info.position, duration);
+            m_info.duration = duration;
+            m_info.seek_start = 0.0;
+            m_info.seek_duration = duration;
+            m_info.duration_known = duration_known;
+            m_info.has_video = video_decoder != nullptr;
+            m_info.has_audio = audio_decoder != nullptr;
+            m_info.ready_to_play = true;
+            m_info.playback_buffer_empty = false;
+            m_info.playback_buffer_full = true;
+            m_info.playback_likely_to_keep_up = true;
         }
 
         const char* video_name = video_decoder ? avcodec_get_name(video_decoder->codec_id) : "none";
@@ -2005,8 +2036,8 @@ private:
 
         seek_preroll = seekPreroll(format, video_index);
         if (start_position > 0.0) {
-            const int64_t target = static_cast<int64_t>(
-                (std::max(0.0, start_position - seek_preroll) + format_start_seconds) * AV_TIME_BASE);
+            const int64_t target =
+                seek_timestamp(start_position - seek_preroll, format_start_seconds);
             if (av_seek_frame(format, -1, target, AVSEEK_FLAG_BACKWARD) < 0) {
                 blog(LOG_WARNING, "[MEDIA] initial seek to %.3fs was not available", start_position);
             }
@@ -2017,65 +2048,10 @@ private:
 
     // Demuxes and decodes the item until its end, a stop or a fatal error;
     // video goes to the presenter thread, audio is presented here.
-    void playItem(Item& item)
-    {
-        AVFormatContext* format = item.format;
-        AVCodecContext*& video_decoder = item.video_decoder;
-        AVCodecContext*& audio_decoder = item.audio_decoder;
-        VideoOutput& video_output = item.video_output;
-        const int video_index = item.video_index;
-        const int audio_index = item.audio_index;
-        const bool duration_known = item.duration_known;
-        const double duration = item.duration;
-        const double format_start_seconds = item.format_start_seconds;
-        const double seek_preroll = item.seek_preroll;
-        int result = 0;
-
-        AVPacket* packet = av_packet_alloc();
-        AVFrame* decoded = av_frame_alloc();
-        video_output.i420 = av_frame_alloc();
-        video_output.transfer = av_frame_alloc();
-        video_output.rotated = av_frame_alloc();
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            presenter_quit = false;
-            presenter_busy = false;
-        }
-        std::thread presenter;
-        if (video_decoder) {
-            presenter = std::thread(&Impl::presenterLoop, this, &video_output);
-        }
-        SwrContext* resampler = nullptr;
-        AVChannelLayout input_layout = {};
-        ScopeExit release_frames{[&] {
-            av_channel_layout_uninit(&input_layout);
-            swr_free(&resampler);
-            av_frame_free(&decoded);
-            av_packet_free(&packet);
-        }};
-        if (!packet || !decoded || !video_output.i420 || !video_output.transfer ||
-            !video_output.rotated) {
-            markOpenFailure("could not allocate decoding buffers");
-            return;
-        }
-        int input_rate = 0;
-        AVSampleFormat input_format = AV_SAMPLE_FMT_NONE;
-
-        // Some sender media servers (iOS AVPlayer's among them) end an HTTP
-        // response early or close a kept-alive connection, which FFmpeg
-        // reports as end of file right after a seek.  A read that ends well
-        // before the known duration re-seeks (a fresh request) instead.
-        constexpr int kMaxReadRecoveries = 3;
-        // Output progress (seconds) past the last recovery point that counts
-        // as real progress and earns a fresh set of attempts.
-        constexpr double kRecoveryProgress = 0.5;
-        // An end of file this close to the stated duration (seconds) is the
-        // real end, not a dropped response.
-        constexpr double kEndTolerance = 1.0;
-        // Demuxed packets reaching this close to the duration cover it all
-        // (container durations are rounded).
-        constexpr double kDemuxedEndTolerance = 0.1;
-        int read_recoveries = 0;
+    // How far reading an item has come, for telling a dropped response
+    // from its real end (m_worker thread only).
+    struct ReadProgress {
+        int recoveries = 0;
         double position_at_recovery = -1.0;
         uint64_t seek_generation_at_recovery = 0;
         // Furthest media time covered by a demuxed packet (pts + duration);
@@ -2086,194 +2062,286 @@ private:
         // re-request can leave the read position at the end of the file
         // (e.g. after reading a trailing moov) without delivering media.
         bool demuxed_since_seek = false;
+    };
 
-        while (!stop_requested.load(std::memory_order_acquire)) {
-            if (handlePendingSeek(format, video_decoder, audio_decoder, seek_preroll)) {
-                demuxed_since_seek = false;
-                swr_free(&resampler);
-                av_channel_layout_uninit(&input_layout);
-                input_rate = 0;
-                input_format = AV_SAMPLE_FMT_NONE;
-            }
+    // Some sender media servers (iOS AVPlayer's among them) end an HTTP
+    // response early or close a kept-alive connection, which FFmpeg reports
+    // as end of file right after a seek. A read that ends well before the
+    // known duration re-seeks (a fresh request) instead. True when reading
+    // goes on (that, or a pending seek); false at the real end.
+    bool readOnAfterEnd(Item& item, ReadProgress& progress, int result)
+    {
+        constexpr int kMaxReadRecoveries = 3;
+        // Output progress (seconds) past the last recovery point that counts
+        // as real progress and earns a fresh set of attempts.
+        constexpr double kRecoveryProgress = 0.5;
+        // An end of file this close to the stated duration (seconds) is the
+        // real end, not a dropped response.
+        constexpr double kEndTolerance = 1.0;
+        // Demuxed packets reaching this close to the duration cover it all
+        // (container durations are rounded).
+        constexpr double kDemuxedEndTolerance = 0.1;
 
-            result = av_read_frame(format, packet);
-            if (result < 0 && !stop_requested.load(std::memory_order_acquire)) {
-                bool retry = false;
-                double resume_at = 0.0;
-                // Every byte read means a genuine end, whatever the container
-                // duration says (a still clip's last frame can start seconds
-                // before the stated duration).
-                const int64_t io_size = format->pb ? avio_size(format->pb) : -1;
-                const bool io_at_end = io_size > 0 && format->pb &&
-                    avio_tell(format->pb) >= io_size && demuxed_since_seek;
-                {
-                    std::lock_guard<std::mutex> lock(state_mutex);
-                    // Only real progress earns a fresh set of attempts: the
-                    // output moved on, or the sender asked for a new position.
-                    // Re-showing the same frame after a re-request is not.
-                    if (info.position > position_at_recovery + kRecoveryProgress ||
-                        seek_generation != seek_generation_at_recovery) {
-                        read_recoveries = 0;
-                    }
-                    seek_generation_at_recovery = seek_generation;
-                    if (seek_pending) {
-                        retry = true;  // the pending seek repositions the demuxer
-                    } else if (!io_at_end && duration_known &&
-                               info.position < duration - kEndTolerance &&
-                               !(demuxed_generation == seek_generation &&
-                                 demuxed_until >= duration - kDemuxedEndTolerance) &&
-                               read_recoveries < kMaxReadRecoveries) {
-                        ++read_recoveries;
-                        resume_at = info.position;
-                        position_at_recovery = resume_at;
-                        seek_target = resume_at;
-                        seek_pending = true;
-                        discard_video_before = discard_audio_before = resume_at;
-                        clock_initialized = false;
-                        retry = true;
-                        blog(LOG_WARNING,
-                             "[MEDIA] media read ended early at %.3fs of %.3fs (%s); "
-                             "re-requesting from that position (attempt %d)",
-                             resume_at, duration, ffmpeg_error(result).c_str(),
-                             read_recoveries);
-                    }
-                }
-                if (retry) {
-                    demuxed_since_seek = false;
-                    if (format->pb) {
-                        format->pb->eof_reached = 0;
-                        format->pb->error = 0;
-                    }
-                    continue;
-                }
-            }
-            if (result < 0) {
-                if (result != AVERROR_EOF && !stop_requested.load()) {
-                    blog(LOG_WARNING, "[MEDIA] media read ended: %s", ffmpeg_error(result).c_str());
-                }
-                break;
-            }
-
-            if (packet->pts != AV_NOPTS_VALUE &&
-                packet->stream_index >= 0 &&
-                packet->stream_index < static_cast<int>(format->nb_streams)) {
-                const AVStream* packet_stream = format->streams[packet->stream_index];
-                const double packet_end = (packet->pts + std::max<int64_t>(0, packet->duration)) *
-                    av_q2d(packet_stream->time_base) - format_start_seconds;
-                std::lock_guard<std::mutex> lock(state_mutex);
-                if (demuxed_generation != seek_generation) {
-                    demuxed_generation = seek_generation;
-                    demuxed_until = 0.0;
-                }
-                demuxed_until = std::max(demuxed_until, packet_end);
-                demuxed_since_seek = true;
-            }
-
-            AVCodecContext* decoder = nullptr;
-            AVStream* stream = nullptr;
-            bool is_video = false;
-            if (packet->stream_index == video_index && video_decoder) {
-                decoder = video_decoder;
-                stream = format->streams[video_index];
-                is_video = true;
-            } else if (packet->stream_index == audio_index && audio_decoder) {
-                decoder = audio_decoder;
-                stream = format->streams[audio_index];
-            }
-
-            if (decoder) {
-                const int sent = avcodec_send_packet(decoder, packet);
-                if (sent >= 0) {
-                    drainDecoder(decoder, stream, is_video, format_start_seconds,
-                                 &video_output, &resampler, &input_layout,
-                                 &input_rate, &input_format, decoded);
-                } else if (is_video) {
-                    noteHardwareError(&video_output, "repeated errors sending packets");
-                }
-            }
-            av_packet_unref(packet);
-
-            if (video_output.reopen_in_software.load()) {
-                // Hardware decoding failed or does not take this stream:
-                // decode the rest of the item in software, continuing from
-                // the picture on screen.
-                waitForPresenterIdle();
-                video_output.reopen_in_software = false;
-                video_output.hardware = false;
-                video_output.hardware_errors = 0;
-                video_output.mode_logged = false;
-                avcodec_free_context(&video_decoder);
-                if (!openDecoder(format, video_index, &video_decoder)) {
-                    blog(LOG_WARNING, "[MEDIA] software video decoder could not be opened");
-                }
-                std::lock_guard<std::mutex> lock(state_mutex);
-                if (!seek_pending) {
-                    seek_target = info.position;
-                    seek_pending = true;
-                    discard_video_before = discard_audio_before = seek_target;
-                    clock_initialized = false;
-                }
-            }
-        }
-
-        if (!stop_requested.load(std::memory_order_acquire)) {
-            if (video_decoder) {
-                avcodec_send_packet(video_decoder, nullptr);
-                drainDecoder(video_decoder, format->streams[video_index], true,
-                             format_start_seconds, &video_output, &resampler,
-                             &input_layout, &input_rate, &input_format, decoded);
-            }
-            if (audio_decoder) {
-                avcodec_send_packet(audio_decoder, nullptr);
-                drainDecoder(audio_decoder, format->streams[audio_index], false,
-                             format_start_seconds, &video_output, &resampler,
-                             &input_layout, &input_rate, &input_format, decoded);
-            }
-            // The end is reached once the last queued picture is on screen.
-            waitForPresenterIdle();
-            std::lock_guard<std::mutex> lock(state_mutex);
-            info.ended = true;
-            info.rate = 0.0f;
-            info.playback_buffer_empty = true;
-            info.playback_buffer_full = false;
-            blog(LOG_INFO, "[MEDIA] playback reached end of stream at %.3fs", info.position);
-        }
-
+        AVFormatContext* format = item.format;
+        // Every byte read means a genuine end, whatever the container
+        // duration says (a still clip's last frame can start seconds before
+        // the stated duration).
+        const int64_t io_size = format->pb ? avio_size(format->pb) : -1;
+        const bool io_at_end = io_size > 0 && format->pb && avio_tell(format->pb) >= io_size &&
+            progress.demuxed_since_seek;
+        bool retry = false;
+        double recovered_at = -1.0;  // logged after the lock
         {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            presenter_quit = true;
-            queue_cv.notify_all();
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            // Only real progress earns a fresh set of attempts: the output
+            // moved on, or the sender asked for a new position. Re-showing
+            // the same frame after a re-request is not.
+            if (m_info.position > progress.position_at_recovery + kRecoveryProgress ||
+                m_seek_generation != progress.seek_generation_at_recovery) {
+                progress.recoveries = 0;
+            }
+            progress.seek_generation_at_recovery = m_seek_generation;
+            if (m_seek_pending) {
+                retry = true;  // the pending seek repositions the demuxer
+            } else if (!io_at_end && item.duration_known &&
+                       m_info.position < item.duration - kEndTolerance &&
+                       !(progress.demuxed_generation == m_seek_generation &&
+                         progress.demuxed_until >= item.duration - kDemuxedEndTolerance) &&
+                       progress.recoveries < kMaxReadRecoveries) {
+                ++progress.recoveries;
+                const double resume_at = m_info.position;
+                progress.position_at_recovery = resume_at;
+                m_seek_target = resume_at;
+                m_seek_pending = true;
+                m_discard_video_before = m_discard_audio_before = resume_at;
+                m_clock_initialized = false;
+                retry = true;
+                recovered_at = resume_at;
+            }
         }
-        if (presenter.joinable()) presenter.join();
-        clearVideoQueue();
+        if (recovered_at >= 0.0) {
+            blog(LOG_WARNING,
+                 "[MEDIA] media read ended early at %.3fs of %.3fs (%s); "
+                 "re-requesting from that position (attempt %d)",
+                 recovered_at, item.duration, ffmpeg_error(result).c_str(), progress.recoveries);
+        }
+        if (retry) rewindEndOfFile(item, progress);
+        return retry;
+    }
+
+    // Reading starts again after the demuxer reported its end.
+    static void rewindEndOfFile(Item& item, ReadProgress& progress)
+    {
+        progress.demuxed_since_seek = false;
+        if (item.format->pb) {
+            item.format->pb->eof_reached = 0;
+            item.format->pb->error = 0;
+        }
+    }
+
+    // Records how far the demuxed packets reach.
+    void noteDemuxed(const Item& item, ReadProgress& progress, const AVPacket* packet)
+    {
+        AVFormatContext* format = item.format;
+        if (packet->pts == AV_NOPTS_VALUE || packet->stream_index < 0 ||
+            packet->stream_index >= static_cast<int>(format->nb_streams)) {
+            return;
+        }
+        const AVStream* packet_stream = format->streams[packet->stream_index];
+        const double packet_end = (packet->pts + std::max<int64_t>(0, packet->duration)) *
+            av_q2d(packet_stream->time_base) - item.format_start_seconds;
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        if (progress.demuxed_generation != m_seek_generation) {
+            progress.demuxed_generation = m_seek_generation;
+            progress.demuxed_until = 0.0;
+        }
+        progress.demuxed_until = std::max(progress.demuxed_until, packet_end);
+        progress.demuxed_since_seek = true;
+    }
+
+    // Decodes one packet and hands on what comes out; reopens the video
+    // decoder in software when hardware decoding gave up.
+    void decodePacket(Item& item, AudioConversion& conversion, AVPacket* packet, AVFrame* decoded)
+    {
+        AVFormatContext* format = item.format;
+        AVCodecContext* decoder = nullptr;
+        AVStream* stream = nullptr;
+        bool is_video = false;
+        if (packet->stream_index == item.video_index && item.video_decoder) {
+            decoder = item.video_decoder;
+            stream = format->streams[item.video_index];
+            is_video = true;
+        } else if (packet->stream_index == item.audio_index && item.audio_decoder) {
+            decoder = item.audio_decoder;
+            stream = format->streams[item.audio_index];
+        }
+        if (decoder) {
+            const int sent = avcodec_send_packet(decoder, packet);
+            if (sent >= 0) {
+                drainDecoder(decoder, stream, is_video, item.format_start_seconds,
+                             &item.video_output, conversion, decoded);
+            } else if (is_video) {
+                noteHardwareError(&item.video_output, "repeated errors sending packets");
+            }
+        }
+        av_packet_unref(packet);
+
+        VideoOutput& video_output = item.video_output;
+        if (video_output.reopen_in_software.load()) {
+            // Hardware decoding failed or does not take this stream:
+            // decode the rest of the item in software, continuing from
+            // the picture on screen.
+            waitForPresenterIdle();
+            video_output.reopen_in_software = false;
+            video_output.hardware = false;
+            video_output.hardware_errors = 0;
+            video_output.mode_logged = false;
+            avcodec_free_context(&item.video_decoder);
+            if (!openDecoder(format, item.video_index, &item.video_decoder)) {
+                blog(LOG_WARNING, "[MEDIA] software video decoder could not be opened");
+            }
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            if (!m_seek_pending) {
+                m_seek_target = m_info.position;
+                m_seek_pending = true;
+                m_discard_video_before = m_discard_audio_before = m_seek_target;
+                m_clock_initialized = false;
+            }
+        }
+    }
+
+    // The frames still inside the decoders at the end of the input.
+    void drainAtEnd(Item& item, AudioConversion& conversion, AVFrame* decoded)
+    {
+        if (item.video_decoder) {
+            avcodec_send_packet(item.video_decoder, nullptr);
+            drainDecoder(item.video_decoder, item.format->streams[item.video_index], true,
+                         item.format_start_seconds, &item.video_output, conversion, decoded);
+        }
+        if (item.audio_decoder) {
+            avcodec_send_packet(item.audio_decoder, nullptr);
+            drainDecoder(item.audio_decoder, item.format->streams[item.audio_index], false,
+                         item.format_start_seconds, &item.video_output, conversion, decoded);
+        }
+    }
+
+    void markEnded()
+    {
+        double position = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(m_state_mutex);
+            m_info.ended = true;
+            m_info.rate = 0.0f;
+            m_info.playback_buffer_empty = true;
+            m_info.playback_buffer_full = false;
+            position = m_info.position;
+        }
+        blog(LOG_INFO, "[MEDIA] playback reached end of stream at %.3fs", position);
+    }
+
+    // Plays an opened item to its end (or until stopped): reads, decodes,
+    // presents (the presenter thread shows the pictures), and serves seeks.
+    void playItem(Item& item)
+    {
+        VideoOutput& video_output = item.video_output;
+        AVPacket* packet = av_packet_alloc();
+        AVFrame* decoded = av_frame_alloc();
+        video_output.i420 = av_frame_alloc();
+        video_output.transfer = av_frame_alloc();
+        video_output.rotated = av_frame_alloc();
+        {
+            std::lock_guard<std::mutex> lock(m_queue_mutex);
+            m_presenter_quit = false;
+            m_presenter_busy = false;
+        }
+        std::thread presenter;
+        if (item.video_decoder) {
+            presenter = std::thread(&Impl::presenterLoop, this, &video_output);
+        }
+        AudioConversion conversion;
+        ScopeExit stop_presenter{[&] {
+            {
+                std::lock_guard<std::mutex> lock(m_queue_mutex);
+                m_presenter_quit = true;
+                m_queue_cv.notify_all();
+            }
+            if (presenter.joinable()) presenter.join();
+            clearVideoQueue();
+            av_frame_free(&decoded);
+            av_packet_free(&packet);
+        }};
+        if (!packet || !decoded || !video_output.i420 || !video_output.transfer ||
+            !video_output.rotated) {
+            markOpenFailure("could not allocate decoding buffers");
+            return;
+        }
+
+        ReadProgress progress;
+        while (!m_stop_requested.load(std::memory_order_acquire)) {
+            if (handlePendingSeek(item.format, item.video_decoder, item.audio_decoder,
+                                  item.seek_preroll)) {
+                progress.demuxed_since_seek = false;
+                conversion.reset();
+            }
+            const int result = av_read_frame(item.format, packet);
+            if (result >= 0) {
+                noteDemuxed(item, progress, packet);
+                decodePacket(item, conversion, packet, decoded);
+                continue;
+            }
+            if (m_stop_requested.load(std::memory_order_acquire)) break;
+            if (readOnAfterEnd(item, progress, result)) continue;
+            if (result != AVERROR_EOF) {
+                blog(LOG_WARNING, "[MEDIA] media read ended: %s", ffmpeg_error(result).c_str());
+            }
+            drainAtEnd(item, conversion, decoded);
+            // The end is reached once the last queued picture is on screen
+            // and has lasted until the item's end; a seek meanwhile reads on.
+            waitForPresenterIdle();
+            if (!holdUntilEnd(item.duration_known ? item.duration : -1.0)) {
+                rewindEndOfFile(item, progress);
+                continue;
+            }
+            if (!m_stop_requested.load(std::memory_order_acquire)) markEnded();
+            break;
+        }
     }
 
     void run(std::string location, double start_position)
     {
         static std::once_flag network_once;
         std::call_once(network_once, [] { avformat_network_init(); });
-        first_video_logged.store(false);
-        first_audio_logged.store(false);
-        pause_before_first_frame_logged.store(false);
+        m_first_video_logged.store(false);
+        m_first_audio_logged.store(false);
+        m_pause_before_first_frame_logged.store(false);
 
         const std::string log_location = safe_location_for_log(location);
         blog(LOG_INFO, "[MEDIA] opening Safari media URL: %s", log_location.c_str());
         const bool http_item = is_http_url(location);
-        const std::string refused = http_item ? media_url_policy::checkItem(location)
+        // Every fetch for this item goes through it; its lookups are
+        // interrupted by stop() (they run while stop() waits for this thread).
+        media_fetch::Session fetch(
+            location, g_allow_insecure_tls.load(std::memory_order_relaxed),
+            [this] { return m_stop_requested.load(std::memory_order_acquire); }, report_refusal);
+        m_fetch_session = &fetch;
+        ScopeExit clear_fetch{[this] { m_fetch_session = nullptr; }};
+        const std::string refused = http_item ? fetch.check(location, true)
                                               : media_url_policy::checkLocalFile(location);
+        if (m_stop_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         if (!refused.empty()) {
             markOpenFailure(("media URL refused: " + refused).c_str());
             report_refusal(refused);
             return;
         }
-        policy_item_url = location;
-        const std::string playback_location = resolveHlsVariant(location);
-        if (stop_requested.load(std::memory_order_acquire)) {
+        const std::string playback_location =
+            http_item ? resolveHlsVariant(location) : location;
+        if (m_stop_requested.load(std::memory_order_acquire)) {
             return;
         }
         if (playback_location != location) {
-            const std::string variant_refused =
-                media_url_policy::checkNested(playback_location, location);
+            const std::string variant_refused = fetch.check(playback_location, false);
             if (!variant_refused.empty()) {
                 markOpenFailure(("HLS rendition URL refused: " + variant_refused).c_str());
                 report_refusal(variant_refused);
@@ -2297,52 +2365,52 @@ private:
     void markOpenFailure(const char* message)
     {
         blog(LOG_ERROR, "[MEDIA] %s", message);
-        std::lock_guard<std::mutex> lock(state_mutex);
-        info.ready_to_play = false;
-        info.playback_buffer_empty = true;
-        info.playback_buffer_full = false;
-        info.playback_likely_to_keep_up = false;
-        info.rate = 0.0f;
-        info.ended = true;
+        std::lock_guard<std::mutex> lock(m_state_mutex);
+        m_info.ready_to_play = false;
+        m_info.playback_buffer_empty = true;
+        m_info.playback_buffer_full = false;
+        m_info.playback_likely_to_keep_up = false;
+        m_info.rate = 0.0f;
+        m_info.ended = true;
     }
 
-    mutable std::mutex state_mutex;
-    std::condition_variable state_cv;
-    MediaPlaybackInfo info;
+    mutable std::mutex m_state_mutex;
+    std::condition_variable m_state_cv;
+    MediaPlaybackInfo m_info;
     // The current item, for reopening it after its end (seek()).
-    std::string current_location;
-    // Converted audio, reused for every packet (worker thread only).
-    std::vector<float> audio_left;
-    std::vector<float> audio_right;
-    bool seek_pending = false;
-    double seek_target = 0.0;
-    uint64_t seek_generation = 0;
-    std::chrono::steady_clock::time_point last_seek_at;
-    std::chrono::steady_clock::time_point coarse_preview_after;
-    bool scrub_burst = false;
-    bool coarse_preview_shown = false;
-    double last_seek_target = -1.0;
-    double discard_video_before = -1.0;
-    double discard_audio_before = -1.0;
-    bool preview_pending = false;
-    bool resync_on_resume = false;
+    std::string m_current_location;
+    // Converted audio, reused for every packet (m_worker thread only).
+    std::vector<float> m_audio_left;
+    std::vector<float> m_audio_right;
+    bool m_seek_pending = false;
+    double m_seek_target = 0.0;
+    uint64_t m_seek_generation = 0;
+    std::chrono::steady_clock::time_point m_last_seek_at;
+    std::chrono::steady_clock::time_point m_coarse_preview_after;
+    bool m_scrub_burst = false;
+    bool m_coarse_preview_shown = false;
+    double m_last_seek_target = -1.0;
+    double m_discard_video_before = -1.0;
+    double m_discard_audio_before = -1.0;
+    bool m_preview_pending = false;
+    bool m_resync_on_resume = false;
     // Where the sender said playback is, and when it said so (a play, seek
     // or resume command while playing). See setFollowSenderClock().
-    bool anchor_valid = false;
-    double anchor_position = 0.0;
-    std::chrono::steady_clock::time_point anchor_wall_time;
+    bool m_anchor_valid = false;
+    double m_anchor_position = 0.0;
+    std::chrono::steady_clock::time_point m_anchor_wall_time;
 
-    bool followsSenderClock(HeldLock /*state_mutex*/) const
+    bool followsSenderClock(HeldLock /*m_state_mutex*/) const
     {
         // (An item of unknown length is left as it was: there is no telling
         // how much of it may be skipped.)
-        return anchor_valid && info.rate > 0.0f && info.duration_known && info.duration > 0.0 &&
+        return m_anchor_valid && m_info.rate > 0.0f && m_info.duration_known && m_info.duration > 0.0 &&
                g_follow_sender_clock.load(std::memory_order_relaxed);
     }
-    double senderPositionLocked(HeldLock /*state_mutex*/) const
+    double senderPositionLocked(HeldLock /*m_state_mutex*/) const
     {
-        return anchor_position + std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - anchor_wall_time).count() * info.rate;
+        return m_anchor_position + std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - m_anchor_wall_time).count() * m_info.rate;
     }
     // Frames that ended before this are skipped while a stream catches up.
     // Never past the end of the item: one that is shorter than the time it
@@ -2351,35 +2419,35 @@ private:
     // known. With no known duration nothing is skipped.
     double catchUpPositionLocked(HeldLock held) const
     {
-        if (!info.duration_known || info.duration <= 0.0) {
-            return anchor_position;
+        if (!m_info.duration_known || m_info.duration <= 0.0) {
+            return m_anchor_position;
         }
         constexpr double kKeptAtEnd = 0.25;
         return std::min(senderPositionLocked(held),
-                        std::max(anchor_position, info.duration - kKeptAtEnd));
+                        std::max(m_anchor_position, m_info.duration - kKeptAtEnd));
     }
     // A stream is still skipping to the sender's position (see shouldDiscard).
-    bool catching_up_video = false;
-    bool catching_up_audio = false;
-    unsigned int skipped_video_frames = 0;
+    bool m_catching_up_video = false;
+    bool m_catching_up_audio = false;
+    unsigned int m_skipped_video_frames = 0;
 
-    bool clock_initialized = false;
-    double clock_media_position = 0.0;
-    std::chrono::steady_clock::time_point clock_wall_time;
+    bool m_clock_initialized = false;
+    double m_clock_media_position = 0.0;
+    std::chrono::steady_clock::time_point m_clock_wall_time;
 
-    std::mutex callback_mutex;
-    MediaVideoCallback video_callback;
-    MediaAudioCallback audio_callback;
+    std::mutex m_callback_mutex;
+    MediaVideoCallback m_video_callback;
+    MediaAudioCallback m_audio_callback;
 
-    std::atomic<bool> stop_requested{true};
-    std::atomic<bool> first_video_logged{false};
-    std::atomic<bool> first_audio_logged{false};
-    std::atomic<bool> pause_before_first_frame_logged{false};
-    std::mutex control_mutex;
-    std::thread worker;
-    // The current item's URL, for policyIoOpen (worker thread only).
-    std::string policy_item_url;
-    int (*default_io_open)(AVFormatContext*, AVIOContext**, const char*, int,
+    std::atomic<bool> m_stop_requested{true};
+    std::atomic<bool> m_first_video_logged{false};
+    std::atomic<bool> m_first_audio_logged{false};
+    std::atomic<bool> m_pause_before_first_frame_logged{false};
+    std::mutex m_control_mutex;
+    std::thread m_worker;
+    // The current item's fetches, for policyIoOpen (m_worker thread only).
+    media_fetch::Session* m_fetch_session = nullptr;
+    int (*m_default_io_open)(AVFormatContext*, AVIOContext**, const char*, int,
                            AVDictionary**) = nullptr;
 };
 

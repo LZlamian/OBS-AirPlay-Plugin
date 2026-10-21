@@ -5,6 +5,7 @@
 # windows-vX.Y.Z (the Windows beta line, windows/VERSION) attaches the
 # Windows packages to a draft pre-release for the maintainer to publish; a
 # pre-release never becomes the "latest" release the macOS updater reads.
+# Actions are pinned by commit; checkouts keep no token.
 name: CI
 
 on:
@@ -12,15 +13,28 @@ on:
     branches: ["**"]
     tags: ["v*.*.*", "windows-v*.*.*"]
   pull_request:
+  schedule:
+    - cron: "17 4 * * 1"   # weekly: ThreadSanitizer
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to a branch replaces its run; tags always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
+  # A pull request from a branch of this repository is already built by
+  # its push.
   lint:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: No build artifacts tracked
         run: |
           if git ls-files | grep -E '^(build|build-[^/]+|dist)/|\.DS_Store$|\.(pkg|zip)$'; then
@@ -44,6 +58,7 @@ jobs:
           shellcheck -S error build.sh scripts/*.sh tests/*.sh diagnose.sh
 
   build-test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -54,41 +69,78 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
+          persist-credentials: false
       - name: Submodule URL from .gitmodules
         run: git submodule sync --recursive && git submodule update --init --recursive
       - name: Dependencies
         run: |
           brew install cmake pkg-config ffmpeg libplist openssl@3
           brew install --cask obs
+          # Homebrew installs the current versions: record them for the run.
+          brew list --versions cmake ffmpeg libplist openssl@3
+          brew list --cask --versions obs
       - name: Configure
-        run: cmake --preset release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+        run: cmake --preset release -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} -DOBS_AIRPLAY_WERROR=ON
       - name: Build
         run: cmake --build --preset release -j4
       - name: Test
         env:
           OBS_AIRPLAY_TIMING_SCALE: "3"   # shared runners are slower and noisier
         run: ctest --preset release -j2
+      # The release job tests the release FFmpeg with these (it has no
+      # ffmpeg command with libx264 to make them).
+      - name: Keep the test media for the release job
+        if: matrix.arch == 'arm64' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-fixtures
+          path: build-release/test-fixtures
+          retention-days: 1
 
   sanitizers:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
+          persist-credentials: false
       - name: Dependencies
         run: |
           brew install cmake pkg-config ffmpeg libplist openssl@3
           brew install --cask obs
-      - name: AddressSanitizer + UBSan
+      - name: AddressSanitizer + UBSan (every test, plus the fuzz runs)
         env:
           OBS_AIRPLAY_TIMING_SCALE: "5"   # sanitizers add to that
         run: |
-          cmake --preset asan
+          cmake --preset asan -DOBS_AIRPLAY_WERROR=ON
           cmake --build --preset asan -j4
-          ctest --preset asan -j2 -R 'protocol|media-'
+          ctest --preset asan -j2
+
+  # Weekly (and by hand): the media, protocol and unit tests under
+  # ThreadSanitizer, which found the run_mutex race.
+  tsan:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Dependencies
+        run: |
+          brew install cmake pkg-config ffmpeg libplist openssl@3
+          brew install --cask obs
+      - name: ThreadSanitizer
+        env:
+          OBS_AIRPLAY_TIMING_SCALE: "5"
+        run: |
+          cmake --preset tsan
+          cmake --build --preset tsan -j4
+          ctest --preset tsan -j2 -R 'media-|protocol|unit'
 
   # Windows x64 (docs/WINDOWS_PORT_SCOPE.md): MinGW-w64 (MSYS2 UCRT64)
   # builds the release configuration (FFmpeg, libcrypto and libplist linked
@@ -103,11 +155,16 @@ jobs:
     env:
       OBS_WINDOWS_VERSION: "32.0.4"   # obs-headers/PROVENANCE.md
       OBS_WINDOWS_SHA256: fd367a7f156319426f1a600720c1288ad0011da168dff41e0f94dbb18cc1dc0f
+      # The packages of a tag or of the Windows branch are published (a
+      # release, the beta's pre-release): they are built from the pinned
+      # sources, never from a cache another branch's push could have filled.
+      USE_CACHES: ${{ !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/claude/upbeat-meitner-zf2a2e' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
-      - uses: msys2/setup-msys2@v2
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: UCRT64
           update: false
@@ -125,12 +182,6 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-ffmpeg
             mingw-w64-ucrt-x86_64-python
-      - name: UxPlay changes for Windows (to be moved into the fork)
-        run: |
-          for patch in windows/uxplay-patches/*.patch; do
-            echo "applying $patch"
-            git -C uxplay apply --verbose "../$patch"
-          done
       - name: Paths
         run: |
           temp="$(cygpath -m "$RUNNER_TEMP")"
@@ -140,7 +191,8 @@ jobs:
       # later step fails.
       - name: Release dependencies (cached by the script's content)
         id: deps
-        uses: actions/cache/restore@v4
+        if: env.USE_CACHES == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/obs-airplay-deps
           key: windows-release-deps-${{ hashFiles('scripts/build-windows-release-deps.sh') }}
@@ -148,8 +200,8 @@ jobs:
         if: steps.deps.outputs.cache-hit != 'true'
         run: OBS_AIRPLAY_DEPS_PREFIX="$DEPS" scripts/build-windows-release-deps.sh
       - name: Save release dependencies
-        if: steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        if: env.USE_CACHES == 'true' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/obs-airplay-deps
           key: ${{ steps.deps.outputs.cache-primary-key }}
@@ -157,7 +209,8 @@ jobs:
         run: scripts/windows-bonjour-sdk.sh "$TEMP_M/bonjour-sdk"
       - name: OBS Studio release (obs.dll to link against)
         id: obs
-        uses: actions/cache@v4
+        if: env.USE_CACHES == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/obs-studio
           key: obs-windows-${{ env.OBS_WINDOWS_VERSION }}
@@ -213,12 +266,12 @@ jobs:
           # on a tag, the package must carry the tagged version
           OBS_AIRPLAY_RELEASE_TAG: ${{ (startsWith(github.ref, 'refs/tags/windows-v') || (startsWith(github.ref, 'refs/tags/v') && vars.OBS_AIRPLAY_RELEASE_WINDOWS == 'true')) && github.ref_name || '' }}
         run: scripts/package-windows.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: obs-airplay-windows-x64
           path: dist/*
           retention-days: 14
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: obs-airplay-windows-x64-test-logs
@@ -235,23 +288,30 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
+          persist-credentials: false
+      - name: Test media from build-test
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-fixtures
+          path: ${{ runner.temp }}/test-fixtures
       - name: Dependencies
         run: |
           brew install cmake pkg-config libplist openssl@3
           brew install --cask obs
-      - name: Release dependencies (cached by the script's content)
-        id: deps
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/obs-airplay-release-deps
-          key: release-deps-arm64-${{ hashFiles('scripts/build-macos-release-deps.sh') }}
+      # Built from the SHA-256-pinned sources on every release, never
+      # restored from a cache: any push to a branch can save a cache entry
+      # that this approved job would then sign (audit 2026-10-21, SC-1).
       - name: Build release dependencies
         run: scripts/build-macos-release-deps.sh
+      # Also builds the tests against the release dependencies and runs
+      # them (BC-1): the shipped FFmpeg is built from an allow-list.
       - name: Package
         env:
+          OBS_AIRPLAY_TEST_FIXTURES: ${{ runner.temp }}/test-fixtures
+          OBS_AIRPLAY_TIMING_SCALE: "3"
           OBS_AIRPLAY_RELEASE_TAG: ${{ github.ref_name }}
           OBS_AIRPLAY_DEPS_PREFIX: /Users/runner/Library/Caches/obs-airplay-release-deps/arm64-macos12.0
           OBS_AIRPLAY_BUILD_DIR: /Users/runner/obs-airplay-release-build
@@ -268,8 +328,16 @@ jobs:
             OBS_AIRPLAY_OPENSSL="$(brew --prefix openssl@3)/bin/openssl" \
             scripts/sign-release.sh /Users/runner/obs-airplay-dist/obs-airplay-${{ github.ref_name }}-macos-arm64.zip
           rm -f "$RUNNER_TEMP/key.pem"
-      - name: Checksums
-        run: cd /Users/runner/obs-airplay-dist && shasum -a 256 * > SHA256SUMS
+      - name: Checksums (signed with the key as a secret)
+        env:
+          SIGNING_KEY: ${{ secrets.OBS_AIRPLAY_SIGNING_KEY }}
+        run: |
+          umask 077
+          if [ -n "$SIGNING_KEY" ]; then printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/key.pem"; fi
+          OBS_AIRPLAY_SIGNING_KEY="$RUNNER_TEMP/key.pem" \
+            OBS_AIRPLAY_OPENSSL="$(brew --prefix openssl@3)/bin/openssl" \
+            scripts/sign-checksums.sh /Users/runner/obs-airplay-dist
+          rm -f "$RUNNER_TEMP/key.pem"
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -297,8 +365,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4   # scripts/sign-release.sh, src/update-trusted-keys.h
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0   # scripts/sign-release.sh, src/update-trusted-keys.h
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: obs-airplay-windows-x64
           path: dist
@@ -346,8 +416,10 @@ jobs:
       group: windows-beta-draft
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4   # windows/VERSION, the release notes
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0   # windows/VERSION, the release notes
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: obs-airplay-windows-x64
           path: dist

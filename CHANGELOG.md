@@ -2,6 +2,60 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
+## Unreleased (2.7)
+
+Audit 2026-10-21, Phase 1:
+- "From any web address" now fetches from the address it checked: plain HTTP
+  connects to it with the name in the Host header, HTTPS relies on the
+  certificate; redirects are followed by the plugin, each one checked before
+  it is requested (NET-5).
+- `stop()` and quitting OBS no longer wait for a slow DNS lookup (MP-1).
+- Mirror audio: starts with a 40 ms jitter margin, follows the sender's clock
+  after the first RTP sync instead of drifting, and keeps startup packets
+  that are only a little late (MP-2).
+- A failed rename is shown and can be retried; the over-long-name warning
+  appears at once; name edits no longer rewrite settings.json per keystroke
+  (MP-6, MP-7, MP-11).
+- Races and robustness: hardware-error counter (MP-3), unload order (MP-4),
+  huge sender positions (MP-5), a VideoToolbox surface held while the screen
+  is still (MP-8), refused redirects retried (MP-9), HLS attribute names
+  (MP-10), thread creation on UxPlay's thread (MP-12).
+- The last picture of an AirPlay video item is shown for its own duration
+  before the item ends (a still clip's last frame used to end it at once).
+
+Audit 2026-10-21, Phase 2:
+- Release pipeline: actions pinned by commit and no stored token in
+  checkouts (SC-4); warnings are errors in CI and a weekly ThreadSanitizer
+  run (BC-2, BC-3); the release job runs the tests against the release
+  FFmpeg it ships (BC-1); dependencies are built in a private folder (SC-5);
+  `SHA256SUMS` is signed with the release key, which covers the `.pkg`
+  (SC-6); csrp and LGPL notices (SC-7).
+- The updater cancels a download larger than the release lists, and a
+  release check larger than 1 MiB (SC-3).
+- Tests: `AirPlayServer` with libobs stubbed (decode thread, backlog,
+  clock anchor, re-timer wiring); orientation, still clips, audio-only,
+  10-bit (software fallback), live and AES-128 HLS, two renditions; deadlines
+  scale with `OBS_AIRPLAY_TIMING_SCALE`; the protocol smoke names a failed
+  condition; configurable test ports (TS-2 to TS-5).
+
+## 2.6.1 (2026-10-21)
+
+Security hotfix (audit 2026-10-21, Phase 0):
+- HLS master playlists from a sender (upstream UxPlay code): the audio
+  language parser no longer overflows on a long `LANGUAGE`, divides by zero
+  on a single entry or reads `languages[-1]` without a default (NET-1, NET-2,
+  NET-3); the media URI table no longer reads past the playlist, and an
+  empty one no longer leaves a zero-length store. Fork commits `99cbde2`,
+  `d324806`, `1beb90d`.
+- Mirror codec packets: SPS/PPS/VPS lengths are unsigned and checked against
+  the payload (NET-4, fork `4a077a8`).
+- "From any web address": a host name that does not resolve is refused
+  (NET-5, first part).
+- The release job no longer restores the dependency cache (SC-1).
+- CI runs every test, with the fuzz targets, under ASan and UBSan; new
+  `obs-airplay-fuzz-master-playlist`; the protocol smoke sends the NET-1/2/3
+  playlists (TS-1).
+
 ## 2.6.0 (2026-10-18)
 
 Receiver setting **AirPlay video** (Off / Only from the sending device, the

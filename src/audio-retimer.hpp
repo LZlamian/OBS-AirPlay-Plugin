@@ -17,7 +17,20 @@
 // Timestamps are therefore kept continuous (each packet follows the previous
 // one) and follow the sender's play-at times only while those are on time:
 // a step back that would make audio late is ridden over, a startup backlog
-// is dropped, and after a real stall (Wi-Fi) the stream restarts at now.
+// is dropped, and after a real stall (Wi-Fi) the stream restarts.
+//
+// The timeline is the sender's play-at times plus an offset: 0 while they
+// are followed; when a step back is ridden over, or the stream restarts, the
+// offset is set so the sender's later times continue the timeline, which
+// therefore keeps following the sender's clock (UxPlay converts it to the
+// local one) instead of running on packet durations alone. Small
+// differences between the two (a sender sample clock a few ppm off) are
+// absorbed by moving each packet by at most 1/1024 of its duration, so they
+// never add up to a step.
+//
+// A stream starts (and restarts) at least kStartLeadNs ahead of now: when
+// audio anchors the clock its first packet is due exactly now, and arrival
+// jitter would otherwise make the next ones late.
 //
 // Not thread-safe: used on the audio thread (under the audio decoder lock).
 class AudioRetimer {
@@ -27,13 +40,17 @@ public:
     // From the first packet of a stream: late packets are its startup backlog.
     static constexpr uint64_t kStartupNs = 2'000'000'000;
     // Play-at times this close to the continuous timeline are jitter (OBS's
-    // own smoothing threshold is 70 ms).
+    // own smoothing threshold is 70 ms). In the startup window, packets late
+    // by less than this are kept (the stream restarts), not dropped.
     static constexpr uint64_t kJitterNs = 70'000'000;
-    // While play-at times are ridden over, the timeline is kept at most this
-    // far ahead of now: a burst after a stall, or a sender clock slightly
-    // faster than OBS's, would otherwise add delay for the rest of the stream.
-    // Enough to absorb Wi-Fi jitter.
+    // After a step back was ridden over, or a restart, the timeline is kept
+    // at most this far ahead of now: a burst after a stall, or a sender clock
+    // slightly faster than OBS's, would otherwise add delay for the rest of
+    // the stream. Enough to absorb Wi-Fi jitter.
     static constexpr uint64_t kMaxLeadNs = 150'000'000;
+    // The least lead a stream starts or restarts with: with kLateNs, packets
+    // may arrive 60 ms behind their play-at times before they are late.
+    static constexpr uint64_t kStartLeadNs = 40'000'000;
 
     struct Result {
         bool drop = false;
@@ -49,35 +66,57 @@ public:
             m_started = true;
             m_stream_start = now;
         }
-        const bool have_next = m_next != 0;
-        uint64_t out = timestamp;
-        const bool on_timeline = have_next && distance(timestamp, m_next) <= kJitterNs;
-        if (on_timeline) {
-            out = m_next;
-        } else if (have_next && m_following) {
-            ++m_steps;  // play-at times moved away from the timeline
-            m_last_step_ns = static_cast<int64_t>(timestamp - m_next);
-        }
-        m_following = !have_next || on_timeline;
-        if (late(out, now)) {
-            if (have_next && !late(m_next, now)) {
-                if (m_next > now + kMaxLeadNs) {
-                    ++m_trimmed;
-                    result.drop = true;
-                    return result;
-                }
-                out = m_next;  // a step back: stay continuous and on time
-                ++m_held;
-            } else if (now - m_stream_start < kStartupNs) {
-                ++m_dropped;
-                const uint64_t behind = now - out;
-                if (behind > m_worst_dropped) m_worst_dropped = behind;
-                result.drop = true;
-                return result;
-            } else {
-                out = now;  // fell behind (a stall): restart at now
+        const bool in_startup = now - m_stream_start < kStartupNs;
+        if (m_next == 0) {
+            // The first packet of the timeline.
+            if (late(timestamp, now)) {
+                if (in_startup) return dropBacklog(timestamp, now);
                 ++m_resyncs;
             }
+            return start(timestamp, duration, now);
+        }
+
+        const uint64_t expected = shifted(timestamp);
+        const bool on_timeline = distance(expected, m_next) <= kJitterNs;
+        if (!on_timeline && m_following) {
+            ++m_steps;  // play-at times moved away from the timeline
+            m_last_step_ns = static_cast<int64_t>(expected - m_next);
+        }
+        m_following = on_timeline;
+
+        uint64_t out = 0;
+        if (on_timeline) {
+            out = m_next + slew(expected, duration);
+        } else if (!late(timestamp, now)) {
+            // On time off the timeline (a step forward): follow the sender.
+            m_offset = 0;
+            m_anchored = false;
+            out = timestamp;
+        }
+        if (out == 0 || late(out, now)) {
+            if (!late(m_next, now)) {
+                // A step back: stay continuous and on time, and continue the
+                // timeline from the sender's later times.
+                m_offset = static_cast<int64_t>(m_next - timestamp);
+                m_anchored = true;
+                m_following = true;
+                out = m_next;
+                ++m_held;
+            } else if (in_startup && now - (on_timeline ? out : timestamp) > kJitterNs) {
+                return dropBacklog(on_timeline ? out : timestamp, now);
+            } else {
+                // Fell behind (a stall, or startup jitter): restart.
+                ++m_resyncs;
+                return start(timestamp, duration, now);
+            }
+        }
+        if (m_anchored && out > now + kMaxLeadNs) {
+            // Running ahead: drop this packet and let the next one take its
+            // place on the timeline.
+            ++m_trimmed;
+            m_offset = static_cast<int64_t>(m_next - timestamp - duration);
+            result.drop = true;
+            return result;
         }
         m_next = out + duration;
         result.timestamp = out;
@@ -108,9 +147,53 @@ private:
     static uint64_t distance(uint64_t a, uint64_t b) { return a > b ? a - b : b - a; }
     static bool late(uint64_t timestamp, uint64_t now) { return timestamp + kLateNs < now; }
 
+    uint64_t shifted(uint64_t timestamp) const
+    {
+        return static_cast<uint64_t>(static_cast<int64_t>(timestamp) + m_offset);
+    }
+
+    // How far to move a packet on the timeline toward the sender's time.
+    static int64_t slewBy(int64_t difference, uint64_t duration)
+    {
+        const int64_t limit = static_cast<int64_t>(duration / 1024);
+        return difference > limit ? limit : difference < -limit ? -limit : difference;
+    }
+    int64_t slew(uint64_t expected, uint64_t duration) const
+    {
+        return slewBy(static_cast<int64_t>(expected - m_next), duration);
+    }
+
+    // Starts the timeline at this packet, at least kStartLeadNs ahead of now.
+    Result start(uint64_t timestamp, uint64_t duration, uint64_t now)
+    {
+        const uint64_t out = timestamp < now + kStartLeadNs ? now + kStartLeadNs : timestamp;
+        m_offset = static_cast<int64_t>(out - timestamp);
+        // A restart moved the timeline: keep it from running ahead.
+        m_anchored = m_resyncs > 0;
+        m_following = true;
+        m_next = out + duration;
+        Result result;
+        result.timestamp = out;
+        return result;
+    }
+
+    Result dropBacklog(uint64_t timestamp, uint64_t now)
+    {
+        ++m_dropped;
+        const uint64_t behind = now - timestamp;
+        if (behind > m_worst_dropped) m_worst_dropped = behind;
+        Result result;
+        result.drop = true;
+        return result;
+    }
+
     bool m_started = false;
     uint64_t m_stream_start = 0;
     uint64_t m_next = 0;
+    // Added to the sender's play-at times to place them on the timeline.
+    int64_t m_offset = 0;
+    // The offset was set by a ride-over or a restart (the lead is capped).
+    bool m_anchored = false;
     uint64_t m_dropped = 0;
     uint64_t m_worst_dropped = 0;
     bool m_following = true;

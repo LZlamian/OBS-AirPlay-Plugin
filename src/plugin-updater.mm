@@ -20,6 +20,96 @@ NSString *const OBSAirPlayUpdaterErrorDomain = @"com.lzlamian.obs-airplay.update
 @implementation OBSAirPlayReleaseAsset
 @end
 
+// A one-request session that cancels a response growing past `limit` bytes:
+// in memory (data), or to a file (download, handed to `fileHandler` before
+// NSURLSession deletes it).
+@interface OBSAirPlayLimitedFetch : NSObject <NSURLSessionDataDelegate, NSURLSessionDownloadDelegate>
+@property (nonatomic) unsigned long long limit;
+@property (nonatomic, strong) NSMutableData *data;
+@property (nonatomic, copy) void (^dataCompletion)(NSData *, NSHTTPURLResponse *, NSError *);
+@property (nonatomic, copy) NSError * (^fileHandler)(NSURL *location, NSHTTPURLResponse *response);
+@property (nonatomic, copy) void (^fileCompletion)(NSError *);
+@property (nonatomic, strong) NSError *fileError;
+@property (nonatomic) BOOL tooLarge;
+@end
+
+@implementation OBSAirPlayLimitedFetch
+
+- (void)URLSession:(NSURLSession *)session
+          dataTask:(NSURLSessionDataTask *)dataTask
+    didReceiveData:(NSData *)data
+{
+    (void)session;
+    if (self.data.length + data.length > self.limit) {
+        self.tooLarge = YES;
+        [dataTask cancel];
+        return;
+    }
+    [self.data appendData:data];
+}
+
+- (void)URLSession:(NSURLSession *)session
+                 downloadTask:(NSURLSessionDownloadTask *)downloadTask
+                 didWriteData:(int64_t)bytesWritten
+            totalBytesWritten:(int64_t)totalBytesWritten
+    totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite
+{
+    (void)session;
+    (void)bytesWritten;
+    (void)totalBytesExpectedToWrite;
+    if ((unsigned long long)totalBytesWritten > self.limit) {
+        self.tooLarge = YES;
+        [downloadTask cancel];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+                 downloadTask:(NSURLSessionDownloadTask *)downloadTask
+    didFinishDownloadingToURL:(NSURL *)location
+{
+    (void)session;
+    // The file exists only until this returns.
+    self.fileError = self.fileHandler(location, (NSHTTPURLResponse *)downloadTask.response);
+}
+
+- (void)URLSession:(NSURLSession *)session
+                    task:(NSURLSessionTask *)task
+    didCompleteWithError:(NSError *)error
+{
+    NSError *failure = self.tooLarge
+        ? [NSError errorWithDomain:OBSAirPlayUpdaterErrorDomain
+                              code:1
+                          userInfo:@{NSLocalizedDescriptionKey : @"The response is larger than expected."}]
+        : error;
+    NSHTTPURLResponse *response = (NSHTTPURLResponse *)task.response;
+    if (![response isKindOfClass:[NSHTTPURLResponse class]])
+        response = nil;
+    if (self.dataCompletion)
+        self.dataCompletion(failure ? nil : self.data, response, failure);
+    if (self.fileCompletion)
+        self.fileCompletion(failure ?: self.fileError);
+    self.dataCompletion = nil;
+    self.fileCompletion = nil;
+    self.fileHandler = nil;
+    [session finishTasksAndInvalidate];
+}
+
+@end
+
+void OBSAirPlayFetchLimited(NSURLRequest *request, NSUInteger limit,
+                            void (^completion)(NSData *, NSHTTPURLResponse *, NSError *))
+{
+    OBSAirPlayLimitedFetch *fetch = [[OBSAirPlayLimitedFetch alloc] init];
+    fetch.limit = limit;
+    fetch.data = [NSMutableData data];
+    fetch.dataCompletion = completion;
+    NSURLSession *session =
+        [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
+                                      delegate:fetch
+                                 delegateQueue:nil];
+    [[session dataTaskWithRequest:request] resume];
+}
+
 namespace {
 
 NSString *const kPluginBundleName = @"obs-airplay.plugin";
@@ -547,20 +637,25 @@ void downloadAndStage(OBSAirPlayReleaseAsset *asset, NSURL *pluginURL, NSString 
        timeoutInterval:30.0];
     [request setValue:userAgent forHTTPHeaderField:@"User-Agent"];
 
-    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession]
-        downloadTaskWithRequest:request
-              completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-        NSError *failure = error;
-        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-        if (!failure && (![httpResponse isKindOfClass:[NSHTTPURLResponse class]] ||
-                         httpResponse.statusCode != 200 || !location))
-            failure = updaterError(@"The download failed.");
-        // The downloaded file exists only until this handler returns.
-        if (!failure)
-            OBSAirPlayStageUpdate(location, asset, pluginURL, &failure);
-        completion(failure);
-    }];
-    [task resume];
+    // Cancelled as soon as it is larger than the size the release lists.
+    OBSAirPlayLimitedFetch *fetch = [[OBSAirPlayLimitedFetch alloc] init];
+    fetch.limit = asset.size;
+    fetch.fileHandler = ^NSError *(NSURL *location, NSHTTPURLResponse *response) {
+        if (![response isKindOfClass:[NSHTTPURLResponse class]] || response.statusCode != 200 ||
+            !location)
+            return updaterError(@"The download failed.");
+        NSError *failure = nil;
+        OBSAirPlayStageUpdate(location, asset, pluginURL, &failure);
+        return failure;
+    };
+    fetch.fileCompletion = ^(NSError *error) {
+        completion(error ?: nil);
+    };
+    NSURLSession *session =
+        [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
+                                      delegate:fetch
+                                 delegateQueue:nil];
+    [[session downloadTaskWithRequest:request] resume];
 }
 
 } // namespace
@@ -578,12 +673,9 @@ void OBSAirPlayDownloadAndStageUpdate(OBSAirPlayReleaseAsset *asset, NSURL *plug
            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
        timeoutInterval:30.0];
     [request setValue:userAgent forHTTPHeaderField:@"User-Agent"];
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:request
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-        if (error || ![httpResponse isKindOfClass:[NSHTTPURLResponse class]] ||
-            httpResponse.statusCode != 200 || !data || data.length > kMaxSignatureSize) {
+    OBSAirPlayFetchLimited(request, kMaxSignatureSize,
+                           ^(NSData *data, NSHTTPURLResponse *httpResponse, NSError *error) {
+        if (error || httpResponse.statusCode != 200 || !data) {
             completion(error ?: updaterError(@"The release signature could not be downloaded."));
             return;
         }
@@ -593,8 +685,7 @@ void OBSAirPlayDownloadAndStageUpdate(OBSAirPlayReleaseAsset *asset, NSURL *plug
             return;
         }
         downloadAndStage(asset, pluginURL, userAgent, completion);
-    }];
-    [task resume];
+    });
 }
 
 NSString *OBSAirPlayStagedUpdateVersion(NSURL *pluginURL)

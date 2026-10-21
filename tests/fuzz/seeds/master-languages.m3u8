@@ -1,0 +1,10 @@
+#EXTM3U
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-MEDIA:URI="https://manifest.example.test/api/manifest/hls_playlist/id/a1/itag/233/lang/en/index.m3u8",TYPE=AUDIO,GROUP-ID="233",DEFAULT=YES,AUTOSELECT=YES,NAME="English (United States) original",LANGUAGE="en-US",YT-EXT-AUDIO-CONTENT-ID="en-US.4"
+#EXT-X-MEDIA:URI="https://manifest.example.test/api/manifest/hls_playlist/id/a1/itag/233/lang/fr/index.m3u8",TYPE=AUDIO,GROUP-ID="233",DEFAULT=NO,AUTOSELECT=YES,NAME="French (France)",LANGUAGE="fr-FR",YT-EXT-AUDIO-CONTENT-ID="fr-FR.3"
+#EXT-X-MEDIA:URI="https://manifest.example.test/api/manifest/hls_playlist/id/a1/itag/234/lang/en/index.m3u8",TYPE=AUDIO,GROUP-ID="234",DEFAULT=YES,AUTOSELECT=YES,NAME="English (United States) original",LANGUAGE="en-US",YT-EXT-AUDIO-CONTENT-ID="en-US.4"
+#EXT-X-MEDIA:URI="https://manifest.example.test/api/manifest/hls_playlist/id/a1/itag/234/lang/fr/index.m3u8",TYPE=AUDIO,GROUP-ID="234",DEFAULT=NO,AUTOSELECT=YES,NAME="French (France)",LANGUAGE="fr-FR",YT-EXT-AUDIO-CONTENT-ID="fr-FR.3"
+#EXT-X-STREAM-INF:BANDWIDTH=1176518,CODECS="avc1.4d401f,mp4a.40.2",RESOLUTION=640x360,FRAME-RATE=30,AUDIO="233"
+https://manifest.example.test/api/manifest/hls_playlist/id/a1/itag/230/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2649219,CODECS="avc1.4d401f,mp4a.40.2",RESOLUTION=1280x720,FRAME-RATE=30,AUDIO="234"
+https://manifest.example.test/api/manifest/hls_playlist/id/a1/itag/232/index.m3u8

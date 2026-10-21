@@ -19,6 +19,19 @@ To check that it loaded: **Help > Log Files > View Current Log** should contain
 `OBS AirPlay Plugin loaded (version X.Y.Z)` and
 `UxPlay integration active on port 7000`.
 
+### Checking a download (optional)
+
+`SHA256SUMS` on the release lists the files' checksums and, from v2.7.0,
+`SHA256SUMS.sig` signs it with the project's release key (the key the
+self-updater trusts, in `docs/release-signing-key.pem` in the repository).
+With OpenSSL 3 (`brew install openssl@3`; macOS's own `openssl` cannot check
+Ed25519), in the folder with the downloads:
+
+```bash
+/opt/homebrew/opt/openssl@3/bin/openssl pkeyutl -verify -pubin -inkey release-signing-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
 Later versions install themselves when you choose **Install Update** in the
 prompt (see the README); turn the daily check off in the source's properties (under **Advanced settings**).
 
@@ -36,8 +49,15 @@ Versions before 2.6 also installed a copy in
 
 Start with the source's **Status** line (right-click the source > Properties):
 it says whether the receiver runs, on which port, whether a device is connected,
-and what is wrong when it does not run. Then run `./diagnose.sh` from the source
-folder while OBS is open; it needs no administrator rights and changes nothing.
+and what is wrong when it does not run. Then run the diagnostics script while
+OBS is open; it needs no administrator rights and changes nothing. It comes
+inside the plugin (from v2.7.0):
+
+```bash
+bash ~/Library/Application\ Support/obs-studio/plugins/obs-airplay.plugin/Contents/Resources/diagnose.sh
+```
+
+(from a source checkout: `./diagnose.sh`).
 
 ### Devices do not list the receiver
 

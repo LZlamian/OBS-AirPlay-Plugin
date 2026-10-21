@@ -51,7 +51,7 @@ void* airplay_source_create(obs_data_t* settings, obs_source_t* source)
     // shows them (or, the first time, provides them).
     adopt_or_show_module_settings(settings, source);
 
-    blog(LOG_INFO, "AirPlay source created");
+    blog(LOG_INFO, "[SOURCE] AirPlay source created");
     return airplay_source;
 }
 
@@ -59,7 +59,7 @@ void airplay_source_destroy(void* data)
 {
     auto airplay_source = static_cast<AirPlaySource*>(data);
     delete airplay_source;
-    blog(LOG_INFO, "AirPlay source destroyed");
+    blog(LOG_INFO, "[SOURCE] AirPlay source destroyed");
 }
 
 void airplay_source_get_defaults(obs_data_t* settings)

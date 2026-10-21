@@ -31,6 +31,16 @@ gen clip601.mp4 -f lavfi -i testsrc=size=640x360:rate=30 -t 3 -c:v libx264 -bf 0
   -pix_fmt yuv420p -colorspace smpte170m -color_primaries smpte170m -color_trc smpte170m
 gen clip709.mp4 -f lavfi -i testsrc=size=1280x720:rate=30 -t 3 -c:v libx264 -bf 0 -g 30 \
   -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709
+# The decoder tests' streams as Annex B too: a build against the release
+# FFmpeg (no bitstream filters) reads these instead of the MP4s
+for clip in clip clip601 clip709; do
+  gen "${clip}.h264" -i "${clip}.mp4" -map 0:v -c copy -bsf:v h264_mp4toannexb -f h264
+done
+# Audio only (AAC): an item with no picture
+gen audio.m4a -f lavfi -i sine=frequency=440:sample_rate=48000 -t 4 -c:a aac
+# 10-bit H.264, which VideoToolbox does not decode: the software fallback
+gen clip10.mp4 -f lavfi -i testsrc=size=640x360:rate=30 -t 3 -c:v libx264 -profile:v high10 \
+  -pix_fmt yuv420p10le
 # Stills: a two-frame 1 fps clip and a 0.5 fps one
 gen still2.mp4 -f lavfi -i testsrc=size=640x360:rate=1 -t 2 -c:v libx264 -pix_fmt yuv420p -r 1 \
   -movflags +faststart
@@ -42,7 +52,20 @@ if [[ ! -s hls/same.m3u8 ]]; then
   "${FFMPEG}" -v error -y -i clip8.mp4 -c copy -f hls -hls_time 2 -hls_list_size 0 \
     -hls_segment_filename 'hls/seg%d.ts' hls/same.m3u8
 fi
-sed -E 's#^(seg[0-9]+\.ts)$#http://127.0.0.1:18902/\1#' hls/same.m3u8 > hls/cross.m3u8
+CROSS_PORT=$(( ${OBS_AIRPLAY_TEST_PORT_BASE:-18900} + 2 ))  # tests/with-media-servers.sh
+sed -E "s#^(seg[0-9]+\.ts)\$#http://127.0.0.1:${CROSS_PORT}/\1#" hls/same.m3u8 > hls/cross.m3u8
+# A live playlist (no end) and two renditions: the 800 kb/s one is chosen
+grep -v 'EXT-X-ENDLIST' hls/same.m3u8 > hls/live.m3u8
+cp -f hls/same.m3u8 hls/high.m3u8
+printf '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1280x720\nhigh.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nsame.m3u8\n' \
+  > hls/multi.m3u8
+# AES-128 segments with the key next to the playlist
+if [[ ! -s hls/aes.m3u8 ]]; then
+  /usr/bin/openssl rand 16 > hls/aes.key
+  printf 'aes.key\n%s/hls/aes.key\n' "$(pwd)" > hls/aes.keyinfo
+  "${FFMPEG}" -v error -y -i clip8.mp4 -c copy -f hls -hls_time 2 -hls_list_size 0 \
+    -hls_key_info_file hls/aes.keyinfo -hls_segment_filename 'hls/aes%d.ts' hls/aes.m3u8
+fi
 # Self-signed certificate for --tls-verify
 if [[ ! -s tls/cert.pem ]]; then
   /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -keyout tls/key.pem -out tls/cert.pem \

@@ -88,8 +88,10 @@ public:
     // Cleared when an item is accepted.
     std::string lastRefusal() const;
 
-    // Update the advertised server name in the UxPlay dnssd context (live, no restart)
-    void updateServerName(const std::string& name);
+    // Update the advertised server name in the UxPlay dnssd context (live, no
+    // restart). False when the new name could not be set up: the old one is
+    // still advertised and the panel shows the error.
+    bool updateServerName(const std::string& name);
 
 #if defined(_WIN32)
     // Called once a second (the status thread). The Windows DNS service
@@ -170,6 +172,9 @@ private:
     void cancelDeferredClear();
     void deferredClearLoop();
     void stopDeferredClearThread();
+    // UxPlay's callbacks (one static function each, in the .cpp) and the
+    // table of them handed to raop_init.
+    struct RaopCallbacks;
     struct raop_callbacks_s makeRaopCallbacks();
 
     // Held for the whole of start(), stop() and updateServerName(), which

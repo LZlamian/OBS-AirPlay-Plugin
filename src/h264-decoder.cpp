@@ -136,7 +136,7 @@ H264Decoder::H264Decoder(AVCodecID codec_id, Mode mode)
     if (!reopen()) {
         return;
     }
-    blog(LOG_INFO, "Video decoder initialized for codec id %d (%s%s)",
+    blog(LOG_INFO, "[DECODE] Video decoder initialized for codec id %d (%s%s)",
          static_cast<int>(codec_id),
          m_hardware_open ? kHardwareDecoderName : "software",
          m_hardware_open ? " hardware decoding, software fallback" : " decoding");
@@ -182,13 +182,13 @@ bool H264Decoder::open(bool allow_hardware)
 {
     const AVCodec* codec = avcodec_find_decoder(m_codec_id);
     if (!codec) {
-        blog(LOG_ERROR, "Video codec not found (%d)", static_cast<int>(m_codec_id));
+        blog(LOG_ERROR, "[DECODE] Video codec not found (%d)", static_cast<int>(m_codec_id));
         return false;
     }
 
     m_codec_context = avcodec_alloc_context3(codec);
     if (!m_codec_context) {
-        blog(LOG_ERROR, "Failed to allocate codec context");
+        blog(LOG_ERROR, "[DECODE] Failed to allocate codec context");
         return false;
     }
 
@@ -219,14 +219,14 @@ bool H264Decoder::open(bool allow_hardware)
             m_codec_context->thread_count = 1;
             m_hardware_open = m_codec_context->hw_device_ctx != nullptr;
         } else {
-            blog(LOG_INFO, "%s hardware decoding unavailable (%d); using software",
+            blog(LOG_INFO, "[DECODE] %s hardware decoding unavailable (%d); using software",
                  kHardwareDecoderName, result);
         }
     }
 
     const int opened = avcodec_open2(m_codec_context, codec, nullptr);
     if (opened < 0) {
-        blog(LOG_ERROR, "Failed to open codec");
+        blog(LOG_ERROR, "[DECODE] Failed to open codec");
         close();
         return false;
     }
@@ -259,7 +259,7 @@ bool H264Decoder::reopen()
 bool H264Decoder::noteError(int error)
 {
     if ((m_errors_logged++ % kErrorLogInterval) == 0) {
-        blog(LOG_ERROR, "Error decoding mirror video (%d)", error);
+        blog(LOG_ERROR, "[DECODE] Error decoding mirror video (%d)", error);
     }
     if (!m_hardware_open) {
         return false;
@@ -300,6 +300,10 @@ void H264Decoder::releaseLockedBuffer()
 void H264Decoder::releaseFrame()
 {
     releaseLockedBuffer();
+    // m_frame holds the decoder's reference to the VideoToolbox surface:
+    // without this a still screen keeps one pool surface until the next
+    // picture.
+    if (m_frame) av_frame_unref(m_frame);
 }
 
 void H264Decoder::flush()
@@ -466,7 +470,7 @@ bool H264Decoder::outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_fra
             nullptr,
             nullptr);
         if (!m_sws_context) {
-            blog(LOG_ERROR, "Failed to create swscale context");
+            blog(LOG_ERROR, "[DECODE] Failed to create swscale context");
             return false;
         }
 
@@ -481,7 +485,7 @@ bool H264Decoder::outputSoftwareFrame(AVFrame* frame, DecodedVideoFrame& out_fra
                 // it again so the next frame retries the allocation instead of
                 // matching it and scaling into NULL planes.
                 av_frame_unref(m_frame_i420);
-                blog(LOG_ERROR, "Failed to allocate I420 frame buffer");
+                blog(LOG_ERROR, "[DECODE] Failed to allocate I420 frame buffer");
                 return false;
             }
         }
@@ -612,7 +616,7 @@ bool H264Decoder::decode(const uint8_t* data, size_t size, DecodedVideoFrame& ou
         const auto send = [&]() -> int {
             av_packet_unref(m_packet);
             if (av_new_packet(m_packet, static_cast<int>(unit_size)) < 0) {
-                blog(LOG_ERROR, "Failed to allocate video packet buffer");
+                blog(LOG_ERROR, "[DECODE] Failed to allocate video packet buffer");
                 return AVERROR(ENOMEM);
             }
             memcpy(m_packet->data, unit_data, unit_size);

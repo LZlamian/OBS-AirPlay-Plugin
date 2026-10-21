@@ -12,6 +12,9 @@
 
 #include <plist/plist.h>
 
+#include "test-timing.hpp"
+#include "url-policy-cases.hpp"
+
 #include <chrono>
 #include <algorithm>
 #include <thread>
@@ -24,12 +27,16 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" {
 #include "dnssd.h"
 #include "raop.h"
 }
+
+// {"text of the condition", its value}
+#define PROTOCOL_CONDITION(x) {#x, static_cast<bool>(x)}
 
 namespace {
 
@@ -646,10 +653,7 @@ int main(int argc, char** argv)
         // stays within 100 ms on a developer Mac through the transfer and the
         // slow (1.5 s) spool write; OBS_AIRPLAY_TIMING_SCALE widens it on
         // slower machines.
-        double budget_ms = 100.0;
-        if (const char* env = std::getenv("OBS_AIRPLAY_TIMING_SCALE")) {
-            if (std::atof(env) >= 1.0) budget_ms *= std::atof(env);
-        }
+        const double budget_ms = 100.0 * timingScale();
         const bool in_budget = worst_poll_ms < budget_ms;
         std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms "
                     "(budget %.0f ms) starting %.0f ms into the upload (reply at %.0f ms), "
@@ -935,51 +939,66 @@ int main(int argc, char** argv)
         access(file_spooled_location.c_str(), F_OK) != 0;
     const bool blob_spool_replaced = !blob_spooled_location.empty() &&
         access(blob_spooled_location.c_str(), F_OK) != 0;
-    const bool passed = native_response.find("200 OK") != std::string::npos &&
-        native_response.find("CSeq: 1") != std::string::npos &&
-        reverse_response.find("101 Switching Protocols") != std::string::npos &&
-        play_response.find("200 OK") != std::string::npos &&
-        unexpected_master_response.find("400 Bad Request") != std::string::npos &&
-        unexpected_media_response.find("400 Bad Request") != std::string::npos &&
-        playback_response.find("200 OK") != std::string::npos &&
-        playback_response.find("readyToPlay") != std::string::npos &&
-        rate_response.find("200 OK") != std::string::npos &&
-        scrub_response.find("200 OK") != std::string::npos &&
-        stop_response.find("200 OK") != std::string::npos &&
-        stateless_response.find("200 OK") != std::string::npos &&
-        classic_response.find("200 OK") != std::string::npos &&
-        unsafe_response.find("400 Bad Request") != std::string::npos &&
-        missing_response.find("400 Bad Request") != std::string::npos &&
-        missing_response.find("Connection: close") == std::string::npos &&
-        after_reject_response.find("200 OK") != std::string::npos &&
-        hosted_ok && insert_ok && paused_insert_ok &&
-        pending_response.find("200 OK") != std::string::npos &&
-        pending_fcup_request.find(pending_blob_url) != std::string::npos &&
-        pending_action_response.find("200 OK") != std::string::npos &&
-        blob_response.find("200 OK") != std::string::npos &&
-        blob_fcup_request.find(blob_url) != std::string::npos &&
-        blob_action_response.find("200 OK") != std::string::npos &&
-        blob_spooled && blob_spool_replaced &&
-        file_response.find("200 OK") != std::string::npos &&
-        file_fcup_request.find(file_url) != std::string::npos &&
-        file_action_response.find("200 OK") != std::string::npos &&
-        file_spooled && file_spool_cleaned &&
-        !selected_response.empty() &&
-        action_without_session.find("400 Bad Request") != std::string::npos &&
-        action_without_play_1.find("400 Bad Request") != std::string::npos &&
-        action_without_play_2.find("400 Bad Request") != std::string::npos &&
-        recovery_response.find("200 OK") != std::string::npos &&
-        action_missing_type_1.find("400 Bad Request") != std::string::npos &&
-        action_missing_type_2.find("400 Bad Request") != std::string::npos &&
-        action_wrong_session.find("400 Bad Request") != std::string::npos &&
-        invalid_action_response.find("400 Bad Request") != std::string::npos &&
-        state.first_location == "http://media.example.test/sample.mp4" &&
-        state.location == "https://example.test/recovery.mp4" &&
-        std::fabs(state.start_position) < 0.001f &&
-        std::fabs(state.playback_rate - 0.5f) < 0.001f &&
-        std::fabs(state.scrub_position - 80.5f) < 0.001f &&
-        state.stop_count == 6 && state.playback_info_count == 2 + polls &&
-        state.play_count == 11;
+    // Each condition by name, so a failure says which one.
+    const std::pair<const char*, bool> conditions[] = {
+        PROTOCOL_CONDITION(native_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(native_response.find("CSeq: 1") != std::string::npos),
+        PROTOCOL_CONDITION(reverse_response.find("101 Switching Protocols") != std::string::npos),
+        PROTOCOL_CONDITION(play_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(unexpected_master_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(unexpected_media_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(playback_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(playback_response.find("readyToPlay") != std::string::npos),
+        PROTOCOL_CONDITION(rate_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(scrub_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(stop_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(stateless_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(classic_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(unsafe_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(missing_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(missing_response.find("Connection: close") == std::string::npos),
+        PROTOCOL_CONDITION(after_reject_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(hosted_ok),
+        PROTOCOL_CONDITION(insert_ok),
+        PROTOCOL_CONDITION(paused_insert_ok),
+        PROTOCOL_CONDITION(pending_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(pending_fcup_request.find(pending_blob_url) != std::string::npos),
+        PROTOCOL_CONDITION(pending_action_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(blob_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(blob_fcup_request.find(blob_url) != std::string::npos),
+        PROTOCOL_CONDITION(blob_action_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(blob_spooled),
+        PROTOCOL_CONDITION(blob_spool_replaced),
+        PROTOCOL_CONDITION(file_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(file_fcup_request.find(file_url) != std::string::npos),
+        PROTOCOL_CONDITION(file_action_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(file_spooled),
+        PROTOCOL_CONDITION(file_spool_cleaned),
+        PROTOCOL_CONDITION(!selected_response.empty()),
+        PROTOCOL_CONDITION(action_without_session.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_without_play_1.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_without_play_2.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(recovery_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(action_missing_type_1.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_missing_type_2.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_wrong_session.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(invalid_action_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(state.first_location == "http://media.example.test/sample.mp4"),
+        PROTOCOL_CONDITION(state.location == "https://example.test/recovery.mp4"),
+        PROTOCOL_CONDITION(std::fabs(state.start_position) < 0.001f),
+        PROTOCOL_CONDITION(std::fabs(state.playback_rate - 0.5f) < 0.001f),
+        PROTOCOL_CONDITION(std::fabs(state.scrub_position - 80.5f) < 0.001f),
+        PROTOCOL_CONDITION(state.stop_count == 6),
+        PROTOCOL_CONDITION(state.playback_info_count == 2 + polls),
+        PROTOCOL_CONDITION(state.play_count == 11),
+    };
+    bool passed = true;
+    for (const auto& condition : conditions) {
+        if (!condition.second) {
+            std::printf("FAILED: %s\n", condition.first);
+            passed = false;
+        }
+    }
     std::printf("sender_hosted=%s hosted_url=%s hosted_start=%.3f reject_keeps_connection=%s\n",
                 hosted_ok ? "ok" : "failed", hosted_location.c_str(), hosted_start,
                 after_reject_response.find("200 OK") != std::string::npos ? "yes" : "no");
@@ -1054,6 +1073,84 @@ int main(int argc, char** argv)
         late_reply_response.find("400 Bad Request") != std::string::npos &&
         plays_after_late_reply == plays_before_late_reply;
     std::printf("stop_cancels_reverse_fetch=%s\n", stop_cancels_fetch ? "ok" : "FAILED");
+
+    // Master playlists that crashed the receiver (UxPlay's HLS language
+    // choice and media URI table, audit 2026-10-21): a LANGUAGE longer than
+    // its 6-byte field (NET-1), exactly one entry (count/0, NET-2), no
+    // DEFAULT=YES and no preferred-language match (languages[-1], NET-3),
+    // and no URI under the item's prefix (a zero-length media store). Each
+    // is the reply to the sender's own HLS /play; the receiver must keep
+    // answering afterwards.
+    const auto media_line = [](const std::string& prefix, const std::string& lang,
+                               const char* is_default, const char* name) {
+        return "#EXT-X-MEDIA:URI=\"" + prefix + "/" + lang.substr(0, 8) +
+            "/index.m3u8\",TYPE=AUDIO,GROUP-ID=\"233\",DEFAULT=" + is_default +
+            ",AUTOSELECT=YES,NAME=\"" + name + "\",LANGUAGE=\"" + lang +
+            "\",YT-EXT-AUDIO-CONTENT-ID=\"" + lang + ".4\"\n";
+    };
+    const auto variant_lines = [](const std::string& prefix) {
+        return "#EXT-X-STREAM-INF:BANDWIDTH=1176518,CODECS=\"avc1.4d401f,mp4a.40.2\","
+               "AUDIO=\"233\"\n" + prefix + "/230/index.m3u8\n";
+    };
+    const auto hls_prefix = [](const char* label) {
+        return std::string("http://media.example.test/") + label;
+    };
+    const std::string net1 = hls_prefix("net1-long-language");
+    const std::string long_language(300, 'A');
+    const std::string net1_playlist = "#EXTM3U\n" +
+        media_line(net1, long_language, "YES", "English") +
+        media_line(net1, long_language, "NO", "French") + variant_lines(net1);
+    const std::string net2 = hls_prefix("net2-one-entry");
+    const std::string net2_playlist = "#EXTM3U\n" + media_line(net2, "en", "YES", "English") +
+        variant_lines(net2);
+    const std::string net3 = hls_prefix("net3-no-default");
+    const std::string net3_playlist = "#EXTM3U\n" + media_line(net3, "en", "NO", "English") +
+        media_line(net3, "fr", "NO", "French") + variant_lines(net3);
+    const std::string foreign = hls_prefix("other-host");
+    const std::string foreign_playlist = "#EXTM3U\n" +
+        media_line(foreign, "en", "YES", "English") + variant_lines(foreign);
+    const auto hls_master_reply = [&](const char* label, const char* uuid,
+                                      const std::string& playlist) {
+        const std::string url = hls_prefix(label) + "/master.m3u8";
+        plist_t hls_root = plist_new_dict();
+        plist_dict_set_item(hls_root, "uuid", plist_new_string(uuid));
+        plist_dict_set_item(hls_root, "Content-Location", plist_new_string(url.c_str()));
+        const std::string hls_play_response =
+            binaryPlistExchange(port, "/play", session, hls_root);
+        plist_free(hls_root);
+        // (the previous item's media-playlist requests may come first)
+        const std::string hls_fcup_request = receiveUntil(reverse_fd, url.c_str());
+        plist_t hls_params = plist_new_dict();
+        plist_dict_set_item(hls_params, "FCUP_Response_StatusCode", plist_new_uint(200));
+        plist_dict_set_item(hls_params, "FCUP_Response_RequestID", plist_new_uint(1));
+        plist_dict_set_item(hls_params, "FCUP_Response_URL", plist_new_string(url.c_str()));
+        plist_dict_set_item(hls_params, "FCUP_Response_Data",
+                            plist_new_data(playlist.data(), playlist.size()));
+        plist_t hls_action = plist_new_dict();
+        plist_dict_set_item(hls_action, "type", plist_new_string("unhandledURLResponse"));
+        plist_dict_set_item(hls_action, "params", hls_params);
+        const std::string hls_action_response =
+            binaryPlistExchange(port, "/action", session, hls_action);
+        plist_free(hls_action);
+        const std::string alive_response =
+            httpExchange(port, control_request("GET", "/playback-info"));
+        httpExchange(port, control_request("POST", "/stop"));
+        const bool ok = hls_play_response.find("200 OK") != std::string::npos &&
+            hls_fcup_request.find(url) != std::string::npos &&
+            !hls_action_response.empty() &&
+            alive_response.find("200 OK") != std::string::npos;
+        std::printf("hls_master_%s=%s\n", label, ok ? "ok" : "FAILED");
+        return ok;
+    };
+    const bool hls_master_ok =
+        hls_master_reply("net1-long-language", "eeeeeeee-0000-0000-0000-000000000001",
+                         net1_playlist) &&
+        hls_master_reply("net2-one-entry", "eeeeeeee-0000-0000-0000-000000000002",
+                         net2_playlist) &&
+        hls_master_reply("net3-no-default", "eeeeeeee-0000-0000-0000-000000000003",
+                         net3_playlist) &&
+        hls_master_reply("foreign-uris", "eeeeeeee-0000-0000-0000-000000000004",
+                         foreign_playlist);
 
     // Closing the last AirPlay video connection without POST /stop must stop
     // URL playback so the output does not keep a stale frame.
@@ -1160,19 +1257,13 @@ int main(int argc, char** argv)
             : response.find("400 Bad Request") != std::string::npos ? "400" : "other";
     };
     struct PolicyCase { const char* url; const char* expected; };
-    const PolicyCase policy_cases[] = {
-        {"http://127.0.0.1/x.mp4", "400"},
-        {"http://127.0.0.1:631/x.mp4", "400"},
-        {"http://localhost/x.mp4", "400"},
-        {"http://169.254.169.254/latest/meta-data", "400"},
-        {"http://[::1]/x.mp4", "400"},
-        {"http://[::ffff:127.0.0.1]/x.mp4", "400"},
-        {"http://2130706433/x.mp4", "400"},
-        {"http://224.0.0.251/x.mp4", "400"},
-        {"http://10.1.2.3:22/x.mp4", "400"},
-        {"http://10.1.2.3/x.mp4", "200"},
-        {"https://user:hunter2@media.example.test:8443/x.mp4?token=SECRET123#frag", "200"},
-    };
+    std::vector<PolicyCase> policy_cases;
+    for (const SharedPolicyCase& c : kSharedPolicyCases) {
+        policy_cases.push_back({c.url, c.allowed ? "200" : "400"});
+    }
+    // A name is checked textually here (the player resolves it later).
+    policy_cases.push_back(
+        {"https://user:hunter2@media.example.test:8443/x.mp4?token=SECRET123#frag", "200"});
     bool policy_ok = true;
     for (const PolicyCase& c : policy_cases) {
         const char* status = play_status(c.url);
@@ -1467,7 +1558,7 @@ int main(int argc, char** argv)
     raop_stop_httpd(raop);
     raop_destroy(raop);
     dnssd_destroy(dnssd);
-    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && nul_string_ok &&
+    return passed && stop_cancels_fetch && hls_master_ok && close_stops && fp_setup2_ok && nul_string_ok &&
         stall_ok && policy_ok &&
         video_settings_ok &&
         oversized_ok && budget_ok && nonreader_ok && binding_ok && features_ok && large_transfer_ok ? 0 : 1;

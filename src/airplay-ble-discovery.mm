@@ -272,17 +272,15 @@ void checkForUpdates(pid_t parentPID)
     [request setValue:userAgent forHTTPHeaderField:@"User-Agent"];
     [request setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:request
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    // A release's JSON is a few KiB; 1 MiB is plenty.
+    OBSAirPlayFetchLimited(request, 1024 * 1024,
+                           ^(NSData *data, NSHTTPURLResponse *httpResponse, NSError *error) {
         if (error) {
             NSLog(@"[OBS AirPlay Update] check failed: %@", error.localizedDescription);
             return;
         }
 
-        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-        if (![httpResponse isKindOfClass:[NSHTTPURLResponse class]] ||
-            httpResponse.statusCode != 200 || !data) {
+        if (httpResponse.statusCode != 200 || !data) {
             NSLog(@"[OBS AirPlay Update] unexpected HTTP status: %ld",
                   (long)httpResponse.statusCode);
             return;
@@ -318,8 +316,7 @@ void checkForUpdates(pid_t parentPID)
                     showUpdatePrompt(latestVersion, installedVersion, asset, parentPID);
             });
         });
-    }];
-    [task resume];
+    });
 }
 
 } // namespace

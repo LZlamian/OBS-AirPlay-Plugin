@@ -9,7 +9,9 @@ MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET_OVERRIDE:-12.0}"
 # and without spaces, which libtool cannot handle.
 PREFIX="${OBS_AIRPLAY_DEPS_PREFIX:-${HOME}/Library/Caches/obs-airplay-release-deps/${ARCH}-macos${MACOS_DEPLOYMENT_TARGET}}"
 SOURCE_CACHE="${OBS_AIRPLAY_SOURCE_CACHE:-${HOME}/Library/Caches/obs-airplay-release-sources}"
-WORK_DIR="${OBS_AIRPLAY_DEPS_WORK_DIR:-${TMPDIR:-/tmp}/obs-airplay-release-deps-work/${ARCH}-macos${MACOS_DEPLOYMENT_TARGET}}"
+# In the user's own caches, not a fixed /tmp path another account could
+# create first.
+WORK_DIR="${OBS_AIRPLAY_DEPS_WORK_DIR:-${HOME}/Library/Caches/obs-airplay-release-deps-work/${ARCH}-macos${MACOS_DEPLOYMENT_TARGET}}"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
 FFMPEG_VERSION="8.1.2"
@@ -62,6 +64,12 @@ fetch_and_verify() {
 }
 
 mkdir -p "${SOURCE_CACHE}" "${WORK_DIR}" "${PREFIX}"
+for dir in "${SOURCE_CACHE}" "${WORK_DIR}" "${PREFIX}"; do
+  if [[ ! -O "${dir}" ]]; then
+    echo "error: ${dir} is not owned by $(id -un)" >&2
+    exit 1
+  fi
+done
 
 fetch_and_verify "${FFMPEG_ARCHIVE}" "${FFMPEG_URL}" "${FFMPEG_SHA256}"
 fetch_and_verify "${LIBPLIST_ARCHIVE}" "${LIBPLIST_URL}" "${LIBPLIST_SHA256}"

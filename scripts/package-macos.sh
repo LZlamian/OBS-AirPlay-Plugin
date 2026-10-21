@@ -522,6 +522,27 @@ else
   echo "warning: installer is unsigned; set OBS_AIRPLAY_INSTALLER_IDENTITY for release artifacts"
 fi
 
+# The release FFmpeg is built with --disable-everything and an allow-list
+# (build-macos-release-deps.sh); the tests run against it here, so a
+# component missing from the list fails the release, not a user's stream.
+if [[ -n "${OBS_AIRPLAY_TEST_FIXTURES:-}" ]]; then
+  echo "==> Testing against the release dependencies"
+  TEST_BUILD_DIR="${BUILD_DIR}-tests"
+  TEST_ARGS=()
+  for arg in "${CMAKE_ARGS[@]}"; do
+    case "${arg}" in
+      "${BUILD_DIR}") TEST_ARGS+=("${TEST_BUILD_DIR}") ;;
+      -DBUILD_TESTING=OFF)
+        TEST_ARGS+=(-DBUILD_TESTING=ON "-DOBS_AIRPLAY_PREBUILT_FIXTURES=${OBS_AIRPLAY_TEST_FIXTURES}") ;;
+      *) TEST_ARGS+=("${arg}") ;;
+    esac
+  done
+  cmake "${TEST_ARGS[@]}"
+  cmake --build "${TEST_BUILD_DIR}" --config Release -j"${JOBS}"
+  # The updater smoke needs Homebrew's openssl command; it does not use FFmpeg.
+  ctest --test-dir "${TEST_BUILD_DIR}" --output-on-failure -j2 -E updater
+fi
+
 echo
 echo "Artifacts created:"
 echo "  ${DIST_DIR}/${ZIP_NAME}"

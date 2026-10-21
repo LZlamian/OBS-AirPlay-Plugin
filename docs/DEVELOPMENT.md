@@ -13,6 +13,7 @@
 | `src/audio-retimer.hpp` | Keeps mirror audio from reaching OBS late (startup burst, stalls) |
 | `src/media-player.cpp` | AirPlay video ("URL") player: demux, decode, presenter thread, clock |
 | `src/media-url-policy.cpp` | Which URLs AirPlay video may fetch (resolved addresses, redirects, HLS) |
+| `src/media-fetch.cpp` | How the player fetches them: checked addresses, interruptible lookups, redirects followed by hand |
 | `src/plugin-updater.mm`, `src/update-signature.swift` | Self-updater: release checks, Ed25519 signature, staging, swap |
 | `src/airplay-ble-discovery.mm` | The helper app: Bluetooth advertising, update prompts, install after OBS quits |
 | `uxplay/` | The UxPlay fork (git submodule, LZlamian/UxPlay): AirPlay protocol, HTTP server, DNS-SD |
@@ -21,8 +22,31 @@
 | `scripts/` | Release dependencies, packaging, release signing |
 | `licenses/` | Third-party license texts shipped in the bundle |
 
-The 2026-10 audit of v2.5.1, its action plan and the completion record are in
-[AUDIT_2026-10-18.md](AUDIT_2026-10-18.md).
+The 2026-10 audits, their action plans and completion records are in
+[AUDIT_2026-10-18.md](AUDIT_2026-10-18.md) (v2.5.1) and
+[AUDIT_2026-10-21.md](AUDIT_2026-10-21.md) (v2.6.0 and the Windows beta).
+
+## How data flows
+
+A device finds the receiver through Bonjour (UxPlay's DNS-SD context,
+registered by `UxPlayIntegration::start`) and talks RTSP/HTTP to UxPlay's
+single HTTP thread, which runs every request handler (pairing, `/info`,
+`SETUP`, `/play`, `/action`, playback controls). Screen mirroring then
+streams over two more sockets: UxPlay's mirror thread decrypts each video
+access unit and hands it to `AirPlayServer::ingestVideoBitstream`, which
+queues it for the server's decode thread (`H264Decoder`, VideoToolbox) and
+`obs_source_output_video`; UxPlay's audio thread hands each packet to
+`ingestAudioBitstream`, decoded and re-timed (`AudioRetimer`) on that thread
+and sent to `obs_source_output_audio`. Both use one clock anchor
+(`normalizeTimestamp`). AirPlay video ("URL" playback, from Safari or apps)
+arrives as `POST /play`: UxPlay checks the URL with its own policy
+(`uxplay/lib/media_url_policy.h`), then `MediaPlayer` opens it on a worker
+thread, fetching through `media_fetch::Session` (every URL checked again and
+connected by its checked address), decodes it, and a presenter thread outputs
+the pictures; the sound goes out from the worker. Media only the sender has
+(a page's `blob:`) comes back over the reverse channel, is written to a
+private temporary file by UxPlay's spool worker (`uxplay/lib/spool.c`) and
+played from there.
 
 ## Build and test
 
@@ -31,7 +55,7 @@ git clone --recursive https://github.com/LZlamian/OBS-AirPlay-Plugin.git
 brew install cmake pkg-config ffmpeg libplist openssl@3   # and OBS in /Applications
 cmake --preset release            # also: debug, asan, tsan
 cmake --build --preset release
-ctest --preset release            # 29 tests, about 40 s; generates its media first
+ctest --preset release -j4        # 40 tests, about a minute; generates its media first
 ```
 
 The plugin bundle is `build-release/obs-airplay.plugin`; copy it into
@@ -48,8 +72,11 @@ The smokes can also be run by hand (see the usage line of each):
   `--first-decode`: the mirror decoder in hardware and software.
 - `obs-airplay-updater-smoke BUNDLE SCRATCH`, `--verify-release ZIP`: the
   updater on scratch copies (absolute paths).
-- `obs-airplay-unit-tests`: the HLS playlist reader, the media port list and
-  the audio decoder, without network or OBS.
+- `obs-airplay-unit-tests`: the HLS playlist reader, the media port list,
+  the audio decoder and the audio re-timer, without network or OBS.
+- `obs-airplay-airplay-server-tests H264_FILE`: `AirPlayServer` with libobs
+  stubbed: the mirror decode thread, its backlog, the clock anchor and the
+  re-timer wiring.
 
 Timing checks (the large-blob latency budget, follow-clock tolerances) are
 set for a developer Mac; `OBS_AIRPLAY_TIMING_SCALE=3` widens them on slower
@@ -60,13 +87,17 @@ media on a worker thread and must keep answering meanwhile.
 `media-resilient-http` plays through `tests/truncating-server.py`, which cuts
 every response short, as some sender media servers do.
 
-Fuzzing: configure with `--preset asan -DOBS_AIRPLAY_FUZZ=ON` for
+Fuzzing: the `asan` preset builds (`-DOBS_AIRPLAY_FUZZ=ON`)
 `obs-airplay-fuzz-hls`, `-fuzz-h264` (mirror access units into the software
-decoder), `-fuzz-http-request` (the fork's request parser) and
+decoder), `-fuzz-http-request` (the fork's request parser),
+`-fuzz-master-playlist` (HLS master playlists a sender returns to `/action`:
+the fork's audio-language choice, URI table and prefix rewrite) and
 `-fuzz-requests` (request sequences through the receiver's handlers: `/play`,
 `/action`, playback controls and RTSP, with binary plist bodies; seeds from
 `tests/fuzz/make-request-seeds.py`, receiver log with
-`OBS_AIRPLAY_FUZZ_VERBOSE=1`), each with a short `fuzz-*` CTest run. With a
+`OBS_AIRPLAY_FUZZ_VERBOSE=1`), each with a short `fuzz-*` CTest run; CI runs
+every test in that build. The test preset sets `UBSAN_OPTIONS=halt_on_error=1`,
+so undefined behaviour fails a test instead of only printing. With a
 clang that has libFuzzer's runtime (not Apple's) they are libFuzzer binaries;
 otherwise `tests/fuzz/fuzz-driver.cpp` runs seeded random mutations:
 `obs-airplay-fuzz-requests -runs=1000000 -seed=7 tests/fuzz/seeds/requests-*.bin`.
@@ -75,6 +106,29 @@ Untrusted binary plists are parsed with `plist_from_bin_checked`
 (`uxplay/lib/plist_checked.h`), which refuses strings and keys with a NUL
 byte: libplist's getters assert on them. The release libplist is also built
 with `NDEBUG`.
+
+Switches (build options, environment variables, flag files):
+
+| Switch | Where | What it does |
+|---|---|---|
+| `OBS_AIRPLAY_WERROR` | CMake | Warnings in this project's code are errors (CI) |
+| `OBS_AIRPLAY_FUZZ` | CMake (on in `asan`) | Builds the fuzz targets and their `fuzz-*` runs |
+| `OBS_AIRPLAY_FAST_CONNECT` | CMake (on) | The AirServer Bonjour and `/info` profile; off is UxPlay's own |
+| `NO_MARCH_NATIVE` | CMake, UxPlay | No `-march=native` on Intel (release builds set it) |
+| `OBS_AIRPLAY_TEST_PORT_BASE` | CMake (18900) | Base of the media tests' local server ports, per build tree |
+| `OBS_AIRPLAY_PREBUILT_FIXTURES` | CMake | Test media made elsewhere (builds against the release FFmpeg) |
+| `OBS_AIRPLAY_TEST_FIXTURES` | `package-macos.sh` | Also build and run the tests against the release dependencies |
+| `OBS_AIRPLAY_TIMING_SCALE` | tests | Widens the smokes' deadlines (CI: 3, sanitizers: 5) |
+| `OBS_AIRPLAY_MEDIA_TRACE=1` | OBS, or file `obs-airplay-media-trace` | The `[MEDIA-TRACE]` protocol dump of AirPlay video |
+| `OBS_AIRPLAY_HW_DECODE=0` | OBS, or file `obs-airplay-software-decode` | Software video decoding |
+| `OBS_AIRPLAY_MEDIA_PORTS=80,443,...` | OBS | Web ports AirPlay video may use on other hosts |
+| `OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1` | OBS | Stops advertising FairPlay video (feature bit 2) in the fast-connect profile; not yet checked on devices |
+| `PROTOCOL_SMOKE_MEDIA_TRACE` | protocol smoke | The receiver's `[MEDIA-TRACE]` dump during the test |
+| `MEDIA_SMOKE_FFMPEG_VERBOSE` | media smoke | FFmpeg's own log at verbose level |
+| `MEDIA_SMOKE_DUMP_PGM=prefix` | media smoke `--rotation` | Writes the first pictures as PGM files to look at |
+
+Flag files go in the plugin's OBS config folder
+(`~/Library/Application Support/obs-studio/plugin_config/obs-airplay.so/`).
 
 Leak check: `MallocStackLogging=1 leaks --atExit -- <smoke> <args>`. Note that
 `leaks` exits 0 even when the program fails: take the result from a plain run.
@@ -105,6 +159,11 @@ Lock order (take left before right, never the reverse):
   `m_mutex` is never held while calling out; `m_status_mutex` is a leaf.
 - `MediaPlayer`: `control_mutex` → `state_mutex`; `queue_mutex` → `state_mutex`;
   `callback_mutex` is a leaf.
+
+Exceptions: UxPlay's callbacks (`UxPlayIntegration::makeRaopCallbacks`) run
+on its C threads, which an exception cannot cross: they are `noexcept`, and
+code they reach that can throw (`std::thread` construction in
+`MediaPlayer::play`) catches it.
 
 Frame lifetime: the planes in `MediaVideoFrame`, `MediaAudioFrame` and
 `DecodedVideoFrame` belong to the decoder (an AVFrame or a locked VideoToolbox
@@ -138,7 +197,6 @@ runtime OBS itself uses); why not MSVC is in
 
 ```bash
 pacman -S git make perl unzip mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,nasm,pkgconf,python,ffmpeg}
-for p in windows/uxplay-patches/*.patch; do git -C uxplay apply "../$p"; done
 scripts/build-windows-release-deps.sh          # once; ~/.cache/obs-airplay-release-deps
 scripts/windows-bonjour-sdk.sh "$HOME/bonjour-sdk"
 # obs.dll: bin/64bit/obs.dll from the OBS Studio 32.0.4 Windows zip
@@ -165,13 +223,12 @@ publisher in `src/windows-ble.cpp`; release rules and signature check in
 `src/windows-update.cpp`; the update is the release's installer, started
 elevated and waiting for OBS to quit); the DLL exports only
 `obs_module_*` through a `.def` made from `src/obs-airplay.exports`, and
-carries its MinGW runtime. UxPlay's Windows changes are the patches in
-`windows/uxplay-patches/` (made with `git format-patch` from a branch on
-the pinned commit), applied by CI until they are committed to the fork:
-build fixes, DNS-SD through the Windows DNS service when Bonjour is missing,
-private spool files, a lingering close after 413, no llhttp exports. The
-macOS build does not apply them, so plugin code that needs them stays
-behind `_WIN32` until the submodule moves.
+carries its MinGW runtime. UxPlay's Windows changes are commits on the
+fork's `obs-airplay-windows` branch (on top of the macOS branch's fork
+commits): build fixes, DNS-SD through the Windows DNS service when Bonjour
+is missing or stopped (`lib/dnssd_win32.c`), private spool files
+(`lib/spool_win32.c`), a lingering close after 413, no llhttp exports. The
+macOS build compiles the same fork; the Windows code is behind `_WIN32`.
 
 ## Releasing
 
@@ -187,9 +244,14 @@ behind `_WIN32` until the submodule moves.
    OBS_AIRPLAY_RELEASE_TAG=vX.Y.Z scripts/package-macos.sh` (paths without
    spaces). It signs the zip with `~/.obs-airplay-release-signing/ed25519.pem`
    via `scripts/sign-release.sh`.
-4. Check `obs-airplay-updater-smoke --verify-release dist/obs-airplay-vX.Y.Z-macos-arm64.zip`.
+4. Check `obs-airplay-updater-smoke --verify-release dist/obs-airplay-vX.Y.Z-macos-arm64.zip`,
+   then `scripts/sign-checksums.sh <dist>` for `SHA256SUMS` and its signature
+   `SHA256SUMS.sig` (the public key is `docs/release-signing-key.pem`; checking
+   is described in INSTALL.md). With `OBS_AIRPLAY_TEST_FIXTURES` set to a
+   folder made by `tests/make-fixtures.sh`, `package-macos.sh` also builds and
+   runs the tests against the release dependencies (CI does).
 5. Publish the release (not a draft, not a pre-release) with the zip, its
-   `.sig`, the pkg and `SHA256SUMS`. The self-updater needs: the asset name
+   `.sig`, the pkg, `SHA256SUMS` and `SHA256SUMS.sig`. The self-updater needs: the asset name
    `obs-airplay-vX.Y.Z-macos-<arch>.zip`, the plugin as its only top-level
    entry (`ditto -c -k --keepParent`), bundle version equal to the tag, an
    intact code seal, the `.sig` next to it, and GitHub's published digest.

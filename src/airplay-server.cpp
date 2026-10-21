@@ -26,7 +26,6 @@ AirPlayServer::AirPlayServer()
 AirPlayServer::~AirPlayServer()
 {
     stop();
-    stopVideoThread();
 }
 
 void AirPlayServer::stopVideoThread()
@@ -201,7 +200,7 @@ void AirPlayServer::resetDecoders(bool clear_output, bool flush_decoders)
     }
     airplay_source_notify_frame_queued(0);
     resetStreamClock();
-    blog(LOG_INFO, "AirPlay output reset (decoders %s, last OBS frame %s)",
+    blog(LOG_INFO, "[OUTPUT] AirPlay output reset (decoders %s, last OBS frame %s)",
          flush_decoders ? "flushed" : "kept", clear_output ? "cleared" : "kept");
 }
 
@@ -256,6 +255,10 @@ uint64_t AirPlayServer::normalizeTimestamp(uint64_t source_timestamp)
 
 void AirPlayServer::stop()
 {
+    // The decode thread outputs to the sources and calls the frame-output
+    // callback (into UxPlayIntegration): it goes first. Queued payloads are
+    // dropped.
+    stopVideoThread();
     // Release all weak source refs
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     for (obs_weak_source_t* weak : m_registered_sources) {
@@ -268,7 +271,7 @@ void AirPlayServer::registerSource(obs_source_t* source)
 {
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     m_registered_sources.push_back(obs_source_get_weak_source(source));
-    blog(LOG_INFO, "Source registered with AirPlay server");
+    blog(LOG_INFO, "[OUTPUT] Source registered with AirPlay server");
 }
 
 void AirPlayServer::unregisterSource(obs_source_t* source)
@@ -284,7 +287,7 @@ void AirPlayServer::unregisterSource(obs_source_t* source)
     if (it != m_registered_sources.end()) {
         obs_weak_source_release(*it);
         m_registered_sources.erase(it);
-        blog(LOG_INFO, "Source unregistered from AirPlay server");
+        blog(LOG_INFO, "[OUTPUT] Source unregistered from AirPlay server");
     }
 }
 
@@ -293,11 +296,10 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
 {
     H264Decoder* decoder = is_h265 ? m_h265_decoder.get() : m_h264_decoder.get();
     if (!decoder) {
-        static bool logged_decoder_missing = false;
-        if (!logged_decoder_missing) {
-            blog(LOG_WARNING, "No %s decoder instance available",
+        if (!m_logged_decoder_missing) {
+            blog(LOG_WARNING, "[DECODE] No %s decoder instance available",
                  is_h265 ? "H265/HEVC" : "H264");
-            logged_decoder_missing = true;
+            m_logged_decoder_missing = true;
         }
         return;
     }
@@ -509,7 +511,7 @@ void AirPlayServer::decodeAndOutputVideo(const uint8_t* data, size_t size, uint6
     }
 
     if ((m_video_frame_counter % kVideoFrameLogInterval) == 0) {
-        blog(LOG_INFO, "Output video frame #%llu (%s, %ux%u)",
+        blog(LOG_DEBUG, "[OUTPUT] Output video frame #%llu (%s, %ux%u)",
              static_cast<unsigned long long>(m_video_frame_counter),
              is_h265 ? "HEVC" : "H264",
              frame.width,
@@ -588,7 +590,7 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     if (m_audio_retimer.resyncs() != m_audio_retimer_resyncs_reported &&
         m_audio_retimer_resyncs_reported < 10) {
         m_audio_retimer_resyncs_reported = m_audio_retimer.resyncs();
-        blog(LOG_INFO, "[AUDIO] stream fell behind; restarted at the current time (%llu so far)",
+        blog(LOG_INFO, "[AUDIO] stream fell behind; restarted just ahead of the current time (%llu so far)",
              static_cast<unsigned long long>(m_audio_retimer.resyncs()));
     }
     if (m_audio_retimer.trimmed() == 1 && !m_audio_retimer_trim_reported) {
@@ -642,7 +644,7 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     }
 
     if ((m_audio_frame_counter % 240) == 0) {
-        blog(LOG_INFO, "Output audio frame #%llu (codec=%u, frames=%u, rate=%u)",
+        blog(LOG_DEBUG, "[AUDIO] Output audio frame #%llu (codec=%u, frames=%u, rate=%u)",
              static_cast<unsigned long long>(m_audio_frame_counter),
              static_cast<unsigned int>(codec_type),
              audio.frames,

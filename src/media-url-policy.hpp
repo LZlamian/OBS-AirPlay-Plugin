@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#if defined(_WIN32)
+#include <winsock2.h>  // sockaddr_storage
+#else
+#include <sys/socket.h>
+#endif
+
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -34,16 +41,41 @@ void setLocalFilesAllowedForTesting(bool allowed);
 //
 // checkItem: the URL the receiver accepted for the item. A literal address
 // was already checked with the sender's address in mind; a host name is
-// resolved, and refused if any of its addresses is loopback, unspecified,
-// multicast, reserved or link-local. "localhost" is only produced by the
+// resolved, and refused if it does not resolve or any of its addresses is
+// loopback, unspecified, multicast, reserved or link-local. "localhost" is only produced by the
 // receiver's own HLS proxy. With setSenderOnly, a host name is refused.
 std::string checkItem(const std::string& url);
 // checkNested: any other URL fetched for the item. Same host and port as the
-// item are allowed; otherwise the address rules apply to every resolved
+// item are allowed (a name as long as it still resolves to allowed
+// addresses); otherwise the address rules apply to every resolved
 // address and the port must be allowed. With setSenderOnly, only the item's
 // own address (any port) is allowed.
 std::string checkNested(const std::string& url, const std::string& item_url);
 // A non-HTTP item must be the receiver's own spool file (obs-airplay-fcup-*).
 std::string checkLocalFile(const std::string& location);
+
+// Resolves a host name to its addresses; false when it does not resolve.
+using Resolver =
+    std::function<bool(const std::string& host, std::vector<sockaddr_storage>& addresses)>;
+
+// checkItem/checkNested with the lookup supplied, and for a host name the
+// checked address the fetch must connect to (numeric, no brackets): FFmpeg
+// looking the name up again could get another answer (DNS rebinding).
+// `address` is empty for literal addresses and the receiver's "localhost".
+struct Decision {
+    std::string refused; // empty when allowed
+    std::string address;
+};
+Decision decideItem(const std::string& url, const Resolver& resolve);
+Decision decideNested(const std::string& url, const std::string& item_url,
+                      const Resolver& resolve);
+
+// getaddrinfo on a helper thread, given up when `interrupted` returns true
+// or after timeout_ms (the lookup itself cannot be cancelled).
+bool resolveInterruptible(const std::string& host, std::vector<sockaddr_storage>& addresses,
+                          const std::function<bool()>& interrupted, int timeout_ms);
+// Test hook: replaces getaddrinfo in resolveInterruptible, checkItem and
+// checkNested (empty restores it).
+void setResolverForTesting(Resolver resolver);
 
 } // namespace media_url_policy

@@ -18,7 +18,7 @@ namespace {
 
 int failures = 0;
 // OpenSSL 3 for test signing keys (macOS's /usr/bin/openssl is LibreSSL).
-NSString *gOpenSSL = @"/opt/homebrew/bin/openssl";
+NSString *gOpenSSL = nil;  // found in main() unless OPENSSL is set
 
 void expect(bool condition, const char *what)
 {
@@ -237,8 +237,23 @@ int main(int argc, const char *argv[])
         [files removeItemAtPath:scratch error:nil];
         [files createDirectoryAtPath:scratch withIntermediateDirectories:YES attributes:nil
                                error:nil];
-        if (const char *openssl = std::getenv("OPENSSL"))
+        if (const char *openssl = std::getenv("OPENSSL")) {
             gOpenSSL = @(openssl);
+        } else {
+            // Homebrew on Apple silicon or Intel; macOS's own is LibreSSL.
+            for (NSString *candidate in @[@"/opt/homebrew/opt/openssl@3/bin/openssl",
+                                          @"/usr/local/opt/openssl@3/bin/openssl",
+                                          @"/opt/homebrew/bin/openssl", @"/usr/local/bin/openssl"]) {
+                if ([files isExecutableFileAtPath:candidate]) {
+                    gOpenSSL = candidate;
+                    break;
+                }
+            }
+        }
+        if (!gOpenSSL) {
+            std::fprintf(stderr, "updater-smoke: OpenSSL 3 not found (set OPENSSL)\n");
+            return 2;
+        }
         // The scratch plugin is not in the home folder; let it update itself.
         OBSAirPlaySetUpdateRootForTesting(scratch);
         NSString *releaseKey = makeKey([scratch stringByAppendingPathComponent:@"release.pem"]);
@@ -481,6 +496,51 @@ int main(int argc, const char *argv[])
                "installers racing for a stale lock: one swap, replaced version kept");
         OBSAirPlayForgetPreviousVersion(pluginURL);
         expect(!OBSAirPlayPreviousVersion(pluginURL), "kept version removed after a newer start");
+
+        // Downloads are cut off at their limit while they arrive (SC-3): a
+        // local server offers 2 MiB and 100 bytes, fetched with a 1 MiB limit.
+        NSString *served = [scratch stringByAppendingPathComponent:@"served"];
+        [files createDirectoryAtPath:served withIntermediateDirectories:YES attributes:nil error:nil];
+        [[NSMutableData dataWithLength:2 * 1024 * 1024]
+            writeToFile:[served stringByAppendingPathComponent:@"big"] atomically:YES];
+        [[NSMutableData dataWithLength:100]
+            writeToFile:[served stringByAppendingPathComponent:@"small"] atomically:YES];
+        const char *base_env = getenv("OBS_AIRPLAY_TEST_PORT_BASE");
+        NSString *port = [NSString stringWithFormat:@"%d", (base_env ? atoi(base_env) : 18900) + 5];
+        NSTask *server = [[NSTask alloc] init];
+        server.executableURL = [NSURL fileURLWithPath:@"/usr/bin/python3"];
+        server.arguments = @[@"-I", @"-m", @"http.server", port, @"--bind", @"127.0.0.1",
+                             @"--directory", served];
+        server.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+        server.standardError = [NSFileHandle fileHandleWithNullDevice];
+        [server launchAndReturnError:nil];
+        const auto fetch = [](NSString *url, NSUInteger *length) {
+            __block NSError *failure = nil;
+            __block NSUInteger received = 0;
+            dispatch_semaphore_t done = dispatch_semaphore_create(0);
+            OBSAirPlayFetchLimited([NSURLRequest requestWithURL:[NSURL URLWithString:url]],
+                                   1024 * 1024, ^(NSData *data, NSHTTPURLResponse *, NSError *error) {
+                failure = error;
+                received = data.length;
+                dispatch_semaphore_signal(done);
+            });
+            dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+            *length = received;
+            return failure;
+        };
+        NSUInteger small_length = 0;
+        NSError *small_error = nil;
+        for (int attempt = 0; attempt < 50; ++attempt) {  // the server starting
+            small_error = fetch([NSString stringWithFormat:@"http://127.0.0.1:%@/small", port], &small_length);
+            if (!small_error) break;
+            usleep(100000);
+        }
+        NSUInteger big_length = 0;
+        NSError *big_error = fetch([NSString stringWithFormat:@"http://127.0.0.1:%@/big", port], &big_length);
+        [server terminate];
+        [server waitUntilExit];
+        expect(!small_error && small_length == 100, "download within its limit received");
+        expect(big_error && big_length == 0, "download past its limit cancelled");
 
         [files removeItemAtPath:scratch error:nil];
         std::printf("updater-smoke -> %s\n", failures == 0 ? "ok" : "FAILED");

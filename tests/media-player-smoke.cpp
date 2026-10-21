@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "media-player.hpp"
 #include "media-url-policy.hpp"
+#include "test-timing.hpp"
+#include "url-policy-cases.hpp"
 
 extern "C" {
+#include <libavformat/avio.h>
 #include <libavutil/log.h>
 }
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <algorithm>
 #include <atomic>
@@ -15,10 +21,16 @@ extern "C" {
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 // Set when the player logs that it continued a cut-off response (--resilient).
 std::atomic<int> g_resumed_responses{0};
+// Every log line, for modes that check what the player reported.
+std::mutex g_log_mutex;
+std::string g_log;
 
 extern "C" void blog(int, const char* format, ...)
 {
@@ -28,6 +40,11 @@ extern "C" void blog(int, const char* format, ...)
     std::vsnprintf(message, sizeof(message), format, args);
     va_end(args);
     std::fprintf(stderr, "media-smoke: %s\n", message);
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_log += message;
+        g_log += '\n';
+    }
     int reopens = 0;
     if (std::sscanf(message, "[MEDIA] media server responses ended early %d", &reopens) == 1) {
         g_resumed_responses.store(reopens);
@@ -55,7 +72,7 @@ int seekSync(const char* location)
     };
 
     player.play(location, 20.0);
-    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) wait_for(50);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 10000, 50);
     wait_for(1500);
     // Without pre-roll discard the frames from the keyframe at 10 s play out
     // first and the position would still be pinned at 20 s.
@@ -97,7 +114,7 @@ int seekSync(const char* location)
     const auto replace_started = std::chrono::steady_clock::now();
     player.play(location, 3.0);
     player.setRate(0.0f);
-    for (int i = 0; i < 100 && video_frames.load() == before_paused_start; ++i) wait_for(20);
+    waitUntil([&] { return !(video_frames.load() == before_paused_start); }, 2000, 20);
     const double replace_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - replace_started).count();
     wait_for(700);
@@ -128,19 +145,19 @@ int sparseClip(const char* location)
     });
     const auto started = std::chrono::steady_clock::now();
     player.play(location, 0.0);
-    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    waitUntil([&] { return !(video_frames.load() == 0); }, 1000, 5);
     player.setRate(1.0f);
     MediaPlaybackInfo info;
     do {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         info = player.getPlaybackInfo();
-    } while (!info.ended && std::chrono::steady_clock::now() - started < std::chrono::seconds(6));
+    } while (!info.ended && std::chrono::steady_clock::now() - started <
+                                std::chrono::milliseconds(scaledMs(9000)));
     const double ended_after = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     player.stop();
-    const bool ok = info.ended && ended_after > 1.7 && video_frames.load() >= 1;
+    // Its last frame (at 4 s) is shown for its 2 s: the item lasts 6 s.
+    const bool ok = info.ended && ended_after > 5.7 && video_frames.load() >= 3;
     std::printf("sparse-clip ended_after=%.3fs frames=%u -> %s\n", ended_after,
                 video_frames.load(), ok ? "ok" : "FAILED");
     return ok ? 0 : 1;
@@ -160,7 +177,7 @@ int scrubDrag(const char* location)
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
     };
     player.play(location, 30.0);
-    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) wait_for(20);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 4000, 20);
     wait_for(500);
     player.setRate(0.0f);
     const double targets[] = {40, 48, 52, 44, 35, 27, 18, 12, 9, 14, 22, 31, 39, 45,
@@ -274,7 +291,7 @@ int scrubLatency(const char* location, int min_drag_frames, int drag_gap_ms)
     };
 
     player.play(location, 5.0);
-    for (int i = 0; i < 300 && video_frames.load() == 0; ++i) wait_for(20);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 6000, 20);
     wait_for(300);
     player.setRate(0.0f);
     wait_for(400);
@@ -350,10 +367,7 @@ int followClock(const char* location)
     };
     // The output may be a frame or two off the sender's clock. Shared CI
     // runners are slower and noisier: OBS_AIRPLAY_TIMING_SCALE widens this.
-    double timing_scale = 1.0;
-    if (const char* env = std::getenv("OBS_AIRPLAY_TIMING_SCALE")) {
-        if (std::atof(env) >= 1.0) timing_scale = std::atof(env);
-    }
+    const double timing_scale = timingScale();
     const double kTolerance = 0.12 * timing_scale;
     bool ok = true;
     const auto check = [&](const char* what, double position, double expected) {
@@ -366,7 +380,7 @@ int followClock(const char* location)
     MediaPlayer::setFollowSenderClock(true);
     auto anchor = clock::now();
     player.play(location, 21.0);
-    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) wait_for(10);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 2000, 10);
     const double first_wait = since(anchor);
     wait_for(1500);
     check("start", player.getPlaybackInfo().position, 21.0 + since(anchor));
@@ -402,7 +416,7 @@ int followClock(const char* location)
     video_frames.store(0);
     anchor = clock::now();
     player.play(location, 21.0);
-    for (int i = 0; i < 400 && video_frames.load() == 0; ++i) wait_for(5);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 2000, 5);
     wait_for(300);
     const unsigned int after_start = video_frames.load();
     wait_for(900);
@@ -411,7 +425,7 @@ int followClock(const char* location)
     video_frames.store(0);
     anchor = clock::now();
     player.seek(61.0);
-    for (int i = 0; i < 400 && video_frames.load() == 0; ++i) wait_for(5);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 2000, 5);
     wait_for(300);
     const unsigned int after_jump = video_frames.load();
     player.stop();
@@ -428,7 +442,7 @@ int followClock(const char* location)
     MediaPlayer::setFollowSenderClock(false);
     video_frames.store(0);
     player.play(location, 21.0);
-    for (int i = 0; i < 200 && video_frames.load() == 0; ++i) wait_for(10);
+    waitUntil([&] { return !(video_frames.load() == 0); }, 2000, 10);
     const auto first_frame = clock::now();
     wait_for(1000);
     check("off, start", player.getPlaybackInfo().position, 21.0 + since(first_frame));
@@ -542,9 +556,7 @@ unsigned int framesWithin(const char* location, int timeout_ms)
     });
     player.setAudioCallback([](const MediaAudioFrame&) {});
     player.play(location, 0.0);
-    for (int waited = 0; waited < timeout_ms && frames.load() == 0; waited += 50) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+    waitUntil([&] { return !(frames.load() == 0); }, timeout_ms, 50);
     player.stop();
     return frames.load();
 }
@@ -555,30 +567,44 @@ int urlPolicy()
     using namespace media_url_policy;
     setLoopbackAllowedForTesting(false);
     setLocalFilesAllowedForTesting(false);
+    // Names answer from a table, not the network: cdn.example.test is a
+    // public address, rebind.example.test a loopback one, others none.
+    setResolverForTesting([](const std::string& host, std::vector<sockaddr_storage>& out) {
+        sockaddr_storage address = {};
+        auto& v4 = reinterpret_cast<sockaddr_in&>(address);
+        v4.sin_family = AF_INET;
+        if (host == "cdn.example.test") {
+            inet_pton(AF_INET, "93.184.216.34", &v4.sin_addr);
+        } else if (host == "rebind.example.test") {
+            inet_pton(AF_INET, "127.0.0.1", &v4.sin_addr);
+        } else {
+            return false;
+        }
+        out.push_back(address);
+        return true;
+    });
     const char* item = "https://cdn.example.test/master.m3u8";
     struct Case { const char* url; bool allowed; };
     const Case nested[] = {
         {"https://cdn.example.test/seg1.ts", true},
         {"https://cdn.example.test:443/key", true},
         {"http://cdn.example.test:8080/seg.ts", true},
-        {"http://127.0.0.1/seg.ts", false},
-        {"http://127.0.0.1:631/", false},
+        // A name that does not resolve is refused (fail closed), and one
+        // that resolves to a refused address.
+        {"http://segments.invalid/seg.ts", false},
+        {"http://rebind.example.test/seg.ts", false},
         {"http://localhost:8080/x", false},
-        {"http://foo.localhost/x", false},
-        {"http://169.254.169.254/latest/meta-data", false},
-        {"http://[::1]/x", false},
-        {"http://[::ffff:127.0.0.1]/x", false},
-        {"http://[fe80::1%25en0]/x", false},
-        {"http://2130706433/x", false},
-        {"http://0x7f.1/x", false},
-        {"http://224.0.0.251/x", false},
-        {"http://0.0.0.0/x", false},
-        {"http://10.0.0.1:22/x", false},
-        {"http://10.0.0.1/x", true},
-        {"http://user@10.0.0.1:8443/x", true},
-        {"file:///etc/passwd", false},
     };
     int failures = 0;
+    for (const SharedPolicyCase& c : kSharedPolicyCases) {
+        const std::string refused = checkNested(c.url, item);
+        if (refused.empty() != c.allowed) {
+            std::fprintf(stderr, "media-smoke: url-policy shared %s -> %s (expected %s)\n", c.url,
+                         refused.empty() ? "allowed" : refused.c_str(),
+                         c.allowed ? "allowed" : "refused");
+            ++failures;
+        }
+    }
     for (const Case& c : nested) {
         const std::string refused = checkNested(c.url, item);
         if (refused.empty() != c.allowed) {
@@ -629,7 +655,40 @@ int urlPolicy()
     if (!checkItem("http://localhost:7000/master.m3u8").empty()) ++failures;
     if (checkItem("https://cdn.example.test/x.mp4").find("sending device") == std::string::npos) ++failures;
     setSenderOnly(false);
-    if (!checkNested("http://cdn.example.test:8080/seg2.ts", item).empty()) ++failures;
+    if (!checkNested("http://10.0.0.1:8080/seg2.ts", item).empty()) ++failures;
+    if (checkNested("http://segments.invalid/seg.ts", item).find("could not be resolved") ==
+        std::string::npos) {
+        ++failures;
+    }
+    if (checkItem("https://cdn.invalid/x.mp4").find("could not be resolved") ==
+        std::string::npos) {
+        ++failures;
+    }
+    // A name is pinned to its checked address; literals and the receiver's
+    // own proxy are not.
+    const Resolver table = [](const std::string& host, std::vector<sockaddr_storage>& out) {
+        if (host != "cdn.example.test") return false;
+        sockaddr_storage address = {};
+        auto& v6 = reinterpret_cast<sockaddr_in6&>(address);
+        v6.sin6_family = AF_INET6;
+        inet_pton(AF_INET6, "2001:db8::7", &v6.sin6_addr);
+        out.push_back(address);
+        return true;
+    };
+    if (decideItem("http://cdn.example.test/x.mp4", table).address != "2001:db8::7") ++failures;
+    if (decideNested("http://cdn.example.test/seg.ts", item, table).address != "2001:db8::7") {
+        ++failures;
+    }
+    if (!decideItem("http://10.0.0.5:7001/x.mp4", table).address.empty()) ++failures;
+    if (!decideNested("http://10.0.0.5:7001/seg.ts", "http://10.0.0.5:7001/x.mp4", table)
+             .refused.empty()) {
+        ++failures;
+    }
+    if (!decideNested("http://[fe80::1]:7001/seg.ts", "http://[fe80::1]:7001/x.m3u8", table)
+             .refused.empty()) {
+        ++failures;  // a link-local sender's own segments
+    }
+    setResolverForTesting(nullptr);
 
     const auto ports = parsePortList("80, 443,8080");
     if (ports.size() != 3 || ports[2] != 8080 || !parsePortList("80,http").empty()) ++failures;
@@ -721,9 +780,7 @@ int tsSeek(const char* location, bool race = false)
     });
     player.setAudioCallback([](const MediaAudioFrame&) {});
     player.play(location, 0.0);
-    for (int i = 0; i < 200 && frames.load() == 0; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    }
+    waitUntil([&] { return !(frames.load() == 0); }, 5000, 25);
     player.setRate(0.0f);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     if (race) MediaPlayer::setSeekDelaysForTesting(30, 15);
@@ -782,9 +839,7 @@ int afterEnd(const char* location)
                                 player.getPlaybackInfo().ended;
     const unsigned int before = frames.load();
     player.seek(2.0);
-    for (int i = 0; i < 100 && frames.load() == before; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+    waitUntil([&] { return !(frames.load() == before); }, 5000, 50);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     info = player.getPlaybackInfo();
     const bool reopened = frames.load() > before && !info.ended && info.rate == 0.0f &&
@@ -797,6 +852,238 @@ int afterEnd(const char* location)
     std::fprintf(stderr, "media-smoke: after-end ended=%d resume_ignored=%d reopened=%d "
                  "position=%.3f finite=%d -> %s\n", ended, resume_ignored, reopened,
                  info.position, finite, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+// The first picture of an item: size and the luma at a point in each
+// quadrant (top-left, top-right, bottom-left, bottom-right).
+struct FirstPicture {
+    int width = 0;
+    int height = 0;
+    int luma[4] = {};
+};
+
+FirstPicture firstPicture(const char* location)
+{
+    std::mutex mutex;
+    FirstPicture picture;
+    std::atomic<bool> taken{false};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (!frame.data[0] || frame.width <= 0 || taken.exchange(true)) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        picture.width = frame.width;
+        picture.height = frame.height;
+        if (const char* dump = std::getenv("MEDIA_SMOKE_DUMP_PGM")) {
+            // The luma plane as a PGM image, to look at by hand.
+            const std::string path = std::string(dump) + "-" + std::to_string(frame.width) + "x" +
+                std::to_string(frame.height) + ".pgm";
+            if (FILE* file = std::fopen(path.c_str(), "wb")) {
+                std::fprintf(file, "P5\n%d %d\n255\n", frame.width, frame.height);
+                for (int y = 0; y < frame.height; ++y) {
+                    std::fwrite(frame.data[0] + y * frame.linesize[0], 1, frame.width, file);
+                }
+                std::fclose(file);
+            }
+        }
+        // At 3/16 and 13/16 of each side: points a quarter turn maps onto
+        // each other, inside testsrc's stripes rather than on their edges.
+        for (int q = 0; q < 4; ++q) {
+            const int x = frame.width * (q % 2 ? 13 : 3) / 16;
+            const int y = frame.height * (q / 2 ? 13 : 3) / 16;
+            picture.luma[q] = frame.data[0][y * frame.linesize[0] + x];
+        }
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play(location, 0.0);
+    waitUntil([&] { return taken.load(); }, 5000);
+    player.stop();
+    std::lock_guard<std::mutex> lock(mutex);
+    return picture;
+}
+
+// A recording with a 90-degree display rotation (rot90.mp4: clip8.mp4's
+// pixels, shown turned 90 degrees counter-clockwise) comes out upright: its
+// size swapped and its quadrants those of the reference turned the same way.
+int rotation(const char* rotated, const char* reference)
+{
+    const FirstPicture turned = firstPicture(rotated);
+    const FirstPicture upright = firstPicture(reference);
+    // Counter-clockwise: top-left <- top-right, top-right <- bottom-right,
+    // bottom-left <- top-left, bottom-right <- bottom-left.
+    const int from[4] = {1, 3, 0, 2};
+    bool quadrants = upright.width > 0;
+    for (int q = 0; q < 4; ++q) {
+        quadrants = quadrants && std::abs(turned.luma[q] - upright.luma[from[q]]) <= 12;
+    }
+    const bool size = turned.width == upright.height && turned.height == upright.width;
+    // The quadrants must differ, or the check proves nothing.
+    const bool distinct = upright.luma[0] != upright.luma[1] || upright.luma[1] != upright.luma[3];
+    const bool ok = size && quadrants && distinct;
+    std::fprintf(stderr,
+                 "media-smoke: rotation %dx%d -> %dx%d, quadrants %d,%d,%d,%d from %d,%d,%d,%d "
+                 "-> %s\n",
+                 upright.width, upright.height, turned.width, turned.height, turned.luma[0],
+                 turned.luma[1], turned.luma[2], turned.luma[3], upright.luma[0], upright.luma[1],
+                 upright.luma[2], upright.luma[3], ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+// A live HLS playlist (no end): pictures, no known duration, and stop()
+// returns promptly although the demuxer waits for the playlist to grow.
+int live(const char* location)
+{
+    std::atomic<unsigned int> frames{0};
+    MediaPlayer player;
+    player.setVideoCallback([&](const MediaVideoFrame& frame) {
+        if (frame.data[0]) ++frames;
+    });
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play(location, 0.0);
+    const bool shown = waitUntil([&] { return frames.load() > 0; }, 8000);
+    const MediaPlaybackInfo info = player.getPlaybackInfo();
+    const auto started = std::chrono::steady_clock::now();
+    player.stop();
+    const double stop_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    const bool ok = shown && !info.duration_known && stop_ms < scaledMs(1000);
+    std::fprintf(stderr, "media-smoke: live frames=%u duration_known=%d stop_ms=%.1f -> %s\n",
+                 frames.load(), info.duration_known, stop_ms, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+// A multivariant playlist: the rendition with `bandwidth` is the one played
+// (the preflight's choice for HTTP, select_hls_program's for a file).
+int rendition(const char* location, const char* bandwidth)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_log.clear();
+    }
+    const unsigned int frames = framesWithin(location, 8000);
+    const std::string wanted = std::string("bandwidth=") + bandwidth + " bps";
+    bool chosen = false;
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        chosen = g_log.find(wanted) != std::string::npos;
+    }
+    const bool ok = frames > 0 && chosen;
+    std::fprintf(stderr, "media-smoke: rendition frames=%u chosen(%s)=%d -> %s\n", frames,
+                 wanted.c_str(), chosen, ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
+// GET over FFmpeg's HTTP input, or empty.
+std::string httpGet(const std::string& url)
+{
+    AVIOContext* io = nullptr;
+    if (avio_open2(&io, url.c_str(), AVIO_FLAG_READ, nullptr, nullptr) < 0) return {};
+    std::string body;
+    unsigned char buffer[4096];
+    int got = 0;
+    while ((got = avio_read(io, buffer, sizeof(buffer))) > 0) {
+        body.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(got));
+    }
+    avio_closep(&io);
+    return body;
+}
+
+// Fetches go where the policy checked (tests/redirect-server.py on base+4):
+// a name is connected to by its checked address with the name in the Host
+// header (pinned.invalid exists only in the test lookup, so FFmpeg could not
+// have found it), also for an HLS playlist's relative segments; redirects
+// are followed by hand, and a hop the policy refuses is never requested and
+// is reported once, not once per retry.
+int fetchPinning()
+{
+    using namespace media_url_policy;
+    const char* base_env = std::getenv("OBS_AIRPLAY_TEST_PORT_BASE");
+    const std::string port = std::to_string((base_env ? std::atoi(base_env) : 18900) + 4);
+    const auto url = [&](const char* host, const char* path) {
+        return std::string("http://") + host + ":" + port + path;
+    };
+    setResolverForTesting([](const std::string& host, std::vector<sockaddr_storage>& out) {
+        if (host != "pinned.invalid") return false;
+        sockaddr_storage address = {};
+        auto& v4 = reinterpret_cast<sockaddr_in&>(address);
+        v4.sin_family = AF_INET;
+        inet_pton(AF_INET, "127.0.0.1", &v4.sin_addr);
+        out.push_back(address);
+        return true;
+    });
+    std::mutex refusals_mutex;
+    std::vector<std::string> refusals;
+    MediaPlayer::setRefusalCallback([&](const std::string& reason) {
+        std::lock_guard<std::mutex> lock(refusals_mutex);
+        refusals.push_back(reason);
+    });
+    const unsigned int pinned_mp4 = framesWithin(url("pinned.invalid", "/files/clip8.mp4").c_str(), 8000);
+    const unsigned int pinned_hls = framesWithin(url("pinned.invalid", "/hls/same.m3u8").c_str(), 8000);
+    // Loopback is refused from here on, except the item's own literal address.
+    setLoopbackAllowedForTesting(false);
+    const unsigned int redirected_mp4 =
+        framesWithin(url("127.0.0.1", "/redirect/clip8.mp4").c_str(), 8000);
+    const unsigned int redirected_hls =
+        framesWithin(url("127.0.0.1", "/redirect-hls/same.m3u8").c_str(), 8000);
+    size_t refusals_before = 0;
+    {
+        std::lock_guard<std::mutex> lock(refusals_mutex);
+        refusals_before = refusals.size();
+    }
+    const unsigned int refused_frames =
+        framesWithin(url("127.0.0.1", "/redirect-out/clip8.mp4").c_str(), 3000);
+    size_t refused_reports = 0;
+    {
+        std::lock_guard<std::mutex> lock(refusals_mutex);
+        refused_reports = refusals.size() - refusals_before;
+    }
+    setLoopbackAllowedForTesting(true);
+    MediaPlayer::setRefusalCallback(nullptr);
+    setResolverForTesting(nullptr);
+
+    const std::string log = httpGet(url("127.0.0.1", "/log"));
+    const bool host_kept = log.find("pinned.invalid:" + port + " /files/clip8.mp4") != std::string::npos &&
+        log.find("pinned.invalid:" + port + " /hls/seg0.ts") != std::string::npos;
+    const bool redirect_followed = log.find("127.0.0.1:" + port + " /redirect/clip8.mp4") !=
+        std::string::npos;
+    const bool secret_untouched = log.find("/secret/") == std::string::npos;
+    const bool ok = pinned_mp4 > 0 && pinned_hls > 0 && redirected_mp4 > 0 &&
+        redirected_hls > 0 && redirect_followed && host_kept && refused_frames == 0 &&
+        secret_untouched && refused_reports == 1;
+    std::fprintf(stderr,
+                 "media-smoke: fetch-pinning pinned_mp4=%u pinned_hls=%u host_kept=%d "
+                 "redirected_mp4=%u redirected_hls=%u refused_frames=%u secret_untouched=%d "
+                 "refused_reports=%zu -> %s\n",
+                 pinned_mp4, pinned_hls, host_kept, redirected_mp4, redirected_hls,
+                 refused_frames, secret_untouched, refused_reports, ok ? "ok" : "FAILED");
+    if (!ok) std::fprintf(stderr, "media-smoke: server log:\n%s", log.c_str());
+    return ok ? 0 : 1;
+}
+
+// stop() while the item's host name is still being looked up returns at
+// once: the lookup runs on a thread nobody waits for (an unreachable
+// resolver used to hold stop(), and with it UxPlay's HTTP thread or OBS's
+// exit, for the resolver's whole retry budget).
+int slowLookup()
+{
+    using namespace media_url_policy;
+    setResolverForTesting([](const std::string&, std::vector<sockaddr_storage>&) {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        return false;
+    });
+    MediaPlayer player;
+    player.setVideoCallback([](const MediaVideoFrame&) {});
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play("http://slow-resolver.invalid/clip.mp4", 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto started = std::chrono::steady_clock::now();
+    player.stop();
+    const double stop_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    setResolverForTesting(nullptr);
+    const bool ok = stop_ms < 500.0;
+    std::fprintf(stderr, "media-smoke: slow-lookup stop_ms=%.1f -> %s\n", stop_ms,
+                 ok ? "ok" : "FAILED");
     return ok ? 0 : 1;
 }
 
@@ -817,6 +1104,21 @@ int main(int argc, char** argv)
     }
     if (argc == 3 && std::strcmp(argv[1], "--tls-verify") == 0) {
         return tlsVerify(argv[2]);
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--fetch-pinning") == 0) {
+        return fetchPinning();
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--slow-lookup") == 0) {
+        return slowLookup();
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--rotation") == 0) {
+        return rotation(argv[2], argv[3]);
+    }
+    if (argc == 3 && std::strcmp(argv[1], "--live") == 0) {
+        return live(argv[2]);
+    }
+    if (argc == 4 && std::strcmp(argv[1], "--rendition") == 0) {
+        return rendition(argv[2], argv[3]);
     }
     if (argc == 3 && std::strcmp(argv[1], "--ts-seek") == 0) {
         return tsSeek(argv[2]);
@@ -877,7 +1179,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --ts-seek TS_URL | --ts-seek-race TS_URL | --after-end SHORT_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --fetch-pinning | --slow-lookup | --rotation ROTATED REFERENCE | --live M3U8 | --rendition M3U8 BANDWIDTH | --switch-to-still VIDEO STILL | --ts-seek TS_URL | --ts-seek-race TS_URL | --after-end SHORT_URL\n", argv[0]);
         return 2;
     }
 

@@ -52,7 +52,7 @@ unchanged and green.
 
 | Item | Effort | Notes |
 |---|---|---|
-| Commit `windows/uxplay-patches/0001`–`0005` to LZlamian/UxPlay, tag, bump the submodule, drop the patch step from CI and the `_WIN32` guard around `dnssd_get_backend` in `src/uxplay-integration.cpp` | 0.5 day | needs push access to the fork (this session had none). Patch 0004 also changes macOS behaviour (for the better: RFC 9112 lingering close); run the macOS tests after the bump |
+| ~~Commit `windows/uxplay-patches/0001`–`0005` to LZlamian/UxPlay, bump the submodule, drop the patch step from CI~~ | done (2026-10-21) | the fork's `obs-airplay-windows` branch; patch 0006 (0.5.1) too |
 | Code signing (Authenticode) for the installer and DLL | cost decision | without it SmartScreen warns |
 | Fixes from the device test pass (§6) | unknown | discovery through the Windows DNS service is the largest unknown |
 | Device test of the updater (a signed test release) and BLE (a PC with Bluetooth, an iPhone) | 0.5 day | [WINDOWS.md](WINDOWS.md#what-to-test) items 8–9 |

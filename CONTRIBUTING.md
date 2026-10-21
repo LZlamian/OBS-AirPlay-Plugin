@@ -13,7 +13,16 @@ Thank you for helping. Bug reports, fixes and improvements are welcome.
     written (`tests/`);
   - changes to the UxPlay fork go in `uxplay/` as their own commits;
   - code follows the surrounding style (`.clang-format`, `.editorconfig`);
-    comments say why, not what.
+    comments say why, not what;
+  - naming: classes `CamelCase`, member functions `camelCase`, data members
+    `m_name`, file-local free functions `snake_case`, the namespaced helpers
+    (`hls::`, `media_url_policy::`, `media_fetch::`) `camelCase`; UxPlay's
+    C code keeps its own style;
+  - log lines start with a tag naming the part they come from (`[LOAD]`,
+    `[RECEIVER]`, `[DISCOVERY]`, `[CONNECT]`, `[MIRROR]`, `[DECODE]`,
+    `[AUDIO]`, `[OUTPUT]`, `[SOURCE]`, `[MEDIA]`, `[NAME]`, `[BLE]`;
+    UxPlay's own are `[UxPlay]`); progress chatter is `LOG_DEBUG`, nothing
+    is logged while a lock other than a leaf lock is held.
 - Changes to discovery or connection (the server name, ports, the Bonjour
   profile, the fast-connect handshake) need a test on a real iPhone and a Mac
   sender, mirroring and AirPlay video, including connect/disconnect/rename.

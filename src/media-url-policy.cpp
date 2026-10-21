@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "media-url-policy.hpp"
 
+#include "../uxplay/lib/media_url.h"  // the receiver's own parser and address classes
+
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -19,8 +21,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <system_error>
+#include <thread>
 
 namespace media_url_policy {
 namespace {
@@ -30,23 +37,11 @@ std::vector<unsigned short> g_ports{80, 443, 8080, 8443};
 std::atomic<bool> g_loopback_for_testing{false};
 std::atomic<bool> g_local_files_for_testing{false};
 std::atomic<bool> g_sender_only{false};
+std::mutex g_resolver_mutex; // leaf
+Resolver g_resolver_for_testing;
 
 constexpr const char* kNotSender = "host is not the sending device (only the sending device is allowed)";
 
-#if defined(_WIN32)
-// Windows has no inet_aton. Its own lenient IPv4 parser (what its resolver
-// uses for numeric hosts) takes the same short, octal and hex forms.
-int inet_aton(const char* text, in_addr* address)
-{
-#if defined(__MINGW32__)
-    LPSTR end = nullptr;
-#else
-    PCSTR end = nullptr;
-#endif
-    return RtlIpv4StringToAddressA(text, FALSE, &end, address) == 0 && end && *end == '\0'
-        ? 1 : 0;
-}
-#endif
 
 struct UrlParts {
     std::string host; // lower case, no brackets or IPv6 zone
@@ -55,93 +50,36 @@ struct UrlParts {
 
 bool split(const std::string& url, UrlParts& parts)
 {
-    size_t authority_start;
-    int default_port;
-    if (url.size() > 7 && strncasecmp(url.c_str(), "http://", 7) == 0) {
-        authority_start = 7;
-        default_port = 80;
-    } else if (url.size() > 8 && strncasecmp(url.c_str(), "https://", 8) == 0) {
-        authority_start = 8;
-        default_port = 443;
-    } else {
-        return false;
-    }
-    size_t end = url.find_first_of("/?#", authority_start);
-    if (end == std::string::npos) end = url.size();
-    std::string authority = url.substr(authority_start, end - authority_start);
-    const size_t at = authority.rfind('@');
-    if (at != std::string::npos) authority.erase(0, at + 1);
-    if (authority.empty()) return false;
-
-    std::string host;
-    std::string port;
-    if (authority[0] == '[') {
-        const size_t close = authority.find(']');
-        if (close == std::string::npos) return false;
-        host = authority.substr(1, close - 1);
-        const size_t zone = host.find('%');
-        if (zone != std::string::npos) host.erase(zone);
-        if (close + 1 < authority.size()) {
-            if (authority[close + 1] != ':') return false;
-            port = authority.substr(close + 2);
-        }
-    } else {
-        const size_t colon = authority.find(':');
-        host = authority.substr(0, colon);
-        if (colon != std::string::npos) port = authority.substr(colon + 1);
-    }
-    while (host.size() > 1 && host.back() == '.') host.pop_back();
-    if (host.empty()) return false;
-    for (char& c : host) {
-        const auto u = static_cast<unsigned char>(c);
-        if (u <= 0x20 || u == 0x7f) return false;
-        c = static_cast<char>(std::tolower(u));
-    }
+    char host[MEDIA_URL_HOST_BYTES];
+    long port = 0;
+    if (!media_url_split(url.c_str(), host, sizeof(host), &port)) return false;
     parts.host = host;
-    parts.port = default_port;
-    if (!port.empty()) {
-        long value = 0;
-        for (char c : port) {
-            if (c < '0' || c > '9') return false;
-            value = value * 10 + (c - '0');
-            if (value > 65535) return false;
-        }
-        if (value == 0) return false;
-        parts.port = static_cast<int>(value);
-    }
+    parts.port = static_cast<int>(port);
     return true;
 }
 
 // Empty for an address any item may use, otherwise what it is.
-std::string classifyIpv4(uint32_t address)
+std::string describe(media_address_class_t address_class)
 {
-    const uint32_t first = address >> 24;
-    if (first == 0) return "unspecified address";
-    if (first == 127) return g_loopback_for_testing ? "" : "loopback address";
-    if ((address & 0xffff0000U) == 0xa9fe0000U) return "link-local address";
-    if (first >= 224 && first <= 239) return "multicast address";
-    if (first >= 240) return "reserved address";
-    return "";
+    switch (address_class) {
+    case MEDIA_ADDRESS_ROUTABLE: return "";
+    case MEDIA_ADDRESS_LOOPBACK: return g_loopback_for_testing ? "" : "loopback address";
+    case MEDIA_ADDRESS_LINK_LOCAL: return "link-local address";
+    case MEDIA_ADDRESS_MULTICAST: return "multicast address";
+    case MEDIA_ADDRESS_UNSPECIFIED: return "unspecified address";
+    case MEDIA_ADDRESS_RESERVED: return "reserved address";
+    }
+    return "reserved address";
 }
 
-std::string classifyIpv6(const unsigned char* a)
+std::string classifyIpv4(uint32_t address)
 {
-    static const unsigned char zero[16] = {};
-    static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
-    static const unsigned char nat64[12] = {0x00, 0x64, 0xff, 0x9b};
-    if (std::memcmp(a, zero, 16) == 0) return "unspecified address";
-    if (std::memcmp(a, zero, 15) == 0 && a[15] == 1) {
-        return g_loopback_for_testing ? "" : "loopback address";
-    }
-    if (std::memcmp(a, mapped, 12) == 0 || std::memcmp(a, nat64, 12) == 0 ||
-        std::memcmp(a, zero, 12) == 0) {
-        return classifyIpv4((static_cast<uint32_t>(a[12]) << 24) |
-                            (static_cast<uint32_t>(a[13]) << 16) |
-                            (static_cast<uint32_t>(a[14]) << 8) | a[15]);
-    }
-    if (a[0] == 0xfe && (a[1] & 0xc0) == 0x80) return "link-local address";
-    if (a[0] == 0xff) return "multicast address";
-    return "";
+    return describe(media_classify_ipv4(address));
+}
+
+std::string classifyIpv6(const unsigned char* address)
+{
+    return describe(media_classify_ipv6(address));
 }
 
 std::string classify(const sockaddr* address)
@@ -163,17 +101,53 @@ bool isLocalhostName(const std::string& host)
         (host.size() > 10 && host.compare(host.size() - 10, 10, ".localhost") == 0);
 }
 
+std::string numericAddress(const sockaddr_storage& address)
+{
+    char text[INET6_ADDRSTRLEN] = {};
+    if (address.ss_family == AF_INET) {
+        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in&>(address).sin_addr, text,
+                  sizeof(text));
+    } else if (address.ss_family == AF_INET6) {
+        inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6&>(address).sin6_addr, text,
+                  sizeof(text));
+    }
+    return text;
+}
+
 // Literal addresses are classified directly (inet_aton also takes the short
 // and numeric forms resolvers accept); names are resolved and every address
-// must pass.
-std::string checkHost(const std::string& host)
+// must pass. For a name, `address` gets the first one, which is where the
+// fetch must connect (another lookup may answer differently).
+Decision checkHost(const std::string& host, const Resolver& resolve)
 {
-    in6_addr v6 = {};
-    in_addr v4 = {};
-    if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) return classifyIpv6(v6.s6_addr);
-    if (inet_aton(host.c_str(), &v4) == 1) return classifyIpv4(ntohl(v4.s_addr));
-    if (isLocalhostName(host) && !g_loopback_for_testing) return "loopback host";
+    int family = 0;
+    unsigned char literal[16] = {};
+    if (media_parse_literal(host.c_str(), &family, literal)) {
+        if (family == AF_INET6) return {classifyIpv6(literal), ""};
+        uint32_t v4 = 0;
+        std::memcpy(&v4, literal, sizeof(v4));
+        return {classifyIpv4(ntohl(v4)), ""};
+    }
+    if (isLocalhostName(host) && !g_loopback_for_testing) return {"loopback host", ""};
 
+    std::vector<sockaddr_storage> addresses;
+    if (!resolve(host, addresses) || addresses.empty()) {
+        // Refused, not left to FFmpeg: its own lookup may get a different
+        // answer (a resolver that times out here, a name that rebinds).
+        return {"host name could not be resolved", ""};
+    }
+    std::string refused;
+    for (const sockaddr_storage& address : addresses) {
+        refused = classify(reinterpret_cast<const sockaddr*>(&address));
+        if (!refused.empty()) return {"host resolves to a " + refused, ""};
+    }
+    const std::string first = numericAddress(addresses.front());
+    if (first.empty()) return {"host resolves to an unsupported address", ""};
+    return {"", first};
+}
+
+bool blockingResolve(const std::string& host, std::vector<sockaddr_storage>& addresses)
+{
 #if defined(_WIN32)
     // getaddrinfo fails before Winsock is started (the receiver starts it,
     // a test may not); a failed lookup would let the URL through.
@@ -187,36 +161,41 @@ std::string checkHost(const std::string& host)
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* results = nullptr;
-    const int error = getaddrinfo(host.c_str(), nullptr, &hints, &results);
-    if (error != 0 || !results) {
-        // Nothing to fetch from; FFmpeg reports the failure itself.
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &results) != 0 || !results) {
         if (results) freeaddrinfo(results);
-        return "";
+        return false;
     }
-    std::string refused;
-    for (const addrinfo* entry = results; entry && refused.empty(); entry = entry->ai_next) {
-        if (entry->ai_addr) refused = classify(entry->ai_addr);
+    for (const addrinfo* entry = results; entry; entry = entry->ai_next) {
+        if (!entry->ai_addr || entry->ai_addrlen > sizeof(sockaddr_storage)) continue;
+        sockaddr_storage address = {};
+        std::memcpy(&address, entry->ai_addr, entry->ai_addrlen);
+        addresses.push_back(address);
     }
     freeaddrinfo(results);
-    return refused.empty() ? "" : "host resolves to a " + refused;
+    return !addresses.empty();
 }
 
 // A literal address as 16 bytes (IPv4 as IPv4-mapped IPv6).
 bool literalAddress(const std::string& host, unsigned char out[16])
 {
-    in6_addr v6 = {};
-    in_addr v4 = {};
-    if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) {
-        std::memcpy(out, v6.s6_addr, 16);
-        return true;
-    }
-    if (inet_aton(host.c_str(), &v4) == 1) {
+    int family = 0;
+    unsigned char literal[16] = {};
+    if (!media_parse_literal(host.c_str(), &family, literal)) return false;
+    if (family == AF_INET6) {
+        std::memcpy(out, literal, 16);
+    } else {
         static const unsigned char mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
         std::memcpy(out, mapped, 12);
-        std::memcpy(out + 12, &v4.s_addr, 4);
-        return true;
+        std::memcpy(out + 12, literal, 4);
     }
-    return false;
+    return true;
+}
+
+bool isLiteral(const std::string& host)
+{
+    int family = 0;
+    unsigned char literal[16];
+    return media_parse_literal(host.c_str(), &family, literal);
 }
 
 bool portAllowed(int port)
@@ -281,28 +260,28 @@ void setLocalFilesAllowedForTesting(bool allowed)
     g_local_files_for_testing.store(allowed);
 }
 
-std::string checkItem(const std::string& url)
+Decision decideItem(const std::string& url, const Resolver& resolve)
 {
     UrlParts parts;
-    if (!split(url, parts)) return "malformed URL";
-    in6_addr v6 = {};
-    in_addr v4 = {};
-    if (inet_pton(AF_INET6, parts.host.c_str(), &v6) == 1 ||
-        inet_aton(parts.host.c_str(), &v4) == 1) {
-        return "";
-    }
-    if (parts.host == "localhost") return "";
-    if (g_sender_only) return kNotSender;
-    return checkHost(parts.host);
+    if (!split(url, parts)) return {"malformed URL", ""};
+    if (isLiteral(parts.host)) return {};
+    if (parts.host == "localhost") return {};
+    if (g_sender_only) return {kNotSender, ""};
+    return checkHost(parts.host, resolve);
 }
 
-std::string checkNested(const std::string& url, const std::string& item_url)
+Decision decideNested(const std::string& url, const std::string& item_url,
+                      const Resolver& resolve)
 {
     UrlParts parts;
-    if (!split(url, parts)) return "not an HTTP(S) URL";
+    if (!split(url, parts)) return {"not an HTTP(S) URL", ""};
     UrlParts item;
     if (split(item_url, item) && item.host == parts.host && item.port == parts.port) {
-        return "";
+        // The item's own host was checked with the item (a literal one by
+        // the receiver, with the sender's address in mind). A name is looked
+        // up again for its address, which the caller's resolver keeps stable.
+        if (item.host == "localhost" || isLiteral(parts.host)) return {};
+        return checkHost(parts.host, resolve);
     }
     if (g_sender_only) {
         // The item's address is the sender's (the receiver checked it); its
@@ -312,12 +291,77 @@ std::string checkNested(const std::string& url, const std::string& item_url)
         const bool same_address = !item.host.empty() && item.host != "localhost" &&
             literalAddress(item.host, wanted) && literalAddress(parts.host, got) &&
             std::memcmp(wanted, got, 16) == 0;
-        return same_address ? "" : kNotSender;
+        return {same_address ? "" : kNotSender, ""};
     }
     if (!portAllowed(parts.port) && !g_loopback_for_testing) {
-        return "port " + std::to_string(parts.port) + " not allowed";
+        return {"port " + std::to_string(parts.port) + " not allowed", ""};
     }
-    return checkHost(parts.host);
+    return checkHost(parts.host, resolve);
+}
+
+namespace {
+// getaddrinfo, or the test hook.
+Resolver currentResolver()
+{
+    std::lock_guard<std::mutex> lock(g_resolver_mutex);
+    return g_resolver_for_testing ? g_resolver_for_testing : Resolver(blockingResolve);
+}
+} // namespace
+
+std::string checkItem(const std::string& url)
+{
+    return decideItem(url, currentResolver()).refused;
+}
+
+std::string checkNested(const std::string& url, const std::string& item_url)
+{
+    return decideNested(url, item_url, currentResolver()).refused;
+}
+
+void setResolverForTesting(Resolver resolver)
+{
+    std::lock_guard<std::mutex> lock(g_resolver_mutex);
+    g_resolver_for_testing = std::move(resolver);
+}
+
+bool resolveInterruptible(const std::string& host, std::vector<sockaddr_storage>& addresses,
+                          const std::function<bool()>& interrupted, int timeout_ms)
+{
+    const Resolver resolver = currentResolver();
+    // getaddrinfo cannot be cancelled: it runs on a thread of its own, which
+    // is left to finish when the caller stops waiting. (The plugin bundle
+    // holds Objective-C code, so dyld never unloads it under that thread.)
+    struct Lookup {
+        std::mutex mutex;
+        std::condition_variable done_cv;
+        bool done = false;
+        bool resolved = false;
+        std::vector<sockaddr_storage> addresses;
+    };
+    auto lookup = std::make_shared<Lookup>();
+    try {
+        std::thread([lookup, host, resolver] {
+            std::vector<sockaddr_storage> found;
+            const bool resolved = resolver(host, found);
+            std::lock_guard<std::mutex> lock(lookup->mutex);
+            lookup->resolved = resolved;
+            lookup->addresses = std::move(found);
+            lookup->done = true;
+            lookup->done_cv.notify_all();
+        }).detach();
+    } catch (const std::system_error&) {
+        return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::unique_lock<std::mutex> lock(lookup->mutex);
+    while (!lookup->done) {
+        if ((interrupted && interrupted()) || std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        lookup->done_cv.wait_for(lock, std::chrono::milliseconds(10));
+    }
+    addresses = std::move(lookup->addresses);
+    return lookup->resolved;
 }
 
 #if defined(_WIN32)
@@ -378,7 +422,7 @@ std::string checkLocalFile(const std::string& location)
     }
     const std::wstring name = path.substr(directory_length);
     if (name.find_first_of(L"\\/:") != std::wstring::npos) return "path is not canonical";
-    if (name.rfind(L"obs-airplay-fcup-", 0) != 0) return "not a receiver spool file";
+    if (name.rfind(widen(MEDIA_SPOOL_FILE_PREFIX), 0) != 0) return "not a receiver spool file";
     WIN32_FILE_ATTRIBUTE_DATA info;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
@@ -396,7 +440,7 @@ std::string checkLocalFile(const std::string& location)
         return "path is not canonical";
     }
     const std::string name = location.substr(location.rfind('/') + 1);
-    if (name.rfind("obs-airplay-fcup-", 0) != 0) return "not a receiver spool file";
+    if (name.rfind(MEDIA_SPOOL_FILE_PREFIX, 0) != 0) return "not a receiver spool file";
     struct stat info = {};
     if (lstat(location.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
         info.st_uid != getuid()) {
