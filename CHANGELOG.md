@@ -2,7 +2,7 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
-## 2.6.1 (unreleased)
+## 2.6.1 (2026-10-21)
 
 Security hotfix (audit 2026-10-21, Phase 0):
 - HLS master playlists from a sender (upstream UxPlay code): the audio
