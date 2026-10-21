@@ -9,7 +9,7 @@
 #   /redirect-out/NAME   302 to http://[::1]:PORT/secret/NAME
 #   /log                 the requests so far, one "HOST PATH" per line
 #   redirect-server.py DIRECTORY PORT
-import http.server, os, re, socket, sys, threading
+import http.server, os, re, socket, socketserver, sys, threading
 
 directory, port = sys.argv[1], int(sys.argv[2])
 log, log_lock = [], threading.Lock()
@@ -86,12 +86,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
 
-class Server6(http.server.ThreadingHTTPServer):
+class Server(http.server.ThreadingHTTPServer):
+    # HTTPServer.server_bind looks up the host's FQDN, which can take
+    # seconds on a CI machine; here the IPv4 socket would already accept
+    # connections that nothing serves until the lookup ends.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class Server6(Server):
     address_family = socket.AF_INET6
 
 
-servers = [http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler),
-           Server6(('::1', port), Handler)]
-for server in servers[1:]:
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-servers[0].serve_forever()
+server6 = Server6(('::1', port), Handler)
+threading.Thread(target=server6.serve_forever, daemon=True).start()
+Server(('127.0.0.1', port), Handler).serve_forever()

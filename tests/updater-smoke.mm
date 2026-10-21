@@ -530,7 +530,9 @@ int main(int argc, const char *argv[])
         };
         NSUInteger small_length = 0;
         NSError *small_error = nil;
-        for (int attempt = 0; attempt < 50; ++attempt) {  // the server starting
+        // The server starting: Python looks up the host name before it
+        // listens, which takes seconds on some CI machines.
+        for (int attempt = 0; attempt < 300; ++attempt) {
             small_error = fetch([NSString stringWithFormat:@"http://127.0.0.1:%@/small", port], &small_length);
             if (!small_error) break;
             usleep(100000);
@@ -539,6 +541,7 @@ int main(int argc, const char *argv[])
         NSError *big_error = fetch([NSString stringWithFormat:@"http://127.0.0.1:%@/big", port], &big_length);
         [server terminate];
         [server waitUntilExit];
+        if (small_error) std::printf("  small download: %s\n", small_error.description.UTF8String);
         expect(!small_error && small_length == 100, "download within its limit received");
         expect(big_error && big_length == 0, "download past its limit cancelled");
 
