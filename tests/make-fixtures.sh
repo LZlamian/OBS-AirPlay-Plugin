@@ -62,7 +62,7 @@ printf '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1280x720\nhigh.m
 # AES-128 segments with the key next to the playlist
 if [[ ! -s hls/aes.m3u8 ]]; then
   /usr/bin/openssl rand 16 > hls/aes.key
-  printf 'aes.key\n%s/hls/aes.key\n' "$(pwd)" > hls/aes.keyinfo
+  printf 'aes.key\nhls/aes.key\n' > hls/aes.keyinfo  # relative: Windows FFmpeg cannot open an MSYS path
   "${FFMPEG}" -v error -y -i clip8.mp4 -c copy -f hls -hls_time 2 -hls_list_size 0 \
     -hls_key_info_file hls/aes.keyinfo -hls_segment_filename 'hls/aes%d.ts' hls/aes.m3u8
 fi
