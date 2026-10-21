@@ -26,7 +26,6 @@ AirPlayServer::AirPlayServer()
 AirPlayServer::~AirPlayServer()
 {
     stop();
-    stopVideoThread();
 }
 
 void AirPlayServer::stopVideoThread()
@@ -255,6 +254,10 @@ uint64_t AirPlayServer::normalizeTimestamp(uint64_t source_timestamp)
 
 void AirPlayServer::stop()
 {
+    // The decode thread outputs to the sources and calls the frame-output
+    // callback (into UxPlayIntegration): it goes first. Queued payloads are
+    // dropped.
+    stopVideoThread();
     // Release all weak source refs
     std::lock_guard<std::mutex> lock(m_sources_mutex);
     for (obs_weak_source_t* weak : m_registered_sources) {
@@ -587,7 +590,7 @@ void AirPlayServer::ingestAudioBitstream(const uint8_t* data, size_t size, uint8
     if (m_audio_retimer.resyncs() != m_audio_retimer_resyncs_reported &&
         m_audio_retimer_resyncs_reported < 10) {
         m_audio_retimer_resyncs_reported = m_audio_retimer.resyncs();
-        blog(LOG_INFO, "[AUDIO] stream fell behind; restarted at the current time (%llu so far)",
+        blog(LOG_INFO, "[AUDIO] stream fell behind; restarted just ahead of the current time (%llu so far)",
              static_cast<unsigned long long>(m_audio_retimer.resyncs()));
     }
     if (m_audio_retimer.trimmed() == 1 && !m_audio_retimer_trim_reported) {

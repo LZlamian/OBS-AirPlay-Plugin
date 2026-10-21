@@ -299,6 +299,10 @@ void H264Decoder::releaseLockedBuffer()
 void H264Decoder::releaseFrame()
 {
     releaseLockedBuffer();
+    // m_frame holds the decoder's reference to the VideoToolbox surface:
+    // without this a still screen keeps one pool surface until the next
+    // picture.
+    if (m_frame) av_frame_unref(m_frame);
 }
 
 void H264Decoder::flush()

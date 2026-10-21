@@ -2,6 +2,7 @@
 #include "media-player.hpp"
 #include "hardware-decode-option.hpp"
 #include "hls-playlist.hpp"
+#include "media-fetch.hpp"
 #include "media-url-policy.hpp"
 
 #include <obs-module.h>
@@ -67,61 +68,23 @@ std::string ffmpeg_error(int error)
     return buffer;
 }
 
-// Options for every HTTP(S) fetch: web protocols only, bounded redirects,
-// and certificate verification unless the user allowed self-signed servers.
+// Options for every HTTP(S) fetch: web protocols only and certificate
+// verification unless the user allowed self-signed servers. Redirects are
+// followed by media_fetch::Session, not FFmpeg.
 void set_tls_options(AVDictionary** options)
 {
-    if (g_allow_insecure_tls.load(std::memory_order_relaxed)) {
-        av_dict_set(options, "tls_verify", "0", 0);
-        return;
-    }
-    av_dict_set(options, "tls_verify", "1", 0);
-    // The release build's OpenSSL has no default trust store of its own.
-    static const bool system_bundle = access("/etc/ssl/cert.pem", R_OK) == 0;
-    if (system_bundle) av_dict_set(options, "ca_file", "/etc/ssl/cert.pem", 0);
+    media_fetch::setTlsOptions(options, g_allow_insecure_tls.load(std::memory_order_relaxed));
 }
 
 void set_network_options(AVDictionary** options)
 {
     av_dict_set(options, "protocol_whitelist", "http,https,tcp,tls,crypto", 0);
-    av_dict_set(options, "max_redirects", "8", 0);
     set_tls_options(options);
-}
-
-// The URL an opened HTTP context ended up at after redirects, or empty.
-std::string effective_location(void* av_object)
-{
-    uint8_t* location = nullptr;
-    std::string result;
-    if (av_opt_get(av_object, "location", AV_OPT_SEARCH_CHILDREN, &location) >= 0 && location) {
-        result = reinterpret_cast<char*>(location);
-    }
-    av_free(location);
-    return result;
 }
 
 std::string safe_location_for_log(std::string location)
 {
-    // Media URLs frequently carry short-lived authentication tokens. Keep the
-    // useful scheme/host/path diagnostic without writing those credentials to
-    // the OBS log.
-    const size_t scheme = location.find("://");
-    if (scheme != std::string::npos) {
-        const size_t authority_start = scheme + 3;
-        const size_t authority_end = location.find('/', authority_start);
-        const size_t at = location.find('@', authority_start);
-        if (at != std::string::npos &&
-            (authority_end == std::string::npos || at < authority_end)) {
-            location.replace(authority_start, at - authority_start + 1,
-                             "[redacted]@");
-        }
-    }
-    const size_t sensitive = location.find_first_of("?#");
-    if (sensitive != std::string::npos) {
-        location.erase(sensitive);
-        location += "?[redacted]";
-    }
-    return location;
+    return media_fetch::safeForLog(std::move(location));
 }
 
 // See hls::kTargetBitrate: the manifest preflight and FFmpeg's program
@@ -152,6 +115,23 @@ double stream_start_seconds(const AVFormatContext* format)
 {
     return format && format->start_time != AV_NOPTS_VALUE
         ? format->start_time / static_cast<double>(AV_TIME_BASE) : 0.0;
+}
+
+// Sender positions are finite but otherwise unchecked (an item of unknown
+// duration has nothing to clamp them to): about 115 days at most, so they
+// convert to int64_t microseconds.
+constexpr double kMaxPositionSeconds = 1e7;
+
+double clamp_position(double seconds)
+{
+    if (!std::isfinite(seconds)) return 0.0;
+    return std::min(std::max(0.0, seconds), kMaxPositionSeconds);
+}
+
+// av_seek_frame's timestamp for a position (both clamped first).
+int64_t seek_timestamp(double position, double start_seconds)
+{
+    return std::llrint((clamp_position(position) + clamp_position(start_seconds)) * AV_TIME_BASE);
 }
 
 int64_t variant_bitrate(const AVFormatContext* format, const AVProgram* program)
@@ -388,8 +368,8 @@ void rotate_plane(const uint8_t* src, int src_stride, int width, int height, int
 // sees complete data.
 class ResilientHttpIo {
 public:
-    ResilientHttpIo(std::string url, AVIOInterruptCB interrupt)
-        : m_url(std::move(url)), m_interrupt(interrupt)
+    ResilientHttpIo(std::string url, AVIOInterruptCB interrupt, media_fetch::Session& fetch)
+        : m_url(std::move(url)), m_interrupt(interrupt), m_fetch(fetch)
     {
     }
 
@@ -409,7 +389,9 @@ public:
     // to FFmpeg's own HTTP input (live or unsized content).
     bool open()
     {
-        if (!reopen(0) || m_size <= 0) return false;
+        const Reopen opened = reopen(0);
+        m_refused = opened == Reopen::Refused;
+        if (opened != Reopen::Opened || m_size <= 0) return false;
         constexpr int kBufferSize = 256 * 1024;
         auto* buffer = static_cast<unsigned char*>(av_malloc(kBufferSize));
         if (!buffer) return false;
@@ -438,6 +420,9 @@ public:
         return result;
     }
     int reopens() const { return m_reopens; }
+    // open() failed because the policy refused the URL or a redirect
+    // (already reported): no other input may try it again.
+    bool refused() const { return m_refused; }
 
 private:
     static constexpr int kMaxAttempts = 5;
@@ -459,7 +444,10 @@ private:
         return !interrupted();
     }
 
-    bool reopen(int64_t offset)
+    // Refused: the policy refused the URL or a redirect; retrying cannot help.
+    enum class Reopen { Opened, Failed, Refused };
+
+    Reopen reopen(int64_t offset)
     {
         if (m_inner) avio_closep(&m_inner);
         AVDictionary* options = nullptr;
@@ -468,30 +456,27 @@ private:
         set_network_options(&options);
         av_dict_set_int(&options, "offset", offset, 0);
         AVIOInterruptCB interrupt = m_interrupt;
-        const int result = avio_open2(&m_inner, m_url.c_str(), AVIO_FLAG_READ, &interrupt, &options);
+        std::string final_url;
+        const int result = m_fetch.open(
+            m_url, false, &options,
+            [&](const std::string& url, AVDictionary** used) {
+                return avio_open2(&m_inner, url.c_str(), AVIO_FLAG_READ, &interrupt, used);
+            },
+            &final_url);
         av_dict_free(&options);
         if (result < 0) {
             m_inner = nullptr;
-            return false;
+            return result == AVERROR(EPERM) ? Reopen::Refused : Reopen::Failed;
         }
-        const std::string redirected = effective_location(m_inner);
-        if (!redirected.empty() && redirected != m_url) {
-            const std::string refused = media_url_policy::checkNested(redirected, m_url);
-            if (!refused.empty()) {
-                blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
-                     safe_location_for_log(redirected).c_str(), refused.c_str());
-                report_refusal(refused);
-                avio_closep(&m_inner);
-                return false;
-            }
-        }
+        // Later range requests go straight to where the redirects led.
+        if (!final_url.empty()) m_url = final_url;
         if (m_size <= 0) {
             const int64_t reported = avio_size(m_inner);
             // With an offset the server reports the whole file size.
             m_size = reported > 0 ? reported : -1;
         }
         m_position = offset;
-        return true;
+        return Reopen::Opened;
     }
 
     static int read(void* opaque, uint8_t* buffer, int wanted)
@@ -512,7 +497,9 @@ private:
             if (self->m_size <= 0 || self->m_position >= self->m_size) return last;
             // Stopped short of the known size: continue on a fresh request.
             ++self->m_reopens;
-            if (!self->reopen(self->m_position) && !self->backOff(attempt)) {
+            const Reopen reopened = self->reopen(self->m_position);
+            if (reopened == Reopen::Refused) return AVERROR(EPERM);
+            if (reopened == Reopen::Failed && !self->backOff(attempt)) {
                 return AVERROR_EXIT;
             }
         }
@@ -549,7 +536,9 @@ private:
         }
         for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
             if (self->interrupted()) return AVERROR_EXIT;
-            if (self->reopen(target)) return target;
+            const Reopen reopened = self->reopen(target);
+            if (reopened == Reopen::Opened) return target;
+            if (reopened == Reopen::Refused) return AVERROR(EPERM);
             if (!self->backOff(attempt)) return AVERROR_EXIT;
         }
         return AVERROR(EIO);
@@ -557,11 +546,13 @@ private:
 
     std::string m_url;
     AVIOInterruptCB m_interrupt;
+    media_fetch::Session& m_fetch;
     AVIOContext* m_inner = nullptr;
     AVIOContext* m_context = nullptr;
     int64_t m_position = 0;
     int64_t m_size = -1;
     int m_reopens = 0;
+    bool m_refused = false;
 };
 
 } // namespace
@@ -711,9 +702,8 @@ public:
         std::lock_guard<std::mutex> control(control_mutex);
         stopLocked(HeldLock(control));
         // The start position comes from the sender: +inf survives max(0, x)
-        // and converting it to int64_t is undefined.
-        if (!std::isfinite(start_position)) start_position = 0.0;
-        start_position = std::max(0.0, start_position);
+        // and converting a huge one to int64_t is undefined.
+        start_position = clamp_position(start_position);
         {
             std::lock_guard<std::mutex> lock(state_mutex);
             info = {};
@@ -745,7 +735,13 @@ public:
             clock_initialized = false;
         }
         stop_requested.store(false, std::memory_order_release);
-        worker = std::thread(&Impl::run, this, location, start_position);
+        // Reached from UxPlay's C HTTP thread: nothing may throw out of here.
+        try {
+            worker = std::thread(&Impl::run, this, location, start_position);
+        } catch (const std::exception& e) {
+            stop_requested.store(true, std::memory_order_release);
+            markOpenFailure((std::string("could not start the media thread: ") + e.what()).c_str());
+        }
     }
 
     void stop()
@@ -786,7 +782,7 @@ public:
             blog(LOG_WARNING, "[MEDIA] scrub to a non-finite position ignored");
             return;
         }
-        position = std::max(0.0, position);
+        position = clamp_position(position);
         std::string restart_location;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
@@ -945,38 +941,29 @@ private:
         auto* self = static_cast<Impl*>(format->opaque);
         std::string target = url ? url : "";
         // The HLS demuxer opens AES-128 segments as "crypto+<url>".
+        std::string prefix;
         if (starts_with_case_insensitive(target, "crypto+") ||
             starts_with_case_insensitive(target, "crypto:")) {
+            prefix = target.substr(0, 7);
             target.erase(0, 7);
         }
-        std::string refused = is_http_url(target)
-            ? media_url_policy::checkNested(target, self->policy_item_url)
-            : std::string("not an HTTP(S) URL");
-        if (!refused.empty()) {
-            blog(LOG_WARNING, "[MEDIA] refused to fetch %s: %s",
-                 safe_location_for_log(target).c_str(), refused.c_str());
-            report_refusal(refused);
+        if (!is_http_url(target) || !self->fetch_session) {
+            blog(LOG_WARNING, "[MEDIA] refused to fetch %s: not an HTTP(S) URL",
+                 safe_location_for_log(target).c_str());
+            report_refusal("not an HTTP(S) URL");
             return AVERROR(EPERM);
         }
         // Nested opens do not inherit the item's TLS options.
         AVDictionary* local_options = nullptr;
         AVDictionary** used_options = options ? options : &local_options;
         set_tls_options(used_options);
-        const int result = self->default_io_open(format, pb, url, flags, used_options);
+        const int result = self->fetch_session->open(
+            target, false, used_options,
+            [&](const std::string& pinned, AVDictionary** attempt) {
+                return self->default_io_open(format, pb, (prefix + pinned).c_str(), flags,
+                                             attempt);
+            });
         av_dict_free(&local_options);
-        if (result < 0 || !*pb) return result;
-        const std::string redirected = effective_location(*pb);
-        if (!redirected.empty() && redirected != target) {
-            refused = media_url_policy::checkNested(redirected, self->policy_item_url);
-            if (!refused.empty()) {
-                blog(LOG_WARNING, "[MEDIA] refused redirect to %s: %s",
-                     safe_location_for_log(redirected).c_str(), refused.c_str());
-                report_refusal(refused);
-                format->io_close2(format, *pb);
-                *pb = nullptr;
-                return AVERROR(EPERM);
-            }
-        }
         return result;
     }
 
@@ -993,34 +980,24 @@ private:
         av_dict_set(&options, "rw_timeout", "7000000", 0);
         set_network_options(&options);
         av_dict_set(&options, "user_agent", "AppleCoreMedia/1.0 OBS-AirPlay/" PLUGIN_VERSION, 0);
-        const int open_result = avio_open2(&io, location.c_str(), AVIO_FLAG_READ,
-                                           &interrupt, &options);
+        // The URL that answered after redirects (each one checked): the
+        // base for the variant URIs.
+        std::string final_location = location;
+        const int open_result = fetch_session->open(
+            location, false, &options,
+            [&](const std::string& url, AVDictionary** used) {
+                return avio_open2(&io, url.c_str(), AVIO_FLAG_READ, &interrupt, used);
+            },
+            &final_location);
         av_dict_free(&options);
         if (open_result < 0 || !io) {
-            if (!stop_requested.load(std::memory_order_acquire)) {
+            if (!stop_requested.load(std::memory_order_acquire) &&
+                open_result != AVERROR(EPERM)) {
                 blog(LOG_WARNING, "[MEDIA] HLS manifest preflight failed: %s",
                      ffmpeg_error(open_result).c_str());
             }
             if (io) avio_closep(&io);
             return location;
-        }
-
-        std::string final_location = location;
-        const std::string candidate = effective_location(io);
-        if (is_http_url(candidate)) {
-            final_location = candidate;
-        }
-        if (final_location != location) {
-            const std::string refused = media_url_policy::checkNested(final_location, location);
-            if (!refused.empty()) {
-                // The demuxer's own open follows the same redirect and is
-                // refused by policyIoOpen.
-                blog(LOG_WARNING, "[MEDIA] refused HLS manifest redirect to %s: %s",
-                     safe_location_for_log(final_location).c_str(), refused.c_str());
-                report_refusal(refused);
-                avio_closep(&io);
-                return location;
-            }
         }
 
         constexpr size_t kMaximumManifestBytes = 1024 * 1024;
@@ -1080,8 +1057,10 @@ private:
         AVFrame* transfer = nullptr;  // hardware surface copied to memory
         AVFrame* rotated = nullptr;   // upright picture for rotated streams
         int turns = 0;                // clockwise quarter turns to apply
-        bool hardware = false;        // the decoder was opened for hardware
-        int hardware_errors = 0;      // consecutive, since the last picture
+        // Read and written by both the worker (decode, send) and the
+        // presenter (picture read-back).
+        std::atomic<bool> hardware{false}; // the decoder was opened for hardware
+        std::atomic<int> hardware_errors{0}; // consecutive, since the last picture
         // Set by the presenter, taken by the worker (which first waits for
         // the presenter to go idle before it changes the fields above).
         std::atomic<bool> reopen_in_software{false};
@@ -1445,8 +1424,8 @@ private:
         }
         clearVideoQueue();
 
-        const int64_t timestamp = static_cast<int64_t>(
-            (std::max(0.0, target - preroll) + stream_start_seconds(format)) * AV_TIME_BASE);
+        const int64_t timestamp =
+            seek_timestamp(target - preroll, stream_start_seconds(format));
         const int result = av_seek_frame(format, -1, timestamp, AVSEEK_FLAG_BACKWARD);
         if (result < 0) {
             blog(LOG_WARNING, "[MEDIA] seek to %.3fs failed: %s",
@@ -1887,7 +1866,8 @@ private:
         bool hls_input = looks_like_hls_url(playback_location);
         if (is_http_url(playback_location) && !hls_input) {
             resilient_io = std::make_unique<ResilientHttpIo>(
-                playback_location, AVIOInterruptCB{&Impl::interruptCallback, this});
+                playback_location, AVIOInterruptCB{&Impl::interruptCallback, this},
+                *fetch_session);
             if (resilient_io->open() && is_hls_mime_type(resilient_io->mimeType())) {
                 blog(LOG_INFO, "[MEDIA] the URL serves an HLS playlist (%s)",
                      resilient_io->mimeType().c_str());
@@ -1896,6 +1876,12 @@ private:
             } else if (resilient_io->context()) {
                 format->pb = resilient_io->context();
                 format->flags |= AVFMT_FLAG_CUSTOM_IO;
+            } else if (resilient_io->refused()) {
+                avformat_free_context(format);
+                format = nullptr;
+                resilient_io.reset();
+                markOpenFailure("media URL refused");
+                return false;
             } else {
                 resilient_io.reset();
             }
@@ -1961,10 +1947,12 @@ private:
             return false;
         }
 
+        bool hardware = false;
         if (video_index >= 0 &&
-            !openDecoder(format, video_index, &video_decoder, true, &video_output.hardware)) {
+            !openDecoder(format, video_index, &video_decoder, true, &hardware)) {
             blog(LOG_WARNING, "[MEDIA] video stream will be skipped");
         }
+        video_output.hardware = hardware;
         if (video_decoder) {
             video_output.turns = display_quarter_turns(format->streams[video_index]);
         }
@@ -1981,8 +1969,12 @@ private:
             ? format->duration / static_cast<double>(AV_TIME_BASE) : 0.0;
         format_start_seconds = format->start_time != AV_NOPTS_VALUE
             ? format->start_time / static_cast<double>(AV_TIME_BASE) : 0.0;
+        if (duration_known) start_position = std::min(start_position, duration);
         {
             std::lock_guard<std::mutex> lock(state_mutex);
+            // The sender's start position, reported until frames arrive, and
+            // only ever raised by them: not past the end.
+            if (duration_known) info.position = std::min(info.position, duration);
             info.duration = duration;
             info.seek_start = 0.0;
             info.seek_duration = duration;
@@ -2003,8 +1995,8 @@ private:
 
         seek_preroll = seekPreroll(format, video_index);
         if (start_position > 0.0) {
-            const int64_t target = static_cast<int64_t>(
-                (std::max(0.0, start_position - seek_preroll) + format_start_seconds) * AV_TIME_BASE);
+            const int64_t target =
+                seek_timestamp(start_position - seek_preroll, format_start_seconds);
             if (av_seek_frame(format, -1, target, AVSEEK_FLAG_BACKWARD) < 0) {
                 blog(LOG_WARNING, "[MEDIA] initial seek to %.3fs was not available", start_position);
             }
@@ -2257,21 +2249,30 @@ private:
         const std::string log_location = safe_location_for_log(location);
         blog(LOG_INFO, "[MEDIA] opening Safari media URL: %s", log_location.c_str());
         const bool http_item = is_http_url(location);
-        const std::string refused = http_item ? media_url_policy::checkItem(location)
+        // Every fetch for this item goes through it; its lookups are
+        // interrupted by stop() (they run while stop() waits for this thread).
+        media_fetch::Session fetch(
+            location, g_allow_insecure_tls.load(std::memory_order_relaxed),
+            [this] { return stop_requested.load(std::memory_order_acquire); }, report_refusal);
+        fetch_session = &fetch;
+        ScopeExit clear_fetch{[this] { fetch_session = nullptr; }};
+        const std::string refused = http_item ? fetch.check(location, true)
                                               : media_url_policy::checkLocalFile(location);
+        if (stop_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         if (!refused.empty()) {
             markOpenFailure(("media URL refused: " + refused).c_str());
             report_refusal(refused);
             return;
         }
-        policy_item_url = location;
-        const std::string playback_location = resolveHlsVariant(location);
+        const std::string playback_location =
+            http_item ? resolveHlsVariant(location) : location;
         if (stop_requested.load(std::memory_order_acquire)) {
             return;
         }
         if (playback_location != location) {
-            const std::string variant_refused =
-                media_url_policy::checkNested(playback_location, location);
+            const std::string variant_refused = fetch.check(playback_location, false);
             if (!variant_refused.empty()) {
                 markOpenFailure(("HLS rendition URL refused: " + variant_refused).c_str());
                 report_refusal(variant_refused);
@@ -2375,8 +2376,8 @@ private:
     std::atomic<bool> pause_before_first_frame_logged{false};
     std::mutex control_mutex;
     std::thread worker;
-    // The current item's URL, for policyIoOpen (worker thread only).
-    std::string policy_item_url;
+    // The current item's fetches, for policyIoOpen (worker thread only).
+    media_fetch::Session* fetch_session = nullptr;
     int (*default_io_open)(AVFormatContext*, AVIOContext**, const char*, int,
                            AVDictionary**) = nullptr;
 };

@@ -3,8 +3,12 @@
 #include "media-url-policy.hpp"
 
 extern "C" {
+#include <libavformat/avio.h>
 #include <libavutil/log.h>
 }
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <algorithm>
 #include <atomic>
@@ -15,7 +19,10 @@ extern "C" {
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 // Set when the player logs that it continued a cut-off response (--resilient).
 std::atomic<int> g_resumed_responses{0};
@@ -555,14 +562,32 @@ int urlPolicy()
     using namespace media_url_policy;
     setLoopbackAllowedForTesting(false);
     setLocalFilesAllowedForTesting(false);
+    // Names answer from a table, not the network: cdn.example.test is a
+    // public address, rebind.example.test a loopback one, others none.
+    setResolverForTesting([](const std::string& host, std::vector<sockaddr_storage>& out) {
+        sockaddr_storage address = {};
+        auto& v4 = reinterpret_cast<sockaddr_in&>(address);
+        v4.sin_family = AF_INET;
+        if (host == "cdn.example.test") {
+            inet_pton(AF_INET, "93.184.216.34", &v4.sin_addr);
+        } else if (host == "rebind.example.test") {
+            inet_pton(AF_INET, "127.0.0.1", &v4.sin_addr);
+        } else {
+            return false;
+        }
+        out.push_back(address);
+        return true;
+    });
     const char* item = "https://cdn.example.test/master.m3u8";
     struct Case { const char* url; bool allowed; };
     const Case nested[] = {
         {"https://cdn.example.test/seg1.ts", true},
         {"https://cdn.example.test:443/key", true},
-        // A name that does not resolve is refused (fail closed); .invalid
-        // names never resolve (whether .test does depends on the resolver).
+        {"http://cdn.example.test:8080/seg.ts", true},
+        // A name that does not resolve is refused (fail closed), and one
+        // that resolves to a refused address.
         {"http://segments.invalid/seg.ts", false},
+        {"http://rebind.example.test/seg.ts", false},
         {"http://127.0.0.1/seg.ts", false},
         {"http://127.0.0.1:631/", false},
         {"http://localhost:8080/x", false},
@@ -640,6 +665,31 @@ int urlPolicy()
         std::string::npos) {
         ++failures;
     }
+    // A name is pinned to its checked address; literals and the receiver's
+    // own proxy are not.
+    const Resolver table = [](const std::string& host, std::vector<sockaddr_storage>& out) {
+        if (host != "cdn.example.test") return false;
+        sockaddr_storage address = {};
+        auto& v6 = reinterpret_cast<sockaddr_in6&>(address);
+        v6.sin6_family = AF_INET6;
+        inet_pton(AF_INET6, "2001:db8::7", &v6.sin6_addr);
+        out.push_back(address);
+        return true;
+    };
+    if (decideItem("http://cdn.example.test/x.mp4", table).address != "2001:db8::7") ++failures;
+    if (decideNested("http://cdn.example.test/seg.ts", item, table).address != "2001:db8::7") {
+        ++failures;
+    }
+    if (!decideItem("http://10.0.0.5:7001/x.mp4", table).address.empty()) ++failures;
+    if (!decideNested("http://10.0.0.5:7001/seg.ts", "http://10.0.0.5:7001/x.mp4", table)
+             .refused.empty()) {
+        ++failures;
+    }
+    if (!decideNested("http://[fe80::1]:7001/seg.ts", "http://[fe80::1]:7001/x.m3u8", table)
+             .refused.empty()) {
+        ++failures;  // a link-local sender's own segments
+    }
+    setResolverForTesting(nullptr);
 
     const auto ports = parsePortList("80, 443,8080");
     if (ports.size() != 3 || ports[2] != 8080 || !parsePortList("80,http").empty()) ++failures;
@@ -810,6 +860,115 @@ int afterEnd(const char* location)
     return ok ? 0 : 1;
 }
 
+// GET over FFmpeg's HTTP input, or empty.
+std::string httpGet(const std::string& url)
+{
+    AVIOContext* io = nullptr;
+    if (avio_open2(&io, url.c_str(), AVIO_FLAG_READ, nullptr, nullptr) < 0) return {};
+    std::string body;
+    unsigned char buffer[4096];
+    int got = 0;
+    while ((got = avio_read(io, buffer, sizeof(buffer))) > 0) {
+        body.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(got));
+    }
+    avio_closep(&io);
+    return body;
+}
+
+// Fetches go where the policy checked (tests/redirect-server.py on 18904):
+// a name is connected to by its checked address with the name in the Host
+// header (pinned.invalid exists only in the test lookup, so FFmpeg could not
+// have found it), also for an HLS playlist's relative segments; redirects
+// are followed by hand, and a hop the policy refuses is never requested and
+// is reported once, not once per retry.
+int fetchPinning()
+{
+    using namespace media_url_policy;
+    setResolverForTesting([](const std::string& host, std::vector<sockaddr_storage>& out) {
+        if (host != "pinned.invalid") return false;
+        sockaddr_storage address = {};
+        auto& v4 = reinterpret_cast<sockaddr_in&>(address);
+        v4.sin_family = AF_INET;
+        inet_pton(AF_INET, "127.0.0.1", &v4.sin_addr);
+        out.push_back(address);
+        return true;
+    });
+    std::mutex refusals_mutex;
+    std::vector<std::string> refusals;
+    MediaPlayer::setRefusalCallback([&](const std::string& reason) {
+        std::lock_guard<std::mutex> lock(refusals_mutex);
+        refusals.push_back(reason);
+    });
+    const unsigned int pinned_mp4 = framesWithin("http://pinned.invalid:18904/files/clip8.mp4", 8000);
+    const unsigned int pinned_hls = framesWithin("http://pinned.invalid:18904/hls/same.m3u8", 8000);
+    // Loopback is refused from here on, except the item's own literal address.
+    setLoopbackAllowedForTesting(false);
+    const unsigned int redirected_mp4 =
+        framesWithin("http://127.0.0.1:18904/redirect/clip8.mp4", 8000);
+    const unsigned int redirected_hls =
+        framesWithin("http://127.0.0.1:18904/redirect-hls/same.m3u8", 8000);
+    size_t refusals_before = 0;
+    {
+        std::lock_guard<std::mutex> lock(refusals_mutex);
+        refusals_before = refusals.size();
+    }
+    const unsigned int refused_frames =
+        framesWithin("http://127.0.0.1:18904/redirect-out/clip8.mp4", 3000);
+    size_t refused_reports = 0;
+    {
+        std::lock_guard<std::mutex> lock(refusals_mutex);
+        refused_reports = refusals.size() - refusals_before;
+    }
+    setLoopbackAllowedForTesting(true);
+    MediaPlayer::setRefusalCallback(nullptr);
+    setResolverForTesting(nullptr);
+
+    const std::string log = httpGet("http://127.0.0.1:18904/log");
+    const bool host_kept = log.find("pinned.invalid:18904 /files/clip8.mp4") != std::string::npos &&
+        log.find("pinned.invalid:18904 /hls/seg0.ts") != std::string::npos;
+    const bool redirect_followed = log.find("127.0.0.1:18904 /redirect/clip8.mp4") !=
+        std::string::npos;
+    const bool secret_untouched = log.find("/secret/") == std::string::npos;
+    const bool ok = pinned_mp4 > 0 && pinned_hls > 0 && redirected_mp4 > 0 &&
+        redirected_hls > 0 && redirect_followed && host_kept && refused_frames == 0 &&
+        secret_untouched && refused_reports == 1;
+    std::fprintf(stderr,
+                 "media-smoke: fetch-pinning pinned_mp4=%u pinned_hls=%u host_kept=%d "
+                 "redirected_mp4=%u redirected_hls=%u refused_frames=%u secret_untouched=%d "
+                 "refused_reports=%zu -> %s\n",
+                 pinned_mp4, pinned_hls, host_kept, redirected_mp4, redirected_hls,
+                 refused_frames, secret_untouched, refused_reports, ok ? "ok" : "FAILED");
+    if (!ok) std::fprintf(stderr, "media-smoke: server log:\n%s", log.c_str());
+    return ok ? 0 : 1;
+}
+
+// stop() while the item's host name is still being looked up returns at
+// once: the lookup runs on a thread nobody waits for (an unreachable
+// resolver used to hold stop(), and with it UxPlay's HTTP thread or OBS's
+// exit, for the resolver's whole retry budget).
+int slowLookup()
+{
+    using namespace media_url_policy;
+    setResolverForTesting([](const std::string&, std::vector<sockaddr_storage>&) {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        return false;
+    });
+    MediaPlayer player;
+    player.setVideoCallback([](const MediaVideoFrame&) {});
+    player.setAudioCallback([](const MediaAudioFrame&) {});
+    player.play("http://slow-resolver.invalid/clip.mp4", 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto started = std::chrono::steady_clock::now();
+    player.stop();
+    const double stop_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    setResolverForTesting(nullptr);
+    const bool ok = stop_ms < 500.0;
+    std::fprintf(stderr, "media-smoke: slow-lookup stop_ms=%.1f -> %s\n", stop_ms,
+                 ok ? "ok" : "FAILED");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     // The smokes play local files and loopback servers; the policy itself is
@@ -827,6 +986,12 @@ int main(int argc, char** argv)
     }
     if (argc == 3 && std::strcmp(argv[1], "--tls-verify") == 0) {
         return tlsVerify(argv[2]);
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--fetch-pinning") == 0) {
+        return fetchPinning();
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--slow-lookup") == 0) {
+        return slowLookup();
     }
     if (argc == 3 && std::strcmp(argv[1], "--ts-seek") == 0) {
         return tsSeek(argv[2]);
@@ -887,7 +1052,7 @@ int main(int argc, char** argv)
         }
     }
     if (!location) {
-        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --ts-seek TS_URL | --ts-seek-race TS_URL | --after-end SHORT_URL\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--startup] [--require-audio] MEDIA_URL | --seek-sync MEDIA_URL | --sparse-clip MEDIA_URL | --scrub-drag MEDIA_URL | --paused-audio MEDIA_URL | --stop-race MEDIA_URL [iterations] | --url-policy | --nested-policy SAME_ORIGIN_M3U8 CROSS_ORIGIN_M3U8 | --tls-verify HTTPS_URL | --resilient TRUNCATING_URL | --fetch-pinning | --slow-lookup | --ts-seek TS_URL | --ts-seek-race TS_URL | --after-end SHORT_URL\n", argv[0]);
         return 2;
     }
 

@@ -37,22 +37,37 @@ std::string trim_line(std::string line)
     return first == std::string::npos ? std::string() : line.substr(first);
 }
 
+// The value of NAME in an attribute list (NAME=value,NAME="value",...): a
+// name is matched whole, at the start of an attribute, so BANDWIDTH is not
+// found inside AVERAGE-BANDWIDTH, and commas inside quotes do not split.
 std::string hls_attribute(const std::string& attributes, const char* name)
 {
-    const std::string needle = std::string(name) + "=";
-    size_t start = attributes.find(needle);
-    if (start == std::string::npos) {
-        return {};
+    const size_t name_length = std::strlen(name);
+    size_t start = 0;
+    while (start < attributes.size()) {
+        const size_t equals = attributes.find('=', start);
+        if (equals == std::string::npos) return {};
+        const bool match = equals - start == name_length &&
+            attributes.compare(start, name_length, name) == 0;
+        size_t value_end;
+        std::string value;
+        if (equals + 1 < attributes.size() && attributes[equals + 1] == '"') {
+            const size_t close = attributes.find('"', equals + 2);
+            if (close == std::string::npos) return {};
+            value = attributes.substr(equals + 2, close - equals - 2);
+            value_end = close + 1;
+        } else {
+            value_end = attributes.find(',', equals + 1);
+            if (value_end == std::string::npos) value_end = attributes.size();
+            value = attributes.substr(equals + 1, value_end - equals - 1);
+        }
+        if (match) return value;
+        const size_t comma = attributes.find(',', value_end);
+        if (comma == std::string::npos) return {};
+        start = comma + 1;
+        while (start < attributes.size() && attributes[start] == ' ') ++start;
     }
-    start += needle.size();
-    if (start < attributes.size() && attributes[start] == '"') {
-        const size_t end = attributes.find('"', start + 1);
-        return end == std::string::npos ? std::string()
-            : attributes.substr(start + 1, end - start - 1);
-    }
-    const size_t end = attributes.find(',', start);
-    return attributes.substr(start, end == std::string::npos
-        ? std::string::npos : end - start);
+    return {};
 }
 
 std::string normalize_url_path(const std::string& url)

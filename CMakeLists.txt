@@ -179,6 +179,7 @@ set(obs-airplay_SOURCES
     src/h264-decoder.cpp
     src/audio-decoder.cpp
     src/hls-playlist.cpp
+    src/media-fetch.cpp
     src/media-player.cpp
     src/media-url-policy.cpp
     src/module-settings.cpp
@@ -192,6 +193,7 @@ set(obs-airplay_HEADERS
     src/h264-decoder.hpp
     src/audio-decoder.hpp
     src/hls-playlist.hpp
+    src/media-fetch.hpp
     src/media-player.hpp
 )
 
@@ -415,6 +417,7 @@ if(BUILD_TESTING)
     add_executable(obs-airplay-media-smoke
         tests/media-player-smoke.cpp
         src/hls-playlist.cpp
+        src/media-fetch.cpp
         src/media-player.cpp
         src/media-url-policy.cpp
     )
@@ -620,6 +623,7 @@ if(BUILD_TESTING)
             set_tests_properties(${name} PROPERTIES FIXTURES_REQUIRED media TIMEOUT 180)
         endforeach()
         add_test(NAME media-url-policy COMMAND obs-airplay-media-smoke --url-policy)
+        add_test(NAME media-slow-lookup COMMAND obs-airplay-media-smoke --slow-lookup)
 
         # Local HTTP(S) servers on fixed ports: one test at a time.
         add_test(NAME media-nested-policy
@@ -634,7 +638,11 @@ if(BUILD_TESTING)
             COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --resilient
                     http://127.0.0.1:18903/clip8.mp4)
-        set_tests_properties(media-nested-policy media-tls-verify media-resilient-http PROPERTIES
+        add_test(NAME media-fetch-pinning
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+                    "$<TARGET_FILE:obs-airplay-media-smoke>" --fetch-pinning)
+        set_tests_properties(media-nested-policy media-tls-verify media-resilient-http
+                             media-fetch-pinning PROPERTIES
             FIXTURES_REQUIRED media RESOURCE_LOCK media-servers TIMEOUT 120)
 
         add_test(NAME decoder

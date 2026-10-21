@@ -200,13 +200,15 @@ void UxPlayIntegration::deferredClearLoop()
 
 // UxPlay's callbacks into this object (cls). They run on UxPlay's threads:
 // the HTTP thread (requests, AirPlay video), the mirror and audio threads.
+// No exception can cross UxPlay's C frames, hence noexcept: one that escapes
+// ends the process here, where the cause is visible.
 raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
 {
     raop_callbacks_t callbacks = {};
     callbacks.cls = this;
 
     // Timing: fires when iOS first TCP-connects (before handshake).
-    callbacks.conn_init = [](void* cls) {
+    callbacks.conn_init = [](void* cls) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self) {
             self->m_open_connections.fetch_add(1);
@@ -224,7 +226,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
     // output is cleared: after a short grace period, so that a new
     // connection that shows something at once (an item switch, a
     // reconnect) replaces the frame without an empty source in between.
-    callbacks.conn_destroy = [](void* cls) {
+    callbacks.conn_destroy = [](void* cls) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self) {
             return;
@@ -240,7 +242,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
     };
     // A TEARDOWN that names no stream ends the device's whole mirroring
     // session (UxPlay reports a video reset only for a single stream).
-    callbacks.conn_teardown = [](void* cls, bool* teardown_96, bool* teardown_110) {
+    callbacks.conn_teardown = [](void* cls, bool* teardown_96, bool* teardown_110) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || (teardown_96 && *teardown_96) || (teardown_110 && *teardown_110)) {
             return;
@@ -252,7 +254,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->scheduleDeferredClear("the device ended its AirPlay session");
         }
     };
-    callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) {
+    callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || !method || !url) {
             return;
@@ -280,7 +282,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         }
     };
 
-    callbacks.mirror_connection_timing = [](void* cls, bool first_data) {
+    callbacks.mirror_connection_timing = [](void* cls, bool first_data) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         const uint64_t started_ns = self->m_connection_started_ns.load(std::memory_order_relaxed);
         if (!started_ns) {
@@ -292,7 +294,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
     };
     
     // Set video and audio processing callbacks
-    callbacks.video_process = [](void* cls, raop_ntp_t*, video_decode_struct* data) {
+    callbacks.video_process = [](void* cls, raop_ntp_t*, video_decode_struct* data) noexcept {
         if (cls && data) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             self->processVideoData(data);
@@ -303,7 +305,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
     // is set up for its rate, channels and depth (all 44.1 kHz stereo from
     // iOS so far, but the receiver accepts 48 kHz formats too).
     callbacks.audio_get_format = [](void* cls, unsigned char* ct, unsigned short* spf,
-                                    bool* using_screen, bool* is_media, uint64_t* audio_format) {
+                                    bool* using_screen, bool* is_media, uint64_t* audio_format) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || !ct || !spf || !audio_format) return;
         AirPlayAudioFormat format;
@@ -323,7 +325,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         if (callback) callback(format);
     };
 
-    callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) {
+    callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) noexcept {
         if (cls && data) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             self->processAudioData(data);
@@ -332,11 +334,11 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
 
     // Required by UxPlay runtime; provide safe defaults for callbacks
     // that UxPlay may call without null checks.
-    callbacks.conn_feedback = [](void* cls) {
+    callbacks.conn_feedback = [](void* cls) noexcept {
         blog(LOG_DEBUG, "[UxPlay] feedback heartbeat received");
         UNUSED_PARAMETER(cls);
     };
-    callbacks.conn_reset = [](void* cls, int reason) {
+    callbacks.conn_reset = [](void* cls, int reason) noexcept {
         if (cls) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
@@ -344,37 +346,37 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->processConnReset(!self->m_media_active.load());
         }
     };
-    callbacks.video_flush = [](void* cls) {
+    callbacks.video_flush = [](void* cls) noexcept {
         UNUSED_PARAMETER(cls);
     };
-    callbacks.audio_flush = [](void* cls) {
+    callbacks.audio_flush = [](void* cls) noexcept {
         UNUSED_PARAMETER(cls);
     };
-    callbacks.audio_set_volume = [](void* cls, float volume) {
+    callbacks.audio_set_volume = [](void* cls, float volume) noexcept {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(volume);
     };
-    callbacks.audio_set_metadata = [](void* cls, const void* buffer, int buflen) {
+    callbacks.audio_set_metadata = [](void* cls, const void* buffer, int buflen) noexcept {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(buffer);
         UNUSED_PARAMETER(buflen);
     };
-    callbacks.audio_set_coverart = [](void* cls, const void* buffer, int buflen) {
+    callbacks.audio_set_coverart = [](void* cls, const void* buffer, int buflen) noexcept {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(buffer);
         UNUSED_PARAMETER(buflen);
     };
-    callbacks.audio_set_progress = [](void* cls, uint32_t* start, uint32_t* curr, uint32_t* end) {
+    callbacks.audio_set_progress = [](void* cls, uint32_t* start, uint32_t* curr, uint32_t* end) noexcept {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(start);
         UNUSED_PARAMETER(curr);
         UNUSED_PARAMETER(end);
     };
-    callbacks.audio_set_client_volume = [](void* cls) -> double {
+    callbacks.audio_set_client_volume = [](void* cls) noexcept -> double {
         UNUSED_PARAMETER(cls);
         return -15.0;
     };
-    callbacks.on_video_play = [](void* cls, const char* location, const float start_position) {
+    callbacks.on_video_play = [](void* cls, const char* location, const float start_position) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || !self->m_media_player || !location || !*location) {
             blog(LOG_ERROR, "[MEDIA] POST /play did not provide a usable media URL");
@@ -404,24 +406,24 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         self->m_frame_shown.store(true);
         self->m_media_player->play(location, start_position);
     };
-    callbacks.on_video_refused = [](void* cls, const char* reason) {
+    callbacks.on_video_refused = [](void* cls, const char* reason) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self) self->recordRefusal(reason ? reason : "refused");
     };
-    callbacks.on_video_scrub = [](void* cls, const float position) {
+    callbacks.on_video_scrub = [](void* cls, const float position) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self && self->m_media_player) {
             blog(LOG_INFO, "[MEDIA] POST /scrub requested %.3fs", position);
             self->m_media_player->seek(position);
         }
     };
-    callbacks.on_video_rate = [](void* cls, const float rate) {
+    callbacks.on_video_rate = [](void* cls, const float rate) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self && self->m_media_player) {
             self->m_media_player->setRate(rate);
         }
     };
-    callbacks.on_video_stop = [](void* cls) {
+    callbacks.on_video_stop = [](void* cls) noexcept {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self && self->m_media_player) {
             blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
@@ -432,7 +434,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->scheduleDeferredClear();
         }
     };
-    callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) {
+    callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) noexcept {
         if (!playback_video) {
             return;
         }
@@ -462,20 +464,20 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         playback_video->loadedTimeRanges = nullptr;
         playback_video->seekableTimeRanges = nullptr;
     };
-    callbacks.on_video_playlist_remove = [](void* cls) -> float {
+    callbacks.on_video_playlist_remove = [](void* cls) noexcept -> float {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         return self && self->m_media_player
             ? self->m_media_player->pauseForPlaylistRemoval() : 0.0f;
     };
 
     // Required by UxPlay mirror thread.
-    callbacks.video_pause = [](void* cls) {
+    callbacks.video_pause = [](void* cls) noexcept {
         UNUSED_PARAMETER(cls);
     };
-    callbacks.video_resume = [](void* cls) {
+    callbacks.video_resume = [](void* cls) noexcept {
         UNUSED_PARAMETER(cls);
     };
-    callbacks.video_reset = [](void* cls, reset_type_t reset_type) {
+    callbacks.video_reset = [](void* cls, reset_type_t reset_type) noexcept {
         if (cls) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             blog(LOG_INFO, "[UxPlay] Video reset (type=%d) — flushing decoders", static_cast<int>(reset_type));
@@ -493,7 +495,7 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->processConnReset(!self->m_media_active.load());
         }
     };
-    callbacks.video_set_codec = [](void* cls, video_codec_t codec) -> int {
+    callbacks.video_set_codec = [](void* cls, video_codec_t codec) noexcept -> int {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         const uint64_t now = os_gettime_ns();
         const uint64_t origin = self ? self->m_connection_started_ns.load() : 0;
@@ -812,7 +814,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
     }
 }
 
-void UxPlayIntegration::updateServerName(const std::string& name)
+bool UxPlayIntegration::updateServerName(const std::string& name)
 {
     // Not while start() or stop() replace m_raop / m_dnssd.
     std::lock_guard<std::mutex> lifecycle(m_lifecycle_mutex);
@@ -825,7 +827,7 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         if (!m_raop || !m_running) {
             // UxPlay not (yet) running: keep the name for start().
             m_server_name = name.empty() ? "OBS AirPlay" : name;
-            return;
+            return true;
         }
         raop_ref = m_raop;
         old_dnssd = m_dnssd;
@@ -850,9 +852,12 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         if (new_dnssd) {
             dnssd_destroy(new_dnssd);
         }
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_dnssd = old_dnssd;
-        return;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_dnssd = old_dnssd;
+        }
+        setLastError(format_text("AirPlay.Error.RenameFailed", dnssd_error));
+        return false;
     }
 
 #if OBS_AIRPLAY_FAST_CONNECT
@@ -903,8 +908,15 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         m_dnssd       = new_dnssd;
         m_server_name = svc_name;
     }
+    if (raop_reg_err != DNSSD_ERROR_NOERROR || airplay_reg_err != DNSSD_ERROR_NOERROR) {
+        setLastError(format_text("AirPlay.Error.Bonjour",
+                                 raop_reg_err ? raop_reg_err : airplay_reg_err));
+    } else {
+        setLastError({});
+    }
 
     blog(LOG_INFO, "UxPlay dnssd service name updated successfully");
+    return true;
 }
 
 void UxPlayIntegration::setLastError(std::string error)

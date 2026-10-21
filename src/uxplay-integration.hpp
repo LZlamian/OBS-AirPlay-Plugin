@@ -88,8 +88,10 @@ public:
     // Cleared when an item is accepted.
     std::string lastRefusal() const;
 
-    // Update the advertised server name in the UxPlay dnssd context (live, no restart)
-    void updateServerName(const std::string& name);
+    // Update the advertised server name in the UxPlay dnssd context (live, no
+    // restart). False when the new name could not be set up: the old one is
+    // still advertised and the panel shows the error.
+    bool updateServerName(const std::string& name);
     
     // Set callbacks for video, audio, and connection reset
     void setVideoCallback(VideoFrameCallback callback);

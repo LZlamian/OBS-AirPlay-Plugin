@@ -11,8 +11,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <system_error>
+#include <thread>
 
 namespace media_url_policy {
 namespace {
@@ -22,6 +27,8 @@ std::vector<unsigned short> g_ports{80, 443, 8080, 8443};
 std::atomic<bool> g_loopback_for_testing{false};
 std::atomic<bool> g_local_files_for_testing{false};
 std::atomic<bool> g_sender_only{false};
+std::mutex g_resolver_mutex; // leaf
+Resolver g_resolver_for_testing;
 
 constexpr const char* kNotSender = "host is not the sending device (only the sending device is allowed)";
 
@@ -140,34 +147,65 @@ bool isLocalhostName(const std::string& host)
         (host.size() > 10 && host.compare(host.size() - 10, 10, ".localhost") == 0);
 }
 
+std::string numericAddress(const sockaddr_storage& address)
+{
+    char text[INET6_ADDRSTRLEN] = {};
+    if (address.ss_family == AF_INET) {
+        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in&>(address).sin_addr, text,
+                  sizeof(text));
+    } else if (address.ss_family == AF_INET6) {
+        inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6&>(address).sin6_addr, text,
+                  sizeof(text));
+    }
+    return text;
+}
+
 // Literal addresses are classified directly (inet_aton also takes the short
 // and numeric forms resolvers accept); names are resolved and every address
-// must pass.
-std::string checkHost(const std::string& host)
+// must pass. For a name, `address` gets the first one, which is where the
+// fetch must connect (another lookup may answer differently).
+Decision checkHost(const std::string& host, const Resolver& resolve)
 {
     in6_addr v6 = {};
     in_addr v4 = {};
-    if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) return classifyIpv6(v6.s6_addr);
-    if (inet_aton(host.c_str(), &v4) == 1) return classifyIpv4(ntohl(v4.s_addr));
-    if (isLocalhostName(host) && !g_loopback_for_testing) return "loopback host";
+    if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) return {classifyIpv6(v6.s6_addr), ""};
+    if (inet_aton(host.c_str(), &v4) == 1) return {classifyIpv4(ntohl(v4.s_addr)), ""};
+    if (isLocalhostName(host) && !g_loopback_for_testing) return {"loopback host", ""};
 
+    std::vector<sockaddr_storage> addresses;
+    if (!resolve(host, addresses) || addresses.empty()) {
+        // Refused, not left to FFmpeg: its own lookup may get a different
+        // answer (a resolver that times out here, a name that rebinds).
+        return {"host name could not be resolved", ""};
+    }
+    std::string refused;
+    for (const sockaddr_storage& address : addresses) {
+        refused = classify(reinterpret_cast<const sockaddr*>(&address));
+        if (!refused.empty()) return {"host resolves to a " + refused, ""};
+    }
+    const std::string first = numericAddress(addresses.front());
+    if (first.empty()) return {"host resolves to an unsupported address", ""};
+    return {"", first};
+}
+
+bool blockingResolve(const std::string& host, std::vector<sockaddr_storage>& addresses)
+{
     addrinfo hints = {};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* results = nullptr;
-    const int error = getaddrinfo(host.c_str(), nullptr, &hints, &results);
-    if (error != 0 || !results) {
-        // Refused, not left to FFmpeg: its own lookup may get a different
-        // answer (a resolver that times out here, a name that rebinds).
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &results) != 0 || !results) {
         if (results) freeaddrinfo(results);
-        return "host name could not be resolved";
+        return false;
     }
-    std::string refused;
-    for (const addrinfo* entry = results; entry && refused.empty(); entry = entry->ai_next) {
-        if (entry->ai_addr) refused = classify(entry->ai_addr);
+    for (const addrinfo* entry = results; entry; entry = entry->ai_next) {
+        if (!entry->ai_addr || entry->ai_addrlen > sizeof(sockaddr_storage)) continue;
+        sockaddr_storage address = {};
+        std::memcpy(&address, entry->ai_addr, entry->ai_addrlen);
+        addresses.push_back(address);
     }
     freeaddrinfo(results);
-    return refused.empty() ? "" : "host resolves to a " + refused;
+    return !addresses.empty();
 }
 
 // A literal address as 16 bytes (IPv4 as IPv4-mapped IPv6).
@@ -250,28 +288,38 @@ void setLocalFilesAllowedForTesting(bool allowed)
     g_local_files_for_testing.store(allowed);
 }
 
-std::string checkItem(const std::string& url)
+Decision decideItem(const std::string& url, const Resolver& resolve)
 {
     UrlParts parts;
-    if (!split(url, parts)) return "malformed URL";
+    if (!split(url, parts)) return {"malformed URL", ""};
     in6_addr v6 = {};
     in_addr v4 = {};
     if (inet_pton(AF_INET6, parts.host.c_str(), &v6) == 1 ||
         inet_aton(parts.host.c_str(), &v4) == 1) {
-        return "";
+        return {};
     }
-    if (parts.host == "localhost") return "";
-    if (g_sender_only) return kNotSender;
-    return checkHost(parts.host);
+    if (parts.host == "localhost") return {};
+    if (g_sender_only) return {kNotSender, ""};
+    return checkHost(parts.host, resolve);
 }
 
-std::string checkNested(const std::string& url, const std::string& item_url)
+Decision decideNested(const std::string& url, const std::string& item_url,
+                      const Resolver& resolve)
 {
     UrlParts parts;
-    if (!split(url, parts)) return "not an HTTP(S) URL";
+    if (!split(url, parts)) return {"not an HTTP(S) URL", ""};
     UrlParts item;
     if (split(item_url, item) && item.host == parts.host && item.port == parts.port) {
-        return "";
+        // The item's own host was checked with the item (a literal one by
+        // the receiver, with the sender's address in mind). A name is looked
+        // up again for its address, which the caller's resolver keeps stable.
+        in6_addr v6 = {};
+        in_addr v4 = {};
+        if (item.host == "localhost" || inet_pton(AF_INET6, parts.host.c_str(), &v6) == 1 ||
+            inet_aton(parts.host.c_str(), &v4) == 1) {
+            return {};
+        }
+        return checkHost(parts.host, resolve);
     }
     if (g_sender_only) {
         // The item's address is the sender's (the receiver checked it); its
@@ -281,12 +329,77 @@ std::string checkNested(const std::string& url, const std::string& item_url)
         const bool same_address = !item.host.empty() && item.host != "localhost" &&
             literalAddress(item.host, wanted) && literalAddress(parts.host, got) &&
             std::memcmp(wanted, got, 16) == 0;
-        return same_address ? "" : kNotSender;
+        return {same_address ? "" : kNotSender, ""};
     }
     if (!portAllowed(parts.port) && !g_loopback_for_testing) {
-        return "port " + std::to_string(parts.port) + " not allowed";
+        return {"port " + std::to_string(parts.port) + " not allowed", ""};
     }
-    return checkHost(parts.host);
+    return checkHost(parts.host, resolve);
+}
+
+namespace {
+// getaddrinfo, or the test hook.
+Resolver currentResolver()
+{
+    std::lock_guard<std::mutex> lock(g_resolver_mutex);
+    return g_resolver_for_testing ? g_resolver_for_testing : Resolver(blockingResolve);
+}
+} // namespace
+
+std::string checkItem(const std::string& url)
+{
+    return decideItem(url, currentResolver()).refused;
+}
+
+std::string checkNested(const std::string& url, const std::string& item_url)
+{
+    return decideNested(url, item_url, currentResolver()).refused;
+}
+
+void setResolverForTesting(Resolver resolver)
+{
+    std::lock_guard<std::mutex> lock(g_resolver_mutex);
+    g_resolver_for_testing = std::move(resolver);
+}
+
+bool resolveInterruptible(const std::string& host, std::vector<sockaddr_storage>& addresses,
+                          const std::function<bool()>& interrupted, int timeout_ms)
+{
+    const Resolver resolver = currentResolver();
+    // getaddrinfo cannot be cancelled: it runs on a thread of its own, which
+    // is left to finish when the caller stops waiting. (The plugin bundle
+    // holds Objective-C code, so dyld never unloads it under that thread.)
+    struct Lookup {
+        std::mutex mutex;
+        std::condition_variable done_cv;
+        bool done = false;
+        bool resolved = false;
+        std::vector<sockaddr_storage> addresses;
+    };
+    auto lookup = std::make_shared<Lookup>();
+    try {
+        std::thread([lookup, host, resolver] {
+            std::vector<sockaddr_storage> found;
+            const bool resolved = resolver(host, found);
+            std::lock_guard<std::mutex> lock(lookup->mutex);
+            lookup->resolved = resolved;
+            lookup->addresses = std::move(found);
+            lookup->done = true;
+            lookup->done_cv.notify_all();
+        }).detach();
+    } catch (const std::system_error&) {
+        return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::unique_lock<std::mutex> lock(lookup->mutex);
+    while (!lookup->done) {
+        if ((interrupted && interrupted()) || std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        lookup->done_cv.wait_for(lock, std::chrono::milliseconds(10));
+    }
+    addresses = std::move(lookup->addresses);
+    return lookup->resolved;
 }
 
 std::string checkLocalFile(const std::string& location)

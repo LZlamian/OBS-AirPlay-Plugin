@@ -110,6 +110,11 @@ Lock order (take left before right, never the reverse):
 - `MediaPlayer`: `control_mutex` → `state_mutex`; `queue_mutex` → `state_mutex`;
   `callback_mutex` is a leaf.
 
+Exceptions: UxPlay's callbacks (`UxPlayIntegration::makeRaopCallbacks`) run
+on its C threads, which an exception cannot cross: they are `noexcept`, and
+code they reach that can throw (`std::thread` construction in
+`MediaPlayer::play`) catches it.
+
 Frame lifetime: the planes in `MediaVideoFrame`, `MediaAudioFrame` and
 `DecodedVideoFrame` belong to the decoder (an AVFrame or a locked VideoToolbox
 buffer) and are valid only during the callback; libobs copies them in

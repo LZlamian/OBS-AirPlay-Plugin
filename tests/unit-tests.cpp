@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <random>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -90,6 +91,21 @@ void testHlsParse()
     // The best rendition at or under the target, not the largest one.
     const hls::Variant* chosen = hls::chooseVariant(variants);
     CHECK(chosen && chosen->uri == "mid/index.m3u8");
+
+    // Attribute names are whole names: AVERAGE-BANDWIDTH first (as in
+    // Apple's examples) is not BANDWIDTH, and a quoted comma does not split.
+    const std::vector<hls::Variant> averaged = hls::parseVariants(
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:AVERAGE-BANDWIDTH=500000,CODECS=\"avc1.4d401f,mp4a.40.2\","
+        "BANDWIDTH=900000\n"
+        "a.m3u8\n"
+        "#EXT-X-STREAM-INF:CODECS=\"avc1.4d401f,BANDWIDTH=7\",BANDWIDTH=300000\n"
+        "b.m3u8\n");
+    CHECK_EQ(averaged.size(), size_t(2));
+    if (averaged.size() == 2) {
+        CHECK_EQ(averaged[0].bandwidth, int64_t(900000));
+        CHECK_EQ(averaged[1].bandwidth, int64_t(300000));
+    }
 
     // A media playlist has no renditions.
     CHECK(hls::parseVariants("#EXTM3U\n#EXTINF:2.0,\nseg0.ts\n").empty());
@@ -440,7 +456,9 @@ struct RetimerRun {
     int dropped = 0;
     int late = 0;        // output later than now - kLateNs
     int gaps = 0;        // output not continuous with the previous packet
+    int audible_gaps = 0;  // ... by more than 1 ms (a gap or an overlap)
     uint64_t max_lead = 0;  // output ahead of now, most
+    uint64_t min_lead = UINT64_MAX;  // after the first packet
 };
 } // namespace
 
@@ -460,7 +478,13 @@ void testAudioRetimer()
         }
         if (r.timestamp + AudioRetimer::kLateNs < now) ++run.late;
         if (last_end != 0 && r.timestamp != last_end) ++run.gaps;
+        if (last_end != 0 && (r.timestamp > last_end + ms || r.timestamp + ms < last_end)) {
+            ++run.audible_gaps;
+        }
         if (r.timestamp > now && r.timestamp - now > run.max_lead) run.max_lead = r.timestamp - now;
+        if (last_end != 0) {
+            run.min_lead = std::min(run.min_lead, r.timestamp > now ? r.timestamp - now : 0);
+        }
         last_end = r.timestamp + packet;
         return r;
     };
@@ -486,7 +510,8 @@ void testAudioRetimer()
 
     // Startup burst: 1 s of queued packets released at once (play-at times
     // already passed), then real time. The backlog is dropped and the rest
-    // keeps the sender's times: no delay added.
+    // keeps the sender's times, at most kStartLeadNs + kLateNs later (the
+    // first kept packet starts the stream kStartLeadNs ahead of now).
     {
         restart();
         RetimerRun burst;
@@ -495,13 +520,16 @@ void testAudioRetimer()
         for (int i = 0; i < 120; ++i, play_at += packet, now += ms) feed(burst, play_at, now);
         RetimerRun after;
         bool same = true;
+        int64_t shift = -1;
         for (int i = 0; i < 400; ++i, play_at += packet, now += packet) {
             const auto r = feed(after, play_at, now);
-            same = same && !r.drop && r.timestamp == play_at;
+            if (shift < 0) shift = static_cast<int64_t>(r.timestamp - play_at);
+            same = same && !r.drop && static_cast<int64_t>(r.timestamp - play_at) == shift;
         }
         CHECK(burst.dropped > 80);
         CHECK_EQ(burst.late + after.late, 0);
         CHECK(same);
+        CHECK(shift >= 0 && shift <= int64_t(AudioRetimer::kStartLeadNs + AudioRetimer::kLateNs));
         CHECK(retimer.worstDroppedNs() >= 990 * ms);
     }
 
@@ -547,8 +575,8 @@ void testAudioRetimer()
         CHECK(retimer.trimmed() > 0);
     }
 
-    // A stall after the start (packets 400 ms late): one restart at now, then
-    // on time again, and the delay does not grow.
+    // A stall after the start (packets 400 ms late): one restart kStartLeadNs
+    // ahead of now, then on time again, and the delay does not grow.
     {
         restart();
         RetimerRun run;
@@ -561,7 +589,7 @@ void testAudioRetimer()
         CHECK_EQ(run.late + after.late, 0);
         CHECK_EQ(after.dropped, 0);
         CHECK_EQ(retimer.resyncs(), uint64_t(1));
-        CHECK(after.max_lead <= packet);
+        CHECK(after.max_lead <= AudioRetimer::kStartLeadNs + packet);
     }
 
     // Late from the very start (500 ms): dropped for the startup window, then
@@ -609,6 +637,91 @@ void testAudioRetimer()
         CHECK(!r.drop);
         CHECK_EQ(r.timestamp, play_at);
         CHECK_EQ(retimer.steps(), uint64_t(1));
+    }
+
+    // Audio anchors the clock (audio-only AirPlay, or audio first after a
+    // codec change): its first packet is due exactly now, and the next ones
+    // arrive up to 30 ms either side of their times. None is dropped or late
+    // and the stream stays continuous; 2.6.0 dropped those 20 ms late.
+    {
+        restart();
+        RetimerRun run;
+        std::mt19937_64 random(12345);
+        std::uniform_int_distribution<int64_t> spread(-30 * int64_t(ms), 30 * int64_t(ms));
+        const auto jitter = [&]() { return spread(random); };
+        for (int i = 0; i < 3000; ++i) {
+            const uint64_t play_at = t0 + i * packet;
+            const uint64_t now = i == 0 ? t0 : static_cast<uint64_t>(int64_t(play_at) + jitter());
+            feed(run, play_at, now);
+        }
+        CHECK_EQ(run.dropped, 0);
+        CHECK_EQ(run.late, 0);
+        CHECK_EQ(run.gaps, 0);
+        CHECK_EQ(retimer.resyncs(), uint64_t(0));
+        CHECK(run.max_lead <= AudioRetimer::kStartLeadNs + 30 * ms + packet);
+    }
+
+    // A sender whose sample clock is 50 ppm slow or fast against its play-at
+    // times (which UxPlay keeps on the local clock), for an hour, after the
+    // first RTP sync stepped them back: the difference is absorbed packet by
+    // packet. No drops, restarts, late packets or audible gaps, and the
+    // delay stays put (2.6.0 dropped a packet every few minutes or opened a
+    // gap of 20 ms or more).
+    for (const int ppm : {-50, 50}) {
+        restart();
+        RetimerRun run;
+        uint64_t now = t0;
+        double play_at = static_cast<double>(t0 + 100 * ms);
+        const double real_packet = static_cast<double>(packet) * (1.0 + ppm * 1e-6);
+        for (int i = 0; i < 300; ++i, now += packet, play_at += packet) {
+            feed(run, static_cast<uint64_t>(play_at), now);
+        }
+        play_at -= 1000.0 * ms;
+        RetimerRun hour;
+        const int packets = static_cast<int>(3600.0 * 1e9 / real_packet);
+        double now_exact = static_cast<double>(now);
+        for (int i = 0; i < packets; ++i, now_exact += real_packet, play_at += real_packet) {
+            feed(hour, static_cast<uint64_t>(play_at), static_cast<uint64_t>(now_exact));
+        }
+        CHECK_EQ(hour.dropped, 0);
+        CHECK_EQ(hour.late, 0);
+        CHECK_EQ(hour.audible_gaps, 0);
+        CHECK_EQ(retimer.resyncs(), uint64_t(0));
+        CHECK_EQ(retimer.steps(), uint64_t(1));
+        CHECK(hour.max_lead - hour.min_lead <= 2 * ms);
+    }
+
+    // The same drift while the sender's times are followed: they are
+    // followed, with no step.
+    {
+        restart();
+        RetimerRun run;
+        double play_at = static_cast<double>(t0 + 100 * ms);
+        double now_exact = static_cast<double>(t0);
+        const double real_packet = static_cast<double>(packet) * (1.0 - 50e-6);
+        for (int i = 0; i < 330000; ++i, now_exact += real_packet, play_at += real_packet) {
+            feed(run, static_cast<uint64_t>(play_at), static_cast<uint64_t>(now_exact));
+        }
+        CHECK_EQ(run.dropped, 0);
+        CHECK_EQ(run.audible_gaps, 0);
+        CHECK_EQ(retimer.steps(), uint64_t(0));
+    }
+
+    // Jitter in the startup window with the stream already running late by
+    // less than kJitterNs: kept (one restart), not dropped.
+    {
+        restart();
+        RetimerRun run;
+        uint64_t now = t0;
+        uint64_t play_at = t0;
+        feed(run, play_at, now);  // starts kStartLeadNs ahead
+        play_at += packet;
+        now += packet + AudioRetimer::kStartLeadNs + 50 * ms;  // one packet 90 ms late
+        const auto r = feed(run, play_at, now);
+        CHECK(!r.drop);
+        CHECK(r.timestamp >= now);
+        CHECK_EQ(retimer.resyncs(), uint64_t(1));
+        CHECK_EQ(retimer.dropped(), uint64_t(0));
     }
 
     // reset(): a new stream starts over.

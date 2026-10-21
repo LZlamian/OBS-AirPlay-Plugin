@@ -38,6 +38,9 @@ static ModuleSettings g_module_settings;
 // False until settings.json exists or the first source's settings were taken.
 static bool g_module_settings_known = false;
 static std::string g_server_name_error;
+// A server-name edit not yet written to settings.json: saved by the
+// debounce thread once the name settles, not on every keystroke.
+static std::atomic<bool> g_module_settings_save_pending{false};
 
 // Status thread: refreshes open AirPlay source panels after the receiver's
 // state changed (at most once a second, from a thread of its own, since the
@@ -183,7 +186,15 @@ static std::string load_or_persist_mac(const std::string& generated_mac)
     return generated_mac;
 }
 
-// Applies a server name change to the live mDNS advertisement.
+static void save_pending_module_settings()
+{
+    if (g_module_settings_save_pending.exchange(false)) {
+        module_settings_save(get_module_settings());
+    }
+}
+
+// Applies a server name change to the live mDNS advertisement. The name
+// counts as advertised only once that worked, so typing it again retries.
 static void apply_server_name(const std::string& name)
 {
     {
@@ -191,7 +202,6 @@ static void apply_server_name(const std::string& name)
         // The user reverted to the advertised name before the debounce fired.
         if (name == g_server_name)
             return;
-        g_server_name = name;
     }
     blog(LOG_INFO, "Updating AirPlay server name to: %s", name.c_str());
 
@@ -200,10 +210,16 @@ static void apply_server_name(const std::string& name)
         std::lock_guard<std::mutex> lock(g_uxplay_mutex);
         uxplay = g_uxplay_integration;
     }
-    if (uxplay) {
-        uxplay->updateServerName(name);
-        blog(LOG_INFO, "mDNS restarted with new server name: %s", name.c_str());
+    if (uxplay && !uxplay->updateServerName(name)) {
+        blog(LOG_WARNING, "AirPlay server name not changed; still advertising the previous one");
+        g_status_dirty.store(true);
+        return;
     }
+    {
+        std::lock_guard<std::mutex> lock(g_server_name_mutex);
+        g_server_name = name;
+    }
+    if (uxplay) blog(LOG_INFO, "mDNS restarted with new server name: %s", name.c_str());
 }
 
 // Debounce thread: waits 800ms after the last scheduled name change, then applies it.
@@ -238,6 +254,7 @@ static void name_debounce_thread_func()
 
         // No newer change within kNameDebounce — apply.
         apply_server_name(my_name);
+        save_pending_module_settings();
 
         // Reset gen so the thread blocks until the next change.
         {
@@ -249,7 +266,8 @@ static void name_debounce_thread_func()
 
 // Called from airplay_source_update() when the user edits the server name.
 // Schedules the mDNS update to fire 800ms after the user stops typing.
-void update_server_name(const std::string& new_name)
+// False when nothing was scheduled (the name is advertised or pending).
+bool update_server_name(const std::string& new_name)
 {
     const std::string resolved = new_name.empty() ? "OBS AirPlay" : new_name;
 
@@ -258,15 +276,16 @@ void update_server_name(const std::string& new_name)
         // A change is in flight: compare with the name it will apply, so
         // reverting to the advertised name replaces the pending one.
         if (resolved == g_debounce_pending)
-            return;
+            return false;
     } else {
         std::lock_guard<std::mutex> name_lock(g_server_name_mutex);
         if (resolved == g_server_name)
-            return;
+            return false;
     }
     g_debounce_pending = resolved;
     ++g_debounce_gen;
     g_debounce_cv.notify_one();
+    return true;
 }
 
 std::shared_ptr<UxPlayIntegration> get_uxplay_integration();
@@ -350,8 +369,12 @@ static void show_module_settings_in_sources(const ModuleSettings& settings, obs_
 void set_module_settings(ModuleSettings settings, obs_source_t* origin)
 {
     std::string accepted_name;
+    bool name_refused = false;
+    bool name_only = false;
+    bool unchanged = false;
     {
         std::lock_guard<std::mutex> lock(g_module_settings_mutex);
+        const std::string previous_error = g_server_name_error;
         if (settings.server_name.size() > kMaxServerNameBytes) {
             char text[512];
             snprintf(text, sizeof(text), obs_module_text("AirPlay.Error.NameTooLong"),
@@ -360,17 +383,41 @@ void set_module_settings(ModuleSettings settings, obs_source_t* origin)
             blog(LOG_WARNING, "[AirPlay] server name too long (%zu bytes); keeping \"%s\"",
                  settings.server_name.size(), g_module_settings.server_name.c_str());
             settings.server_name = g_module_settings.server_name;
+            name_refused = true;
         } else {
             g_server_name_error.clear();
         }
-        if (g_module_settings_known && settings == g_module_settings) return;
-        g_module_settings = settings;
-        g_module_settings_known = true;
+        // The panels show the warning (or stop showing it) now.
+        if (g_server_name_error != previous_error) g_status_dirty.store(true);
+        if (g_module_settings_known && settings == g_module_settings) {
+            if (!name_refused) return;
+            unchanged = true;
+        } else {
+            ModuleSettings other_fields = settings;
+            other_fields.server_name = g_module_settings.server_name;
+            name_only = g_module_settings_known && other_fields == g_module_settings;
+            g_module_settings = settings;
+            g_module_settings_known = true;
+        }
         accepted_name = settings.server_name;
     }
-    apply_module_runtime(settings);
-    update_server_name(accepted_name);
-    module_settings_save(settings);
+    if (name_refused && origin) {
+        // The edited source keeps the advertised name, not the refused one.
+        obs_data_t* data = obs_source_get_settings(origin);
+        obs_data_set_string(data, "server_name", accepted_name.c_str());
+        obs_data_release(data);
+    }
+    if (unchanged) return;
+    // A name edit (one call per keystroke) changes nothing else at run time;
+    // it is written to settings.json once the name settles.
+    if (!name_only) apply_module_runtime(settings);
+    const bool name_scheduled = update_server_name(accepted_name);
+    if (name_only && name_scheduled) {
+        g_module_settings_save_pending.store(true);
+    } else {
+        g_module_settings_save_pending.store(false);
+        module_settings_save(settings);
+    }
     show_module_settings_in_sources(settings, origin);
 }
 
@@ -460,7 +507,7 @@ bool obs_module_load(void)
 
         // Start UxPlay integration for proper AirPlay protocol handling
         blog(LOG_INFO, "Starting UxPlay integration with MAC: %s", mac_address.c_str());
-        g_uxplay_integration = std::make_shared<UxPlayIntegration>();
+        std::atomic_store(&g_uxplay_integration, std::make_shared<UxPlayIntegration>());
         g_uxplay_integration->setStateChangedCallback([] { g_status_dirty.store(true); });
         {
             const ModuleSettings settings = get_module_settings();
@@ -534,9 +581,11 @@ bool obs_module_load(void)
                 }
             });
             
+            // On the decode thread, once per frame: no g_uxplay_mutex (held
+            // around UxPlayIntegration::stop(), which may wait for decoding).
             g_airplay_server->setMirrorFrameOutputCallback([]() {
-                if (g_uxplay_integration) {
-                    g_uxplay_integration->onMirrorFrameOutput();
+                if (const auto uxplay = std::atomic_load(&g_uxplay_integration)) {
+                    uxplay->onMirrorFrameOutput();
                 }
             });
 
@@ -596,23 +645,29 @@ void obs_module_unload(void)
     }
     if (g_debounce_thread.joinable())
         g_debounce_thread.join();
+    // A name typed in the last 800 ms is kept even though it was not applied.
+    save_pending_module_settings();
     
-    // Stop UxPlay integration
+    // Stop UxPlay integration: no more payloads arrive.
     {
         std::lock_guard<std::mutex> lock(g_uxplay_mutex);
-        if (g_uxplay_integration) {
-            g_uxplay_integration->stop();
-            g_uxplay_integration.reset();
-        }
+        if (g_uxplay_integration) g_uxplay_integration->stop();
     }
-    
-    // Stop and release the server under lock so concurrent get_airplay_server()
-    // calls from source create/destroy callbacks see a consistent state.
+    // Then the server's decode thread, which calls into the integration for
+    // every frame, before the integration is released.
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        if (g_airplay_server) g_airplay_server->stop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_uxplay_mutex);
+        std::atomic_store(&g_uxplay_integration, std::shared_ptr<UxPlayIntegration>());
+    }
+
+    // Release the server under lock so concurrent get_airplay_server() calls
+    // from source create/destroy callbacks see a consistent state.
     std::lock_guard<std::mutex> lock(g_server_mutex);
-    if (g_airplay_server) {
-        g_airplay_server->stop();
-        g_airplay_server.reset();
-    }
+    g_airplay_server.reset();
 }
 
 std::shared_ptr<UxPlayIntegration> get_uxplay_integration()

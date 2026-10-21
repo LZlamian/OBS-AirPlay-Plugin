@@ -19,7 +19,7 @@ void airplay_source_notify_frame_queued(uint64_t queued_ns);
 std::shared_ptr<class AirPlayServer> get_airplay_server();
 
 // Update the advertised AirPlay server name and restart mDNS
-void update_server_name(const std::string& new_name);
+bool update_server_name(const std::string& new_name);
 
 // The receiver's settings, shared by all AirPlay sources (plugin-main.cpp).
 struct ModuleSettings;

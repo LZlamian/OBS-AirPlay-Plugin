@@ -2,6 +2,25 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
+## Unreleased (2.7)
+
+Audit 2026-10-21, Phase 1:
+- "From any web address" now fetches from the address it checked: plain HTTP
+  connects to it with the name in the Host header, HTTPS relies on the
+  certificate; redirects are followed by the plugin, each one checked before
+  it is requested (NET-5).
+- `stop()` and quitting OBS no longer wait for a slow DNS lookup (MP-1).
+- Mirror audio: starts with a 40 ms jitter margin, follows the sender's clock
+  after the first RTP sync instead of drifting, and keeps startup packets
+  that are only a little late (MP-2).
+- A failed rename is shown and can be retried; the over-long-name warning
+  appears at once; name edits no longer rewrite settings.json per keystroke
+  (MP-6, MP-7, MP-11).
+- Races and robustness: hardware-error counter (MP-3), unload order (MP-4),
+  huge sender positions (MP-5), a VideoToolbox surface held while the screen
+  is still (MP-8), refused redirects retried (MP-9), HLS attribute names
+  (MP-10), thread creation on UxPlay's thread (MP-12).
+
 ## 2.6.1 (2026-10-21)
 
 Security hotfix (audit 2026-10-21, Phase 0):
