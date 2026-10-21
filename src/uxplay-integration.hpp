@@ -165,6 +165,9 @@ private:
     void cancelDeferredClear();
     void deferredClearLoop();
     void stopDeferredClearThread();
+    // UxPlay's callbacks (one static function each, in the .cpp) and the
+    // table of them handed to raop_init.
+    struct RaopCallbacks;
     struct raop_callbacks_s makeRaopCallbacks();
 
     // Held for the whole of start(), stop() and updateServerName(), which

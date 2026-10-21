@@ -2,6 +2,7 @@
 #include "media-player.hpp"
 #include "media-url-policy.hpp"
 #include "test-timing.hpp"
+#include "url-policy-cases.hpp"
 
 extern "C" {
 #include <libavformat/avio.h>
@@ -592,24 +593,18 @@ int urlPolicy()
         // that resolves to a refused address.
         {"http://segments.invalid/seg.ts", false},
         {"http://rebind.example.test/seg.ts", false},
-        {"http://127.0.0.1/seg.ts", false},
-        {"http://127.0.0.1:631/", false},
         {"http://localhost:8080/x", false},
-        {"http://foo.localhost/x", false},
-        {"http://169.254.169.254/latest/meta-data", false},
-        {"http://[::1]/x", false},
-        {"http://[::ffff:127.0.0.1]/x", false},
-        {"http://[fe80::1%25en0]/x", false},
-        {"http://2130706433/x", false},
-        {"http://0x7f.1/x", false},
-        {"http://224.0.0.251/x", false},
-        {"http://0.0.0.0/x", false},
-        {"http://10.0.0.1:22/x", false},
-        {"http://10.0.0.1/x", true},
-        {"http://user@10.0.0.1:8443/x", true},
-        {"file:///etc/passwd", false},
     };
     int failures = 0;
+    for (const SharedPolicyCase& c : kSharedPolicyCases) {
+        const std::string refused = checkNested(c.url, item);
+        if (refused.empty() != c.allowed) {
+            std::fprintf(stderr, "media-smoke: url-policy shared %s -> %s (expected %s)\n", c.url,
+                         refused.empty() ? "allowed" : refused.c_str(),
+                         c.allowed ? "allowed" : "refused");
+            ++failures;
+        }
+    }
     for (const Case& c : nested) {
         const std::string refused = checkNested(c.url, item);
         if (refused.empty() != c.allowed) {

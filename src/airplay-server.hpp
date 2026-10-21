@@ -117,6 +117,7 @@ private:
     uint64_t m_audio_retimer_resyncs_reported = 0;
     bool m_audio_retimer_trim_reported = false;
     uint64_t m_video_frame_counter = 0;
+    bool m_logged_decoder_missing = false;  // decode thread only
     uint64_t m_first_decoded_frame_ns = 0;
     // Mirror statistics window ([MIRROR] line every ~10 s while frames arrive).
     uint64_t m_mirror_stats_started_ns = 0;

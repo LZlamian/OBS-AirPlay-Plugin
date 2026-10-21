@@ -150,11 +150,13 @@ endif()
 find_package(PkgConfig REQUIRED)
 
 # Find FFmpeg components using pkg-config
-pkg_check_modules(FFMPEG REQUIRED 
-    libavformat
-    libavcodec 
-    libavutil 
-    libswscale 
+# FFmpeg 6.1 or later (the AVChannelLayout API, avformat's io_close2 and the
+# HLS options the player uses); releases ship 8.1.
+pkg_check_modules(FFMPEG REQUIRED
+    libavformat>=60.16
+    libavcodec>=60.31
+    libavutil>=58.29
+    libswscale
     libswresample
 )
 
@@ -425,9 +427,11 @@ if(BUILD_TESTING)
         src/media-fetch.cpp
         src/media-player.cpp
         src/media-url-policy.cpp
+        uxplay/lib/media_url.c
     )
     target_include_directories(obs-airplay-media-smoke PRIVATE
         ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/uxplay/lib
         ${OBS_INCLUDE_DIR}
         ${FFMPEG_INCLUDE_DIRS}
     )
@@ -489,6 +493,7 @@ if(BUILD_TESTING)
         src/audio-decoder.cpp
         src/hls-playlist.cpp
         src/media-url-policy.cpp
+        uxplay/lib/media_url.c
     )
     target_include_directories(obs-airplay-unit-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/src

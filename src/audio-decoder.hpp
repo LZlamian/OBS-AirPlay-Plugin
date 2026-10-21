@@ -7,10 +7,6 @@ extern "C" {
 #include <libswresample/swresample.h>
 }
 
-// The AVChannelLayout API (FFmpeg 5.1: libavutil 57.24.100, with the
-// matching libavcodec). One gate for the decoder and the resampler.
-#define OBS_AIRPLAY_HAVE_CH_LAYOUT (LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(57, 24, 100))
-
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -84,9 +80,9 @@ private:
     int m_convert_capacity = 0;
     uint8_t m_failed_codec_type = 0;
     unsigned m_failed_calls = 0;
-#if OBS_AIRPLAY_HAVE_CH_LAYOUT
+    // Errors so far, for logging every 60th (per decoder, not per process).
+    uint64_t m_alloc_errors = 0;
+    uint64_t m_send_errors = 0;
+    uint64_t m_decode_errors = 0;
     AVChannelLayout m_input_channel_layout = {};
-#else
-    uint64_t m_input_channel_layout;
-#endif
 };

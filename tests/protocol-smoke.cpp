@@ -8,6 +8,7 @@
 #include <plist/plist.h>
 
 #include "test-timing.hpp"
+#include "url-policy-cases.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -1210,19 +1211,13 @@ int main(int argc, char** argv)
             : response.find("400 Bad Request") != std::string::npos ? "400" : "other";
     };
     struct PolicyCase { const char* url; const char* expected; };
-    const PolicyCase policy_cases[] = {
-        {"http://127.0.0.1/x.mp4", "400"},
-        {"http://127.0.0.1:631/x.mp4", "400"},
-        {"http://localhost/x.mp4", "400"},
-        {"http://169.254.169.254/latest/meta-data", "400"},
-        {"http://[::1]/x.mp4", "400"},
-        {"http://[::ffff:127.0.0.1]/x.mp4", "400"},
-        {"http://2130706433/x.mp4", "400"},
-        {"http://224.0.0.251/x.mp4", "400"},
-        {"http://10.1.2.3:22/x.mp4", "400"},
-        {"http://10.1.2.3/x.mp4", "200"},
-        {"https://user:hunter2@media.example.test:8443/x.mp4?token=SECRET123#frag", "200"},
-    };
+    std::vector<PolicyCase> policy_cases;
+    for (const SharedPolicyCase& c : kSharedPolicyCases) {
+        policy_cases.push_back({c.url, c.allowed ? "200" : "400"});
+    }
+    // A name is checked textually here (the player resolves it later).
+    policy_cases.push_back(
+        {"https://user:hunter2@media.example.test:8443/x.mp4?token=SECRET123#frag", "200"});
     bool policy_ok = true;
     for (const PolicyCase& c : policy_cases) {
         const char* status = play_status(c.url);

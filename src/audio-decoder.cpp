@@ -156,12 +156,9 @@ AudioDecoder::AudioDecoder()
     , m_input_sample_rate(0)
     , m_input_sample_format(AV_SAMPLE_FMT_NONE)
     , m_resampler_configured(false)
-#if !OBS_AIRPLAY_HAVE_CH_LAYOUT
-    , m_input_channel_layout(0)
-#endif
 {
     if (!m_frame || !m_packet) {
-        blog(LOG_ERROR, "Failed to allocate FFmpeg audio frame/packet");
+        blog(LOG_ERROR, "[AUDIO] Failed to allocate FFmpeg audio frame/packet");
     }
     // Pre-warm AAC-ELD decoder — iOS always uses this for screen mirroring.
     // Calling avcodec_open2 eagerly here removes it from the first-packet
@@ -243,12 +240,12 @@ bool AudioDecoder::openDecoder(uint8_t ct)
         setup = airplay_audio::alacMagicCookie(m_format);
         break;
     default:
-        blog(LOG_WARNING, "Unsupported AirPlay audio codec type: %u", static_cast<unsigned>(ct));
+        blog(LOG_WARNING, "[AUDIO] Unsupported AirPlay audio codec type: %u", static_cast<unsigned>(ct));
         return false;
     }
 
     if (!codec) {
-        blog(LOG_ERROR, "Failed to find FFmpeg decoder for AirPlay codec type %u", static_cast<unsigned>(ct));
+        blog(LOG_ERROR, "[AUDIO] Failed to find FFmpeg decoder for AirPlay codec type %u", static_cast<unsigned>(ct));
         return false;
     }
 
@@ -260,24 +257,19 @@ bool AudioDecoder::openDecoder(uint8_t ct)
 
     m_codec_context = avcodec_alloc_context3(codec);
     if (!m_codec_context) {
-        blog(LOG_ERROR, "Failed to allocate audio codec context");
+        blog(LOG_ERROR, "[AUDIO] Failed to allocate audio codec context");
         return false;
     }
 
     m_codec_context->sample_rate = m_format.sample_rate;
-#if OBS_AIRPLAY_HAVE_CH_LAYOUT
     av_channel_layout_default(&m_codec_context->ch_layout, m_format.channels);
-#else
-    m_codec_context->channels = m_format.channels;
-    m_codec_context->channel_layout = av_get_default_channel_layout(m_format.channels);
-#endif
 
     const uint8_t* extradata = setup.data();
     const int extradata_size = static_cast<int>(setup.size());
     if (extradata && extradata_size > 0) {
         m_codec_context->extradata = static_cast<uint8_t*>(av_mallocz(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
         if (!m_codec_context->extradata) {
-            blog(LOG_ERROR, "Failed to allocate audio decoder extradata");
+            blog(LOG_ERROR, "[AUDIO] Failed to allocate audio decoder extradata");
             avcodec_free_context(&m_codec_context);
             return false;
         }
@@ -286,14 +278,14 @@ bool AudioDecoder::openDecoder(uint8_t ct)
     }
 
     if (avcodec_open2(m_codec_context, codec, nullptr) < 0) {
-        blog(LOG_ERROR, "Failed to open FFmpeg decoder for AirPlay codec type %u", static_cast<unsigned>(ct));
+        blog(LOG_ERROR, "[AUDIO] Failed to open FFmpeg decoder for AirPlay codec type %u", static_cast<unsigned>(ct));
         avcodec_free_context(&m_codec_context);
         return false;
     }
 
     m_codec_type = ct;
     m_opened_format = m_format;
-    blog(LOG_INFO, "Configured audio decoder for %s", airplay_audio::describe(m_format, ct).c_str());
+    blog(LOG_INFO, "[AUDIO] Configured audio decoder for %s", airplay_audio::describe(m_format, ct).c_str());
     return true;
 }
 
@@ -309,7 +301,6 @@ bool AudioDecoder::configureResampler(const AVFrame* frame)
         static_cast<AVSampleFormat>(frame->format);
     m_output_sample_rate = inputSampleRate;
 
-#if OBS_AIRPLAY_HAVE_CH_LAYOUT
     const AVChannelLayout* inputLayout = frame->ch_layout.nb_channels > 0
         ? &frame->ch_layout : &m_codec_context->ch_layout;
     if (inputLayout->nb_channels <= 0)
@@ -345,33 +336,9 @@ bool AudioDecoder::configureResampler(const AVFrame* frame)
         resetResampler();
         return false;
     }
-#else
-    const uint64_t inputLayout = frame->channel_layout
-        ? frame->channel_layout
-        : av_get_default_channel_layout(frame->channels);
-    if (m_resampler_configured &&
-        m_input_sample_rate == inputSampleRate &&
-        m_input_sample_format == inputSampleFormat &&
-        m_input_channel_layout == inputLayout) {
-        return true;
-    }
-
-    resetResampler();
-    m_input_channel_layout = inputLayout;
-    m_swr_context = swr_alloc_set_opts(
-        nullptr,
-        AV_CH_LAYOUT_STEREO,
-        AV_SAMPLE_FMT_FLTP,
-        m_output_sample_rate,
-        inputLayout,
-        inputSampleFormat,
-        inputSampleRate,
-        0,
-        nullptr);
-#endif
 
     if (!m_swr_context || swr_init(m_swr_context) < 0) {
-        blog(LOG_ERROR, "Failed to initialize audio resampler");
+        blog(LOG_ERROR, "[AUDIO] Failed to initialize audio resampler");
         resetResampler();
         return false;
     }
@@ -386,11 +353,7 @@ void AudioDecoder::resetResampler()
 {
     if (m_swr_context)
         swr_free(&m_swr_context);
-#if OBS_AIRPLAY_HAVE_CH_LAYOUT
     av_channel_layout_uninit(&m_input_channel_layout);
-#else
-    m_input_channel_layout = 0;
-#endif
     m_input_sample_rate = 0;
     m_input_sample_format = AV_SAMPLE_FMT_NONE;
     m_resampler_configured = false;
@@ -415,9 +378,8 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
 
     av_packet_unref(m_packet);
     if (av_new_packet(m_packet, static_cast<int>(size)) < 0) {
-        static uint64_t alloc_errors = 0;
-        if ((alloc_errors++ % 60) == 0) {
-            blog(LOG_ERROR, "Failed to allocate audio packet buffer");
+        if ((m_alloc_errors++ % 60) == 0) {
+            blog(LOG_ERROR, "[AUDIO] Failed to allocate audio packet buffer");
         }
         return false;
     }
@@ -425,9 +387,8 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
 
     int ret = avcodec_send_packet(m_codec_context, m_packet);
     if (ret < 0) {
-        static uint64_t logged_errors = 0;
-        if ((logged_errors++ % 60) == 0) {
-            blog(LOG_WARNING, "Audio packet send failed for codec type %u (ret=%d)", static_cast<unsigned>(ct), ret);
+        if ((m_send_errors++ % 60) == 0) {
+            blog(LOG_WARNING, "[AUDIO] Audio packet send failed for codec type %u (ret=%d)", static_cast<unsigned>(ct), ret);
         }
         return false;
     }
@@ -439,20 +400,15 @@ bool AudioDecoder::decode(const uint8_t* data, size_t size, uint8_t ct,
             break;
         }
         if (ret < 0) {
-            static uint64_t logged_decode_errors = 0;
-            if ((logged_decode_errors++ % 60) == 0) {
-                blog(LOG_WARNING, "Audio frame decode failed for codec type %u (ret=%d)", static_cast<unsigned>(ct), ret);
+            if ((m_decode_errors++ % 60) == 0) {
+                blog(LOG_WARNING, "[AUDIO] Audio frame decode failed for codec type %u (ret=%d)", static_cast<unsigned>(ct), ret);
             }
             break;
         }
 
         // AAC and ALAC decode to planar float: stereo needs no conversion.
         const int channels =
-#if OBS_AIRPLAY_HAVE_CH_LAYOUT
             m_frame->ch_layout.nb_channels;
-#else
-            m_frame->channels;
-#endif
         if (m_frame->format == AV_SAMPLE_FMT_FLTP && channels == 2 && m_frame->nb_samples > 0 &&
             m_frame->extended_data[0] && m_frame->extended_data[1]) {
             const float* l = reinterpret_cast<const float*>(m_frame->extended_data[0]);

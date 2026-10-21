@@ -2,6 +2,7 @@
 #include "uxplay-integration.hpp"
 #include "media-url-policy.hpp"
 #include "hardware-decode-option.hpp"
+#include "scope-exit.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <algorithm>
@@ -42,18 +43,14 @@ void boost_caller_thread_qos_once(const char* tag)
     boosted = true;
     int rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     if (rc == 0) {
-        blog(LOG_INFO, "Boosted %s receiver thread to QOS_CLASS_USER_INTERACTIVE", tag);
+        blog(LOG_INFO, "[RECEIVER] Boosted %s receiver thread to QOS_CLASS_USER_INTERACTIVE", tag);
     } else {
-        blog(LOG_WARNING, "Failed to boost %s receiver thread QoS (rc=%d)", tag, rc);
+        blog(LOG_WARNING, "[RECEIVER] Failed to boost %s receiver thread QoS (rc=%d)", tag, rc);
     }
 #else
     (void)tag;
 #endif
 }
-
-#ifndef OBS_AIRPLAY_MEDIA_TRACE_DEFAULT
-#define OBS_AIRPLAY_MEDIA_TRACE_DEFAULT 0
-#endif
 
 // The AirPlay video protocol trace ([MEDIA-TRACE] lines: /play, /reverse,
 // FCUP, playback controls) is off by default.  Enable it with the
@@ -65,16 +62,9 @@ bool media_trace_requested()
     if (const char* env = std::getenv("OBS_AIRPLAY_MEDIA_TRACE")) {
         return env[0] && std::strcmp(env, "0") != 0;
     }
-    if (flag_file_exists("obs-airplay-media-trace")) {
-        return true;
-    }
-    return OBS_AIRPLAY_MEDIA_TRACE_DEFAULT != 0;
+    return flag_file_exists("obs-airplay-media-trace");
 }
-// The AirServer profile advertises features 0x0E427FFFF7, which include
-// FairPlay-protected video (bit 2). The receiver cannot play protected video;
-// the claim draws POST /fp-setup2 and protected-HLS requests. Masking it is
-// opt-in (OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1) until it has been checked on
-// real iOS and macOS senders that connection speed is unchanged.
+
 // A localised message with one integer in it.
 std::string format_text(const char* key, int value)
 {
@@ -83,6 +73,12 @@ std::string format_text(const char* key, int value)
     return text;
 }
 
+// The AirServer profile advertises features 0x0E427FFFF7, which include
+// FairPlay-protected video (bit 2). The receiver cannot play protected video;
+// the claim draws POST /fp-setup2 and protected-HLS requests. Masking it is
+// opt-in (OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1, docs/DEVELOPMENT.md) until it
+// has been checked on real iOS and macOS senders that connection speed is
+// unchanged.
 bool mask_fairplay_video_requested()
 {
     const char* env = std::getenv("OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO");
@@ -97,7 +93,7 @@ void apply_fast_connect_profile(dnssd_t* dnssd)
         dnssd_set_airplay_features(dnssd, kFeatureVideoFairPlay, 0);
         static std::once_flag logged;
         std::call_once(logged, [] {
-            blog(LOG_INFO, "Fast connection profile: FairPlay video feature bit masked "
+            blog(LOG_INFO, "[RECEIVER] Fast connection profile: FairPlay video feature bit masked "
                            "(OBS_AIRPLAY_MASK_FAIRPLAY_VIDEO=1)");
         });
     }
@@ -202,13 +198,10 @@ void UxPlayIntegration::deferredClearLoop()
 // the HTTP thread (requests, AirPlay video), the mirror and audio threads.
 // No exception can cross UxPlay's C frames, hence noexcept: one that escapes
 // ends the process here, where the cause is visible.
-raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
-{
-    raop_callbacks_t callbacks = {};
-    callbacks.cls = this;
-
+struct UxPlayIntegration::RaopCallbacks {
     // Timing: fires when iOS first TCP-connects (before handshake).
-    callbacks.conn_init = [](void* cls) noexcept {
+    static void conn_init(void* cls) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self) {
             self->m_open_connections.fetch_add(1);
@@ -221,12 +214,14 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->m_connection_started_ns.store(now);
             blog(LOG_INFO, "[CONNECT] +0.00ms TCP accepted — AirPlay negotiation starting");
         }
-    };
+    }
+
     // A device that goes away leaves its last frame behind unless the
     // output is cleared: after a short grace period, so that a new
     // connection that shows something at once (an item switch, a
     // reconnect) replaces the frame without an empty source in between.
-    callbacks.conn_destroy = [](void* cls) noexcept {
+    static void conn_destroy(void* cls) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self) {
             return;
@@ -239,10 +234,12 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             }
         }
         self->notifyStateChanged();
-    };
+    }
+
     // A TEARDOWN that names no stream ends the device's whole mirroring
     // session (UxPlay reports a video reset only for a single stream).
-    callbacks.conn_teardown = [](void* cls, bool* teardown_96, bool* teardown_110) noexcept {
+    static void conn_teardown(void* cls, bool* teardown_96, bool* teardown_110) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || (teardown_96 && *teardown_96) || (teardown_110 && *teardown_110)) {
             return;
@@ -253,8 +250,10 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         if (!self->m_media_active.load() && self->m_frame_shown.load()) {
             self->scheduleDeferredClear("the device ended its AirPlay session");
         }
-    };
-    callbacks.conn_request_timing = [](void* cls, const char* method, const char* url, bool started) noexcept {
+    }
+
+    static void conn_request_timing(void* cls, const char* method, const char* url, bool started) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || !method || !url) {
             return;
@@ -280,9 +279,10 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
                 self->m_connection_timing_active.store(false);
             }
         }
-    };
+    }
 
-    callbacks.mirror_connection_timing = [](void* cls, bool first_data) noexcept {
+    static void mirror_connection_timing(void* cls, bool first_data) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         const uint64_t started_ns = self->m_connection_started_ns.load(std::memory_order_relaxed);
         if (!started_ns) {
@@ -291,21 +291,22 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         const double elapsed_ms = (os_gettime_ns() - started_ns) / 1e6;
         blog(LOG_INFO, "[CONNECT] +%.2fms mirroring TCP %s",
              elapsed_ms, first_data ? "first header received" : "accepted");
-    };
-    
+    }
+
     // Set video and audio processing callbacks
-    callbacks.video_process = [](void* cls, raop_ntp_t*, video_decode_struct* data) noexcept {
+    static void video_process(void* cls, raop_ntp_t*, video_decode_struct* data) noexcept
+    {
         if (cls && data) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             self->processVideoData(data);
         }
-    };
-    
+    }
+
     // SETUP names the audio format of the stream about to start: the decoder
     // is set up for its rate, channels and depth (all 44.1 kHz stereo from
     // iOS so far, but the receiver accepts 48 kHz formats too).
-    callbacks.audio_get_format = [](void* cls, unsigned char* ct, unsigned short* spf,
-                                    bool* using_screen, bool* is_media, uint64_t* audio_format) noexcept {
+    static void audio_get_format(void* cls, unsigned char* ct, unsigned short* spf, bool* using_screen, bool* is_media, uint64_t* audio_format) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || !ct || !spf || !audio_format) return;
         AirPlayAudioFormat format;
@@ -323,60 +324,80 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             callback = self->m_audio_format_callback;
         }
         if (callback) callback(format);
-    };
+    }
 
-    callbacks.audio_process = [](void* cls, raop_ntp_t*, audio_decode_struct* data) noexcept {
+    static void audio_process(void* cls, raop_ntp_t*, audio_decode_struct* data) noexcept
+    {
         if (cls && data) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             self->processAudioData(data);
         }
-    };
+    }
 
     // Required by UxPlay runtime; provide safe defaults for callbacks
     // that UxPlay may call without null checks.
-    callbacks.conn_feedback = [](void* cls) noexcept {
+    static void conn_feedback(void* cls) noexcept
+    {
         blog(LOG_DEBUG, "[UxPlay] feedback heartbeat received");
         UNUSED_PARAMETER(cls);
-    };
-    callbacks.conn_reset = [](void* cls, int reason) noexcept {
+    }
+
+    static void conn_reset(void* cls, int reason) noexcept
+    {
         if (cls) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             blog(LOG_INFO, "[UxPlay] Connection reset (reason=%d) — flushing decoders", reason);
             self->m_connection_timing_active.store(false);
             self->processConnReset(!self->m_media_active.load());
         }
-    };
-    callbacks.video_flush = [](void* cls) noexcept {
+    }
+
+    static void video_flush(void* cls) noexcept
+    {
         UNUSED_PARAMETER(cls);
-    };
-    callbacks.audio_flush = [](void* cls) noexcept {
+    }
+
+    static void audio_flush(void* cls) noexcept
+    {
         UNUSED_PARAMETER(cls);
-    };
-    callbacks.audio_set_volume = [](void* cls, float volume) noexcept {
+    }
+
+    static void audio_set_volume(void* cls, float volume) noexcept
+    {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(volume);
-    };
-    callbacks.audio_set_metadata = [](void* cls, const void* buffer, int buflen) noexcept {
+    }
+
+    static void audio_set_metadata(void* cls, const void* buffer, int buflen) noexcept
+    {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(buffer);
         UNUSED_PARAMETER(buflen);
-    };
-    callbacks.audio_set_coverart = [](void* cls, const void* buffer, int buflen) noexcept {
+    }
+
+    static void audio_set_coverart(void* cls, const void* buffer, int buflen) noexcept
+    {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(buffer);
         UNUSED_PARAMETER(buflen);
-    };
-    callbacks.audio_set_progress = [](void* cls, uint32_t* start, uint32_t* curr, uint32_t* end) noexcept {
+    }
+
+    static void audio_set_progress(void* cls, uint32_t* start, uint32_t* curr, uint32_t* end) noexcept
+    {
         UNUSED_PARAMETER(cls);
         UNUSED_PARAMETER(start);
         UNUSED_PARAMETER(curr);
         UNUSED_PARAMETER(end);
-    };
-    callbacks.audio_set_client_volume = [](void* cls) noexcept -> double {
+    }
+
+    static double audio_set_client_volume(void* cls) noexcept
+    {
         UNUSED_PARAMETER(cls);
         return -15.0;
-    };
-    callbacks.on_video_play = [](void* cls, const char* location, const float start_position) noexcept {
+    }
+
+    static void on_video_play(void* cls, const char* location, const float start_position) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (!self || !self->m_media_player || !location || !*location) {
             blog(LOG_ERROR, "[MEDIA] POST /play did not provide a usable media URL");
@@ -405,25 +426,33 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         self->notifyStateChanged();
         self->m_frame_shown.store(true);
         self->m_media_player->play(location, start_position);
-    };
-    callbacks.on_video_refused = [](void* cls, const char* reason) noexcept {
+    }
+
+    static void on_video_refused(void* cls, const char* reason) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self) self->recordRefusal(reason ? reason : "refused");
-    };
-    callbacks.on_video_scrub = [](void* cls, const float position) noexcept {
+    }
+
+    static void on_video_scrub(void* cls, const float position) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self && self->m_media_player) {
             blog(LOG_INFO, "[MEDIA] POST /scrub requested %.3fs", position);
             self->m_media_player->seek(position);
         }
-    };
-    callbacks.on_video_rate = [](void* cls, const float rate) noexcept {
+    }
+
+    static void on_video_rate(void* cls, const float rate) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self && self->m_media_player) {
             self->m_media_player->setRate(rate);
         }
-    };
-    callbacks.on_video_stop = [](void* cls) noexcept {
+    }
+
+    static void on_video_stop(void* cls) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         if (self && self->m_media_player) {
             blog(LOG_INFO, "[MEDIA] stopping URL playback (output clears unless a new item follows)");
@@ -433,8 +462,10 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->processConnReset(false, false);
             self->scheduleDeferredClear();
         }
-    };
-    callbacks.on_video_acquire_playback_info = [](void* cls, playback_info_t* playback_video) noexcept {
+    }
+
+    static void on_video_acquire_playback_info(void* cls, playback_info_t* playback_video) noexcept
+    {
         if (!playback_video) {
             return;
         }
@@ -463,21 +494,28 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
         playback_video->num_seekable_time_ranges = 0;
         playback_video->loadedTimeRanges = nullptr;
         playback_video->seekableTimeRanges = nullptr;
-    };
-    callbacks.on_video_playlist_remove = [](void* cls) noexcept -> float {
+    }
+
+    static float on_video_playlist_remove(void* cls) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         return self && self->m_media_player
             ? self->m_media_player->pauseForPlaylistRemoval() : 0.0f;
-    };
+    }
 
     // Required by UxPlay mirror thread.
-    callbacks.video_pause = [](void* cls) noexcept {
+    static void video_pause(void* cls) noexcept
+    {
         UNUSED_PARAMETER(cls);
-    };
-    callbacks.video_resume = [](void* cls) noexcept {
+    }
+
+    static void video_resume(void* cls) noexcept
+    {
         UNUSED_PARAMETER(cls);
-    };
-    callbacks.video_reset = [](void* cls, reset_type_t reset_type) noexcept {
+    }
+
+    static void video_reset(void* cls, reset_type_t reset_type) noexcept
+    {
         if (cls) {
             auto* self = static_cast<UxPlayIntegration*>(cls);
             blog(LOG_INFO, "[UxPlay] Video reset (type=%d) — flushing decoders", static_cast<int>(reset_type));
@@ -494,8 +532,10 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             // AirPlay video item starts; that must not blank the item.
             self->processConnReset(!self->m_media_active.load());
         }
-    };
-    callbacks.video_set_codec = [](void* cls, video_codec_t codec) noexcept -> int {
+    }
+
+    static int video_set_codec(void* cls, video_codec_t codec) noexcept
+    {
         auto* self = static_cast<UxPlayIntegration*>(cls);
         const uint64_t now = os_gettime_ns();
         const uint64_t origin = self ? self->m_connection_started_ns.load() : 0;
@@ -510,19 +550,143 @@ raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
             self->processConnReset(false, true);
         }
         return 0;
-    };
+    }
+};
+
+raop_callbacks_t UxPlayIntegration::makeRaopCallbacks()
+{
+    raop_callbacks_t callbacks = {};
+    callbacks.cls = this;
+    callbacks.conn_init = &RaopCallbacks::conn_init;
+    callbacks.conn_destroy = &RaopCallbacks::conn_destroy;
+    callbacks.conn_teardown = &RaopCallbacks::conn_teardown;
+    callbacks.conn_request_timing = &RaopCallbacks::conn_request_timing;
+    callbacks.mirror_connection_timing = &RaopCallbacks::mirror_connection_timing;
+    callbacks.video_process = &RaopCallbacks::video_process;
+    callbacks.audio_get_format = &RaopCallbacks::audio_get_format;
+    callbacks.audio_process = &RaopCallbacks::audio_process;
+    callbacks.conn_feedback = &RaopCallbacks::conn_feedback;
+    callbacks.conn_reset = &RaopCallbacks::conn_reset;
+    callbacks.video_flush = &RaopCallbacks::video_flush;
+    callbacks.audio_flush = &RaopCallbacks::audio_flush;
+    callbacks.audio_set_volume = &RaopCallbacks::audio_set_volume;
+    callbacks.audio_set_metadata = &RaopCallbacks::audio_set_metadata;
+    callbacks.audio_set_coverart = &RaopCallbacks::audio_set_coverart;
+    callbacks.audio_set_progress = &RaopCallbacks::audio_set_progress;
+    callbacks.audio_set_client_volume = &RaopCallbacks::audio_set_client_volume;
+    callbacks.on_video_play = &RaopCallbacks::on_video_play;
+    callbacks.on_video_refused = &RaopCallbacks::on_video_refused;
+    callbacks.on_video_scrub = &RaopCallbacks::on_video_scrub;
+    callbacks.on_video_rate = &RaopCallbacks::on_video_rate;
+    callbacks.on_video_stop = &RaopCallbacks::on_video_stop;
+    callbacks.on_video_acquire_playback_info = &RaopCallbacks::on_video_acquire_playback_info;
+    callbacks.on_video_playlist_remove = &RaopCallbacks::on_video_playlist_remove;
+    callbacks.video_pause = &RaopCallbacks::video_pause;
+    callbacks.video_resume = &RaopCallbacks::video_resume;
+    callbacks.video_reset = &RaopCallbacks::video_reset;
+    callbacks.video_set_codec = &RaopCallbacks::video_set_codec;
     return callbacks;
 }
+
+namespace {
+
+// "AA:BB:CC:DD:EE:FF" (colons optional) to six bytes; false if malformed.
+bool parse_device_id(const std::string& value, std::array<char, 6>& out_hw_addr)
+{
+    std::string compact;
+    compact.reserve(12);
+    for (char ch : value) {
+        if (ch != ':') compact.push_back(ch);
+    }
+    if (compact.size() != 12) return false;
+    for (char ch : compact) {
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
+    }
+    for (size_t i = 0; i < out_hw_addr.size(); ++i) {
+        const std::string byte_str = compact.substr(i * 2, 2);
+        out_hw_addr[i] = static_cast<char>(std::strtoul(byte_str.c_str(), nullptr, 16));
+    }
+    return true;
+}
+
+std::string hex_no_colon(const std::string& value)
+{
+    std::string compact;
+    compact.reserve(12);
+    for (char ch : value) {
+        if (ch != ':') compact.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+    return compact;
+}
+
+// UxPlay's log lines into the OBS log.
+void forward_uxplay_log(void*, int level, const char* msg)
+{
+    int obs_level;
+    switch (level) {
+    case 0: // LOGGER_EMERG
+    case 1: // LOGGER_ALERT
+    case 2: // LOGGER_CRIT
+    case 3: // LOGGER_ERR
+        obs_level = LOG_ERROR;
+        break;
+    case 4: // LOGGER_WARNING
+        obs_level = LOG_WARNING;
+        break;
+    case 5: // LOGGER_NOTICE
+    case 6: // LOGGER_INFO
+        obs_level = LOG_INFO;
+        break;
+    default: // LOGGER_DEBUG, LOGGER_DEBUG_DATA
+        obs_level = LOG_DEBUG;
+        break;
+    }
+    // Strip trailing newline if present as blog() adds one
+    std::string log_msg = msg;
+    if (!log_msg.empty() && log_msg.back() == '\n') log_msg.pop_back();
+    blog(obs_level, "[UxPlay] %s", log_msg.c_str());
+}
+
+// The AirPlay video rules the receiver applies to POST /play: the web ports
+// allowed on other hosts (OBS_AIRPLAY_MEDIA_PORTS="80,443,..." overrides
+// them) and the protocol trace.
+void configure_media(raop_t* raop, bool accept_video, bool sender_only)
+{
+    if (const char* env = std::getenv("OBS_AIRPLAY_MEDIA_PORTS")) {
+        const auto ports = media_url_policy::parsePortList(env);
+        if (ports.empty()) {
+            blog(LOG_WARNING, "[RECEIVER] Ignoring invalid OBS_AIRPLAY_MEDIA_PORTS=%s", env);
+        } else {
+            media_url_policy::setAllowedPorts(ports);
+        }
+    }
+    const auto ports = media_url_policy::allowedPorts();
+    raop_set_media_ports(raop, ports.data(), static_cast<int>(ports.size()));
+    std::string list;
+    for (unsigned short port : ports) list += (list.empty() ? "" : ",") + std::to_string(port);
+    blog(LOG_INFO, "[RECEIVER] AirPlay video may fetch from other hosts on ports %s", list.c_str());
+    raop_set_media_policy(raop, accept_video, sender_only);
+
+    if (media_trace_requested()) {
+        // Raise UxPlay's logger (default LOGGER_WARNING) so the [MEDIA]
+        // INFO lines and the [MEDIA-TRACE] protocol dump reach the OBS log.
+        raop_set_log_level(raop, LOGGER_INFO);
+        raop_set_media_trace_level(raop, LOGGER_INFO);
+        blog(LOG_INFO, "[RECEIVER] AirPlay media protocol trace enabled ([MEDIA-TRACE] lines)");
+    }
+}
+
+} // namespace
 
 bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                               const std::string& server_name)
 {
     std::lock_guard<std::mutex> lifecycle(m_lifecycle_mutex);
-    blog(LOG_INFO, "=== Starting UxPlay Integration ===");
-    blog(LOG_INFO, "Requested port: %d", port);
-    
+    blog(LOG_INFO, "[RECEIVER] === Starting UxPlay Integration ===");
+    blog(LOG_DEBUG, "[RECEIVER] Requested port: %d", port);
+
     if (m_running) {
-        blog(LOG_WARNING, "UxPlay integration already running");
+        blog(LOG_WARNING, "[RECEIVER] UxPlay integration already running");
         return true;
     }
     if (!m_clear_thread.joinable()) {
@@ -534,124 +698,39 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         }
         m_clear_thread = std::thread(&UxPlayIntegration::deferredClearLoop, this);
     }
-    
+
     // Initialize network first
-    blog(LOG_INFO, "Initializing network...");
+    blog(LOG_DEBUG, "[RECEIVER] Initializing network...");
     int net_result = netutils_init();
     if (net_result != 0) {
-        blog(LOG_ERROR, "Failed to initialize network, error code: %d", net_result);
+        blog(LOG_ERROR, "[RECEIVER] Failed to initialize network, error code: %d", net_result);
         return false;
     }
-    blog(LOG_INFO, "Network initialized successfully");
-    
+    blog(LOG_DEBUG, "[RECEIVER] Network initialized successfully");
+
+    // Whatever was set up is released on every way out but success.
+    bool started = false;
+    ScopeExit release{[&] {
+        if (started) return;
+        if (m_raop) raop_destroy(m_raop);
+        if (m_dnssd) dnssd_destroy(m_dnssd);
+        m_raop = nullptr;
+        m_dnssd = nullptr;
+    }};
+
     try {
-        auto parse_device_id = [](const std::string& value, std::array<char, 6>& out_hw_addr) -> bool {
-            std::string compact;
-            compact.reserve(12);
-            for (char ch : value) {
-                if (ch == ':') {
-                    continue;
-                }
-                compact.push_back(ch);
-            }
-
-            if (compact.size() != 12) {
-                return false;
-            }
-
-            for (size_t i = 0; i < compact.size(); ++i) {
-                if (!std::isxdigit(static_cast<unsigned char>(compact[i]))) {
-                    return false;
-                }
-            }
-
-            for (size_t i = 0; i < out_hw_addr.size(); ++i) {
-                const std::string byte_str = compact.substr(i * 2, 2);
-                out_hw_addr[i] = static_cast<char>(std::strtoul(byte_str.c_str(), nullptr, 16));
-            }
-            return true;
-        };
-
-        auto hex_no_colon = [](const std::string& value) -> std::string {
-            std::string compact;
-            compact.reserve(12);
-            for (char ch : value) {
-                if (ch != ':') {
-                    compact.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
-                }
-            }
-            return compact;
-        };
-
         raop_callbacks_t callbacks = makeRaopCallbacks();
 
         // Initialize RAOP
-        blog(LOG_INFO, "Initializing RAOP...");
+        blog(LOG_DEBUG, "[RECEIVER] Initializing RAOP...");
         m_raop = raop_init(&callbacks);
         if (!m_raop) {
-            blog(LOG_ERROR, "Failed to initialize RAOP");
+            blog(LOG_ERROR, "[RECEIVER] Failed to initialize RAOP");
             return false;
         }
-        
-        // Set log callback to redirect UxPlay logs to OBS
-        raop_set_log_callback(m_raop, [](void*, int level, const char* msg) {
-            int obs_level;
-            switch (level) {
-                case 0: // LOGGER_EMERG
-                case 1: // LOGGER_ALERT
-                case 2: // LOGGER_CRIT
-                case 3: // LOGGER_ERR
-                    obs_level = LOG_ERROR;
-                    break;
-                case 4: // LOGGER_WARNING
-                    obs_level = LOG_WARNING;
-                    break;
-                case 5: // LOGGER_NOTICE
-                case 6: // LOGGER_INFO
-                    obs_level = LOG_INFO;
-                    break;
-                case 7: // LOGGER_DEBUG
-                case 8: // LOGGER_DEBUG_DATA
-                default:
-                    obs_level = LOG_DEBUG;
-                    break;
-            }
-            // Strip trailing newline if present as blog() adds one
-            std::string log_msg = msg;
-            if (!log_msg.empty() && log_msg.back() == '\n') {
-                log_msg.pop_back();
-            }
-            blog(obs_level, "[UxPlay] %s", log_msg.c_str());
-        }, this);
-        
-        blog(LOG_INFO, "RAOP initialized successfully");
-
-        // Web ports AirPlay video may fetch from on hosts other than the
-        // sender; OBS_AIRPLAY_MEDIA_PORTS="80,443,..." overrides them.
-        if (const char* env = std::getenv("OBS_AIRPLAY_MEDIA_PORTS")) {
-            const auto ports = media_url_policy::parsePortList(env);
-            if (ports.empty()) {
-                blog(LOG_WARNING, "Ignoring invalid OBS_AIRPLAY_MEDIA_PORTS=%s", env);
-            } else {
-                media_url_policy::setAllowedPorts(ports);
-            }
-        }
-        {
-            const auto ports = media_url_policy::allowedPorts();
-            raop_set_media_ports(m_raop, ports.data(), static_cast<int>(ports.size()));
-            std::string list;
-            for (unsigned short port : ports) list += (list.empty() ? "" : ",") + std::to_string(port);
-            blog(LOG_INFO, "AirPlay video may fetch from other hosts on ports %s", list.c_str());
-        }
-        raop_set_media_policy(m_raop, m_accept_video.load(), m_sender_only.load());
-
-        if (media_trace_requested()) {
-            // Raise UxPlay's logger (default LOGGER_WARNING) so the [MEDIA]
-            // INFO lines and the [MEDIA-TRACE] protocol dump reach the OBS log.
-            raop_set_log_level(m_raop, LOGGER_INFO);
-            raop_set_media_trace_level(m_raop, LOGGER_INFO);
-            blog(LOG_INFO, "AirPlay media protocol trace enabled ([MEDIA-TRACE] lines)");
-        }
+        raop_set_log_callback(m_raop, forward_uxplay_log, this);
+        blog(LOG_DEBUG, "[RECEIVER] RAOP initialized successfully");
+        configure_media(m_raop, m_accept_video.load(), m_sender_only.load());
 
         // Initialize DNS-SD context needed by UxPlay's RAOP handlers (/info and TXT payloads)
         std::array<char, 6> hw_addr = {};
@@ -659,7 +738,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         if (!parse_device_id(device_id_str, hw_addr)) {
             normalized_device_id = "AA:BB:CC:DD:EE:FF";
             parse_device_id(normalized_device_id, hw_addr);
-            blog(LOG_WARNING, "Invalid device_id '%s'; using fallback '%s'",
+            blog(LOG_WARNING, "[RECEIVER] Invalid device_id '%s'; using fallback '%s'",
                  device_id_str.c_str(), normalized_device_id.c_str());
         }
 
@@ -677,10 +756,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
                              &dnssd_error,
                              0);
         if (!m_dnssd || dnssd_error != DNSSD_ERROR_NOERROR) {
-            blog(LOG_ERROR, "Failed to initialize UxPlay dnssd context (error=%d)", dnssd_error);
-            raop_destroy(m_raop);
-            m_raop = nullptr;
-            m_dnssd = nullptr;
+            blog(LOG_ERROR, "[DISCOVERY] Failed to initialize UxPlay dnssd context (error=%d)", dnssd_error);
             return false;
         }
 
@@ -691,27 +767,23 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // pair-verify remains a fallback for senders that still request it.
         raop_set_fast_connect(m_raop, true);
         apply_fast_connect_profile(m_dnssd);
-        blog(LOG_INFO, "Fast initial connection enabled (AirServer Bonjour + /info profile; direct-verify fallback)");
+        blog(LOG_INFO, "[DISCOVERY] Fast initial connection enabled (AirServer Bonjour + /info profile; direct-verify fallback)");
 #else
-        blog(LOG_INFO, "Fast initial connection disabled (UxPlay compatibility profile)");
+        blog(LOG_INFO, "[RECEIVER] Fast initial connection disabled (UxPlay compatibility profile)");
 #endif
 
         // Set port
-        blog(LOG_INFO, "Setting RAOP port to %d", port);
+        blog(LOG_DEBUG, "[RECEIVER] Setting RAOP port to %d", port);
         raop_set_port(m_raop, port);
-        
+
         // Initialize RAOP with provided device ID and empty keyfile
-        blog(LOG_INFO, "Calling raop_init2 with Device ID: %s", device_id_str.c_str());
+        blog(LOG_DEBUG, "[RECEIVER] Calling raop_init2 with Device ID: %s", device_id_str.c_str());
         if (raop_init2(m_raop, 1, device_id_str.c_str(), "") != 0) {
-            blog(LOG_ERROR, "Failed to initialize RAOP with device ID");
+            blog(LOG_ERROR, "[DISCOVERY] Failed to initialize RAOP with device ID");
             setLastError(obs_module_text("AirPlay.Error.SetupFailed"));
-            raop_destroy(m_raop);
-            dnssd_destroy(m_dnssd);
-            m_raop = nullptr;
-            m_dnssd = nullptr;
             return false;
         }
-        blog(LOG_INFO, "raop_init2 completed successfully");
+        blog(LOG_DEBUG, "[RECEIVER] raop_init2 completed successfully");
         raop_set_dnssd(m_raop, m_dnssd);
 
         // Safari does not use the type-110 screen-mirroring stream for a
@@ -719,73 +791,54 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         // (/reverse, /play, /playback-info), which UxPlay disables by default.
         // Keep the advertised feature bits and the request handlers in sync.
         if (raop_set_plist(m_raop, "hls", 1) != 0) {
-            blog(LOG_ERROR, "Failed to enable Safari Media AirPlay protocol mode");
+            blog(LOG_ERROR, "[RECEIVER] Failed to enable Safari Media AirPlay protocol mode");
             setLastError(obs_module_text("AirPlay.Error.SetupFailed"));
-            raop_destroy(m_raop);
-            dnssd_destroy(m_dnssd);
-            m_raop = nullptr;
-            m_dnssd = nullptr;
             return false;
         }
         dnssd_set_airplay_features(m_dnssd, 0, 1);
         dnssd_set_airplay_features(m_dnssd, 4, 1);
-        blog(LOG_INFO, "Safari Media AirPlay enabled (HTTP /reverse + /play URL playback)");
-        
-        // Start HTTP server
-        blog(LOG_INFO, "Starting HTTP server...");
-        unsigned short actual_port = static_cast<unsigned short>(port);
-        int result = raop_start_httpd(m_raop, &actual_port);
-        if (result < 0) {
-            blog(LOG_ERROR, "Failed to start RAOP HTTP server, error code: %d", result);
-            blog(LOG_ERROR, "Requested port: %d, actual_port: %d", port, actual_port);
-            
-            // Get detailed error information
-            int error_code = errno;
-            blog(LOG_ERROR, "System errno: %d (%s)", error_code, strerror(error_code));
-            
-            // Try the fallback port if the default one is busy
-            if (port == kDefaultPort) {
-                actual_port = static_cast<unsigned short>(kFallbackPort);
-                blog(LOG_INFO, "Trying alternative port %d...", actual_port);
-                result = raop_start_httpd(m_raop, &actual_port);
-                if (result < 0) {
-                    blog(LOG_ERROR, "Failed to start RAOP HTTP server on port %d, error code: %d",
-                         actual_port, result);
-                    blog(LOG_ERROR, "System errno: %d (%s)", errno, strerror(errno));
-                    setLastError(obs_module_text("AirPlay.Error.PortsBusy"));
-                    raop_destroy(m_raop);
-                    dnssd_destroy(m_dnssd);
-                    m_raop = nullptr;
-                    m_dnssd = nullptr;
-                    return false;
-                }
-                blog(LOG_INFO, "UxPlay integration started successfully on port %d", actual_port);
-            } else {
+        blog(LOG_INFO, "[RECEIVER] Safari Media AirPlay enabled (HTTP /reverse + /play URL playback)");
+
+        // Start the HTTP server, on the fallback port if the default one is
+        // busy (macOS's own AirPlay Receiver uses 7000).
+        blog(LOG_DEBUG, "[RECEIVER] Starting HTTP server...");
+        const auto listen_on = [&](unsigned short wanted, unsigned short* actual) {
+            *actual = wanted;
+            const int result = raop_start_httpd(m_raop, actual);
+            if (result < 0) {
+                const int error_code = errno;
+                blog(LOG_ERROR, "[RECEIVER] Failed to start RAOP HTTP server on port %d, error code: %d "
+                                "(errno %d: %s)", wanted, result, error_code, strerror(error_code));
+            }
+            return result >= 0;
+        };
+        unsigned short actual_port = 0;
+        if (!listen_on(static_cast<unsigned short>(port), &actual_port)) {
+            if (port != kDefaultPort) {
                 setLastError(format_text("AirPlay.Error.PortBusy", port));
-                raop_destroy(m_raop);
-                dnssd_destroy(m_dnssd);
-                m_raop = nullptr;
-                m_dnssd = nullptr;
                 return false;
             }
-        } else {
-            blog(LOG_INFO, "UxPlay integration started successfully on port %d", actual_port);
+            blog(LOG_INFO, "[RECEIVER] Trying alternative port %d...", kFallbackPort);
+            if (!listen_on(static_cast<unsigned short>(kFallbackPort), &actual_port)) {
+                setLastError(obs_module_text("AirPlay.Error.PortsBusy"));
+                return false;
+            }
         }
-        
+        blog(LOG_INFO, "[RECEIVER] UxPlay integration started successfully on port %d", actual_port);
+
         // Store the actual port for mDNS advertising
         m_actual_port = actual_port;
         raop_set_port(m_raop, m_actual_port);
-        blog(LOG_INFO, "UxPlay integration running on actual port: %d", m_actual_port);
+        blog(LOG_DEBUG, "[RECEIVER] UxPlay integration running on actual port: %d", m_actual_port);
 
         // Register DNS-SD services so UxPlay can build correct TXT payloads for /info.
-        // We still advertise with OBS' custom publisher for discovery consistency.
         int raop_register_error = dnssd_register_raop(m_dnssd, m_actual_port);
         if (raop_register_error != DNSSD_ERROR_NOERROR) {
-            blog(LOG_WARNING, "dnssd_register_raop returned %d", raop_register_error);
+            blog(LOG_WARNING, "[DISCOVERY] dnssd_register_raop returned %d", raop_register_error);
         }
         int airplay_register_error = dnssd_register_airplay(m_dnssd, m_actual_port);
         if (airplay_register_error != DNSSD_ERROR_NOERROR) {
-            blog(LOG_WARNING, "dnssd_register_airplay returned %d", airplay_register_error);
+            blog(LOG_WARNING, "[DISCOVERY] dnssd_register_airplay returned %d", airplay_register_error);
         }
         if (raop_register_error != DNSSD_ERROR_NOERROR ||
             airplay_register_error != DNSSD_ERROR_NOERROR) {
@@ -795,21 +848,13 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         } else {
             setLastError({});
         }
-        blog(LOG_INFO, "UxPlay device ID (RAOP): %s", hex_no_colon(normalized_device_id).c_str());
-        
+        blog(LOG_INFO, "[DISCOVERY] UxPlay device ID (RAOP): %s", hex_no_colon(normalized_device_id).c_str());
+
         m_running = true;
+        started = true;
         return true;
-        
     } catch (const std::exception& e) {
-        blog(LOG_ERROR, "Exception in UxPlayIntegration::start: %s", e.what());
-        if (m_raop) {
-            raop_destroy(m_raop);
-            m_raop = nullptr;
-        }
-        if (m_dnssd) {
-            dnssd_destroy(m_dnssd);
-            m_dnssd = nullptr;
-        }
+        blog(LOG_ERROR, "[RECEIVER] Exception in UxPlayIntegration::start: %s", e.what());
         return false;
     }
 }
@@ -835,7 +880,7 @@ bool UxPlayIntegration::updateServerName(const std::string& name)
     }
 
     const std::string svc_name = name.empty() ? "OBS AirPlay" : name;
-    blog(LOG_INFO, "Updating UxPlay dnssd service name to: %s", svc_name.c_str());
+    blog(LOG_INFO, "[DISCOVERY] Updating UxPlay dnssd service name to: %s", svc_name.c_str());
 
     // Create the new context before touching the old one: UxPlay's request
     // handlers keep using the old context (and its advertisement stays up)
@@ -848,7 +893,7 @@ bool UxPlayIntegration::updateServerName(const std::string& name)
                                     &dnssd_error,
                                     0);
     if (!new_dnssd || dnssd_error != DNSSD_ERROR_NOERROR) {
-        blog(LOG_WARNING, "Failed to reinitialize dnssd for name update (error=%d)", dnssd_error);
+        blog(LOG_WARNING, "[DISCOVERY] Failed to reinitialize dnssd for name update (error=%d)", dnssd_error);
         if (new_dnssd) {
             dnssd_destroy(new_dnssd);
         }
@@ -896,11 +941,11 @@ bool UxPlayIntegration::updateServerName(const std::string& name)
 
     int raop_reg_err = dnssd_register_raop(new_dnssd, m_actual_port);
     if (raop_reg_err != DNSSD_ERROR_NOERROR) {
-        blog(LOG_WARNING, "dnssd_register_raop returned %d for updated context", raop_reg_err);
+        blog(LOG_WARNING, "[DISCOVERY] dnssd_register_raop returned %d for updated context", raop_reg_err);
     }
     int airplay_reg_err = dnssd_register_airplay(new_dnssd, m_actual_port);
     if (airplay_reg_err != DNSSD_ERROR_NOERROR) {
-        blog(LOG_WARNING, "dnssd_register_airplay returned %d for updated context", airplay_reg_err);
+        blog(LOG_WARNING, "[DISCOVERY] dnssd_register_airplay returned %d for updated context", airplay_reg_err);
     }
 
     {
@@ -915,7 +960,7 @@ bool UxPlayIntegration::updateServerName(const std::string& name)
         setLastError({});
     }
 
-    blog(LOG_INFO, "UxPlay dnssd service name updated successfully");
+    blog(LOG_INFO, "[DISCOVERY] UxPlay dnssd service name updated successfully");
     return true;
 }
 
@@ -1027,7 +1072,7 @@ void UxPlayIntegration::stop()
         m_running = false;
     }
     
-    blog(LOG_INFO, "Stopping UxPlay integration");
+    blog(LOG_INFO, "[RECEIVER] Stopping UxPlay integration");
 
     // raop_destroy/dnssd_destroy are called outside m_mutex to avoid deadlock:
     // UxPlay's audio/video threads may be blocked waiting for m_mutex (in
@@ -1059,7 +1104,7 @@ void UxPlayIntegration::stop()
         m_retired_dnssd = nullptr;
     }
     
-    blog(LOG_INFO, "UxPlay integration stopped");
+    blog(LOG_INFO, "[RECEIVER] UxPlay integration stopped");
 }
 
 void UxPlayIntegration::setConnectionResetCallback(ConnectionResetCallback callback)
