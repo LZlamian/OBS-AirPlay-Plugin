@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Windows test stand-in for Bonjour's dnssd.dll: UxPlay's dnssd_init loads
-   it even when nothing is registered (the protocol smoke only needs the
-   context for GET /info). Built next to the test executables, which
-   LoadLibrary searches first. TXT records work; registering fails as it
-   does with the Bonjour service stopped. Never packaged. */
+/* Windows test stand-in for Bonjour's dnssd.dll with the Bonjour service
+   stopped: DNSServiceGetProperty and DNSServiceRegister fail with
+   kDNSServiceErr_ServiceNotRunning, so UxPlay's dnssd_init uses the Windows
+   DNS service instead (dnssd-native-smoke loads it with UXPLAY_DNSSD_DLL;
+   Bonjour itself is only loaded from System32). TXT records work. Never
+   packaged. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,12 @@ STUB_EXPORT int32_t DNSServiceRegister(void *ref, uint32_t flags, uint32_t inter
 {
     (void) ref; (void) flags; (void) interface_index; (void) name; (void) type; (void) domain;
     (void) host; (void) port; (void) txt_length; (void) txt; (void) callback; (void) context;
+    return -65563; /* kDNSServiceErr_ServiceNotRunning */
+}
+
+STUB_EXPORT int32_t DNSServiceGetProperty(const char *property, void *result, uint32_t *size)
+{
+    (void) property; (void) result; (void) size;
     return -65563; /* kDNSServiceErr_ServiceNotRunning */
 }
 

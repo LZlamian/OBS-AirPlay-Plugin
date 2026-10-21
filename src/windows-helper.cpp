@@ -58,6 +58,8 @@ std::mutex g_mutex;  // guards everything below
 std::condition_variable g_cv;
 bool g_running = false;
 bool g_quit = false;
+// The installer's UAC prompt is open (ShellExecuteEx has not returned).
+bool g_installing = false;
 std::thread g_ble_thread;
 std::thread g_update_thread;
 std::string g_bluetooth_state;
@@ -201,8 +203,10 @@ public:
                 : WINHTTP_NO_ADDITIONAL_HEADERS;
             DWORD status = 0;
             DWORD status_size = sizeof(status);
+            // -1 (NUL-terminated) is only defined for a header string.
+            const DWORD headers_length = headers ? static_cast<DWORD>(-1L) : 0;
             ok = request &&
-                 WinHttpSendRequest(request, headers, static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA,
+                 WinHttpSendRequest(request, headers, headers_length, WINHTTP_NO_REQUEST_DATA,
                                     0, 0, 0) &&
                  WinHttpReceiveResponse(request, nullptr) &&
                  WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -513,8 +517,23 @@ std::string install(Http& http, const windows_update::Update& update)
     execute.lpFile = path.c_str();
     execute.lpParameters = parameters.c_str();
     execute.nShow = SW_HIDE;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_quit) {
+            CloseHandle(file);
+            return "OBS is quitting.";
+        }
+        g_installing = true;
+    }
+    // Returns once the UAC prompt is answered (SEE_MASK_NOASYNC, so the
+    // file stays locked until the installer runs). OBS quitting meanwhile
+    // does not wait for it: stop_airplay_ble_helper leaves this thread.
     const BOOL started = ShellExecuteExW(&execute);
     const DWORD error = started ? 0 : GetLastError();
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_installing = false;
+    }
     CloseHandle(file);
     if (!started) {
         return error == ERROR_CANCELLED ? "Windows did not get permission to install it."
@@ -651,10 +670,12 @@ bool start_airplay_ble_helper()
 
 void stop_airplay_ble_helper()
 {
+    bool installing = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_running) return;
         g_quit = true;
+        installing = g_installing;
         // Cancels a request in progress and closes a prompt still open.
         if (g_request) {
             WinHttpCloseHandle(g_request);
@@ -664,6 +685,17 @@ void stop_airplay_ble_helper()
     }
     g_cv.notify_all();
     if (g_ble_thread.joinable()) g_ble_thread.join();
+    if (installing && g_update_thread.joinable()) {
+        // The installer's UAC prompt is open; joining would hold OBS until
+        // it is answered (or times out, about two minutes). The thread is
+        // left to finish, and this DLL pinned so it is never unloaded under
+        // it.
+        HMODULE self = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           reinterpret_cast<LPCWSTR>(&g_running), &self);
+        blog(LOG_INFO, "[Update] OBS quits while the installer waits for permission");
+        g_update_thread.detach();
+    }
     if (g_update_thread.joinable()) g_update_thread.join();
     std::lock_guard<std::mutex> lock(g_mutex);
     g_running = false;

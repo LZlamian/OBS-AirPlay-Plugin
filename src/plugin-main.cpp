@@ -77,6 +77,8 @@ static bool any_output_active()
     return active;
 }
 
+std::shared_ptr<UxPlayIntegration> get_uxplay_integration();
+
 static void status_thread_func()
 {
     // The update helper never prompts while an output is active.
@@ -89,6 +91,9 @@ static void status_thread_func()
         g_status_cv.wait_for(lock, std::chrono::seconds(1));
         if (g_status_quit) break;
         lock.unlock();
+#if defined(_WIN32)
+        if (auto uxplay = get_uxplay_integration()) uxplay->checkRegistration();
+#endif
         if (g_status_dirty.exchange(false)) {
             refresh_airplay_source_panels();
         }
@@ -147,8 +152,9 @@ static std::string load_or_persist_mac(const std::string& generated_mac)
         return generated_mac;
     }
 
-    // Try to load existing MAC
-    FILE* f = fopen(path, "r");
+    // Try to load existing MAC (os_fopen: the path is UTF-8, which the
+    // narrow CRT on Windows would read in the ANSI code page)
+    FILE* f = os_fopen(path, "r");
     if (f) {
         char buf[32] = {};
         if (fgets(buf, sizeof(buf), f)) {
@@ -173,7 +179,7 @@ static std::string load_or_persist_mac(const std::string& generated_mac)
         os_mkdirs(dir);
         bfree(dir);
     }
-    f = fopen(path, "w");
+    f = os_fopen(path, "w");
     if (f) {
         fprintf(f, "%s\n", generated_mac.c_str());
         fclose(f);

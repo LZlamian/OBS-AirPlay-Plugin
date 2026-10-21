@@ -334,8 +334,10 @@ jobs:
   # no release of that version is published); the maintainer publishes it,
   # which creates the windows-vX.Y.Z tag. On such a tag pushed by hand, it
   # creates the draft, or fills an empty pre-release made on GitHub.
+  # Only from a windows-v* tag or the Windows branch: another branch's push
+  # would otherwise move the draft to unrelated (macOS-only) work.
   windows-beta-draft:
-    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/windows-v') || startsWith(github.ref, 'refs/heads/'))
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/windows-v') || github.ref == 'refs/heads/claude/upbeat-meitner-zf2a2e')
     needs: [windows]
     runs-on: ubuntu-latest
     permissions:

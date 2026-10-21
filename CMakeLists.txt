@@ -618,15 +618,15 @@ if(BUILD_TESTING)
         airplay
     )
     if(WIN32)
-        # UxPlay loads Bonjour's dnssd.dll even to create the DNS-SD context
-        # GET /info reads; the test gets a stand-in next to it.
+        # A stand-in for Bonjour's dnssd.dll with its service stopped, which
+        # dnssd-native-smoke loads (UXPLAY_DNSSD_DLL) to check the fallback.
         add_library(obs-airplay-dnssd-stub SHARED tests/dnssd-stub.c)
         set_target_properties(obs-airplay-dnssd-stub PROPERTIES PREFIX "" OUTPUT_NAME dnssd)
-        add_dependencies(obs-airplay-protocol-smoke obs-airplay-dnssd-stub)
 
         # Discovery without Bonjour: register and resolve through the
         # Windows DNS service.
         add_executable(obs-airplay-dnssd-native-smoke tests/dnssd-native-smoke.cpp)
+        add_dependencies(obs-airplay-dnssd-native-smoke obs-airplay-dnssd-stub)
         target_include_directories(obs-airplay-dnssd-native-smoke PRIVATE
             ${CMAKE_SOURCE_DIR}/uxplay/lib)
         target_compile_options(obs-airplay-dnssd-native-smoke PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
@@ -650,6 +650,18 @@ if(BUILD_TESTING)
         target_compile_options(obs-airplay-windows-ble-smoke PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
         add_test(NAME windows-ble COMMAND obs-airplay-windows-ble-smoke)
         set_tests_properties(windows-ble PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+
+        # The finished DLL, loaded and unloaded as OBS does.
+        if(TARGET obs-airplay)
+            add_executable(obs-airplay-load-dll tests/windows-load-dll.cpp)
+            target_include_directories(obs-airplay-load-dll PRIVATE ${OBS_INCLUDE_DIR})
+            target_compile_options(obs-airplay-load-dll PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
+            add_dependencies(obs-airplay-load-dll obs-airplay)
+            get_filename_component(OBS_AIRPLAY_OBS_BIN "${LIBOBS_LIB}" DIRECTORY)
+            add_test(NAME load-dll
+                COMMAND obs-airplay-load-dll "$<TARGET_FILE:obs-airplay>" "${OBS_AIRPLAY_OBS_BIN}")
+            set_tests_properties(load-dll PROPERTIES TIMEOUT 60)
+        endif()
     endif()
     # Fuzz targets for input from the network: HLS playlists, mirror access
     # units, HTTP requests. With libFuzzer's runtime they are libFuzzer

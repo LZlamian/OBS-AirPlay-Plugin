@@ -3,9 +3,10 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
-#include <sys/stat.h>
+#include <system_error>
 
 // Troubleshooting switches are flag files in the plugin's OBS config folder
 // (obs_module_config_path, so portable OBS installs work), set at module
@@ -20,6 +21,14 @@ inline void set_flag_file_directory(const std::string& directory)
     g_flag_dir = directory;
 }
 
+// obs_module_config_path is UTF-8; on Windows the narrow CRT would read it
+// in the ANSI code page (a profile folder with Cyrillic or CJK characters).
+inline bool utf8_path_exists(const std::string& path)
+{
+    std::error_code error;
+    return std::filesystem::exists(std::filesystem::u8path(path), error);
+}
+
 inline bool flag_file_exists(const char* name)
 {
     std::string directory;
@@ -27,16 +36,15 @@ inline bool flag_file_exists(const char* name)
         std::lock_guard<std::mutex> lock(g_flag_dir_mutex);
         directory = g_flag_dir;
     }
-    struct stat st {};
     if (!directory.empty()) {
         if (directory.back() != '/') directory += '/';
-        if (stat((directory + name).c_str(), &st) == 0) return true;
+        if (utf8_path_exists(directory + name)) return true;
     }
 #if defined(__APPLE__)
     if (const char* home = std::getenv("HOME")) {
         const std::string legacy =
             std::string(home) + "/Library/Application Support/obs-studio/" + name;
-        if (stat(legacy.c_str(), &st) == 0) return true;
+        if (utf8_path_exists(legacy)) return true;
     }
 #endif
     return false;

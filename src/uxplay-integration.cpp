@@ -837,6 +837,7 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
         } else {
             setLastError({});
         }
+        m_registration_reported = false;
         blog(LOG_INFO, "UxPlay device ID (RAOP): %s", hex_no_colon(normalized_device_id).c_str());
         
         m_running = true;
@@ -947,9 +948,30 @@ void UxPlayIntegration::updateServerName(const std::string& name)
         m_dnssd       = new_dnssd;
         m_server_name = svc_name;
     }
+    m_registration_reported = false;
 
     blog(LOG_INFO, "UxPlay dnssd service name updated successfully");
 }
+
+#if defined(_WIN32)
+void UxPlayIntegration::checkRegistration()
+{
+    // Not while start(), stop() or a rename replace m_dnssd; never waits.
+    std::unique_lock<std::mutex> lifecycle(m_lifecycle_mutex, std::try_to_lock);
+    if (!lifecycle.owns_lock() || m_registration_reported || !m_dnssd) return;
+    const int status = dnssd_get_registration_status(m_dnssd);
+    if (status == DNSSD_REGISTRATION_PENDING) return;
+    m_registration_reported = true;
+    if (status == 0) {
+        blog(LOG_INFO, "AirPlay discovery: the receiver is announced on the network (%s)",
+             dnssd_get_backend(m_dnssd));
+        return;
+    }
+    blog(LOG_WARNING, "AirPlay discovery: %s could not announce the receiver (error %d)",
+         dnssd_get_backend(m_dnssd), status);
+    setLastError(format_text("AirPlay.Error.WindowsDiscovery", status));
+}
+#endif
 
 void UxPlayIntegration::setLastError(std::string error)
 {

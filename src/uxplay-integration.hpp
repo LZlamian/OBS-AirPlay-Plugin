@@ -90,6 +90,13 @@ public:
 
     // Update the advertised server name in the UxPlay dnssd context (live, no restart)
     void updateServerName(const std::string& name);
+
+#if defined(_WIN32)
+    // Called once a second (the status thread). The Windows DNS service
+    // finishes a registration after dnssd_register_* returned: its outcome
+    // is logged once and a failure shown on the panel.
+    void checkRegistration();
+#endif
     
     // Set callbacks for video, audio, and connection reset
     void setVideoCallback(VideoFrameCallback callback);
@@ -169,6 +176,8 @@ private:
     // replace m_raop / m_dnssd (OBS main thread, name debounce thread).
     // Never taken on UxPlay's threads.
     std::mutex m_lifecycle_mutex;
+    // The current registration's outcome was reported (under m_lifecycle_mutex).
+    bool m_registration_reported = true;
     mutable std::mutex m_status_mutex;   // leaf lock
     std::string m_last_error;            // under m_status_mutex
     std::string m_last_state;            // under m_status_mutex

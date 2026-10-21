@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Windows only: registers _airplay._tcp and _raop._tcp through UxPlay's
-// Windows DNS service backend (no Bonjour), then resolves the AirPlay
-// service back over mDNS with DnsServiceResolve and checks its port and TXT
-// record, as an iPhone would see them.
+// Windows DNS service backend (no Bonjour), waits for the registration to
+// be announced, then resolves the AirPlay service back over mDNS with
+// DnsServiceResolve and checks its port and TXT record. The name has a dot
+// in it (advertised as U+2024). Also: services deregistered while their
+// registration is still in progress, and a Bonjour whose service is stopped
+// (tests/dnssd-stub.c) falling back to the Windows DNS service.
 //   obs-airplay-dnssd-native-smoke [--register-only]
 #include <winsock2.h>
 #include <windows.h>
@@ -59,7 +62,7 @@ int main(int argc, char** argv)
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
     char name[64];
-    std::snprintf(name, sizeof(name), "OBS AirPlay CI %lu", GetCurrentProcessId());
+    std::snprintf(name, sizeof(name), "OBS AirPlay CI 2.0 %lu", GetCurrentProcessId());
     const char hw_addr[] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
     int error = 0;
     dnssd_t* dnssd = dnssd_init(name, static_cast<int>(std::strlen(name)), hw_addr,
@@ -86,12 +89,18 @@ int main(int argc, char** argv)
     if (airplay != 0 || raop != 0 || !txt_ok) return 1;
 
     int failures = 0;
+    // The registration completes asynchronously (probing, then announcing).
+    int status = DNSSD_REGISTRATION_PENDING;
+    for (int waited = 0; waited < 10000 && status == DNSSD_REGISTRATION_PENDING; waited += 100) {
+        Sleep(100);
+        status = dnssd_get_registration_status(dnssd);
+    }
+    std::printf("registration status=%d -> %s\n", status, status == 0 ? "ok" : "FAILED");
+    if (status != 0) ++failures;
     if (!register_only) {
-        // Probing and announcing take a moment; resolving waits for answers.
-        Sleep(3000);
         Resolved resolved;
         wchar_t query[128];
-        std::swprintf(query, 128, L"OBS AirPlay CI %lu._airplay._tcp.local",
+        std::swprintf(query, 128, L"OBS AirPlay CI 2\u20240 %lu._airplay._tcp.local",
                       GetCurrentProcessId());
         DNS_SERVICE_RESOLVE_REQUEST request = {};
         request.Version = DNS_QUERY_REQUEST_VERSION1;
@@ -120,6 +129,49 @@ int main(int argc, char** argv)
     dnssd_unregister_airplay(dnssd);
     dnssd_unregister_raop(dnssd);
     dnssd_destroy(dnssd);
+
+    // Deregistered at once, while the registrations are still in progress
+    // (a rename or quit right after start): each service is freed only
+    // after both of its callbacks.
+    for (int i = 0; i < 5; ++i) {
+        std::snprintf(name, sizeof(name), "OBS AirPlay CI quick %d %lu", i, GetCurrentProcessId());
+        dnssd_t* quick = dnssd_init(name, static_cast<int>(std::strlen(name)), hw_addr,
+                                    sizeof(hw_addr), &error, 0);
+        if (!quick) {
+            ++failures;
+            break;
+        }
+        dnssd_set_pk(quick, pk);
+        dnssd_register_airplay(quick, port);
+        dnssd_register_raop(quick, port);
+        dnssd_unregister_airplay(quick);
+        dnssd_unregister_raop(quick);
+        dnssd_destroy(quick);
+    }
+    std::printf("quick deregistration: done\n");
+
+    // Bonjour installed with its service stopped (the stub answers
+    // DNSServiceGetProperty with kDNSServiceErr_ServiceNotRunning): the
+    // Windows DNS service is used instead.
+    char stub[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameA(nullptr, stub, MAX_PATH);
+    char* slash = length ? std::strrchr(stub, '\\') : nullptr;
+    if (slash && static_cast<size_t>(slash - stub) + 11 < sizeof(stub)) {
+        std::strcpy(slash + 1, "dnssd.dll");
+        const std::string variable = std::string("UXPLAY_DNSSD_DLL=") + stub;
+        _putenv(variable.c_str());
+        _putenv("UXPLAY_DNSSD_BACKEND=");
+        dnssd_t* fallback = dnssd_init(name, static_cast<int>(std::strlen(name)), hw_addr,
+                                       sizeof(hw_addr), &error, 0);
+        const char* backend = fallback ? dnssd_get_backend(fallback) : "none";
+        const bool fallback_ok = fallback && !std::strcmp(backend, "Windows DNS service");
+        std::printf("stopped Bonjour (%s): backend=%s -> %s\n", stub, backend,
+                    fallback_ok ? "ok" : "FAILED");
+        if (!fallback_ok) ++failures;
+        if (fallback) dnssd_destroy(fallback);
+    } else {
+        ++failures;
+    }
     std::printf("dnssd-native: %s\n", failures ? "FAILED" : "ok");
     return failures ? 1 : 0;
 }
