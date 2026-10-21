@@ -5,7 +5,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         "Oldest macOS version supported by the packaged plugin")
 endif()
 
-project(obs-airplay VERSION 2.6.1)
+project(obs-airplay VERSION 2.7.0)
 
 # A plain `cmake ..` used to build without optimisation.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

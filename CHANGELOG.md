@@ -2,7 +2,7 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
-## Unreleased (2.7)
+## 2.7.0 (2026-10-21)
 
 Audit 2026-10-21, Phase 1:
 - "From any web address" now fetches from the address it checked: plain HTTP
