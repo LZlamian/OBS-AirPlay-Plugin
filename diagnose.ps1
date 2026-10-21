@@ -31,7 +31,10 @@ if ($build -ge 17763) {
 }
 
 Section 'OBS'
+# OBS's installer records its folder in the 32-bit registry view unless it
+# was built for the 64-bit one: read both.
 $obsFolder = (Get-ItemProperty 'HKLM:\SOFTWARE\OBS Studio').'(default)'
+if (-not $obsFolder) { $obsFolder = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\OBS Studio').'(default)' }
 if (-not $obsFolder) { $obsFolder = Join-Path $env:ProgramFiles 'obs-studio' }
 $obsExe = Join-Path $obsFolder 'bin\64bit\obs64.exe'
 if (Test-Path $obsExe) {
@@ -73,6 +76,7 @@ if (Test-Path $settings) {
     if ($saved) { $name = $saved }
 }
 $found = $false
+$checked = $true
 $dnssd = Get-Command dns-sd.exe
 if ($dnssd) {
     $scan = Join-Path $env:TEMP "obs-airplay-scan-$PID.txt"
@@ -82,11 +86,15 @@ if ($dnssd) {
     $found = Select-String -Path $scan -SimpleMatch $name -Quiet
     Remove-Item $scan
 } else {
+    # Without Bonjour's dns-sd.exe, Windows does not always answer this
+    # host's own registration, so a miss proves nothing.
     $answers = Resolve-DnsName -Name '_airplay._tcp.local' -Type PTR -QuickTimeout
     $found = [bool]($answers | Where-Object { $_.NameHost -like "$name.*" })
+    $checked = $found
 }
 if ($found) { Ok "`"$name`" is advertised" }
-else { Warn "`"$name`" was not seen on the network (is OBS running with the plugin loaded?)" }
+elseif ($checked) { Warn "`"$name`" was not seen on the network (is OBS running with the plugin loaded?)" }
+else { Info "could not confirm that `"$name`" is advertised (Windows may not answer for itself without Bonjour): browse from the iPhone, or see the DISCOVERY lines in the OBS log below" }
 
 Section 'Network'
 foreach ($connection in Get-NetConnectionProfile) {
@@ -108,8 +116,10 @@ if ($rule -and $rule.Enabled -eq 'True') {
 } else {
     Warn 'no "OBS AirPlay" rule: allow OBS through Windows Firewall (the installer adds one)'
 }
-$blocks = Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like '*obs64.exe' } |
-    Get-NetFirewallRule | Where-Object { $_.Enabled -eq 'True' -and $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' }
+# Only the enabled inbound block rules are inspected: listing every rule's
+# application filter takes tens of seconds.
+$blocks = Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True |
+    Where-Object { ($_ | Get-NetFirewallApplicationFilter).Program -like '*obs64.exe' }
 foreach ($block in $blocks) { Fail "an inbound rule blocks OBS: `"$($block.DisplayName)`" ($($block.Profile))" }
 
 Section 'Ports (the receiver uses TCP 7000, or 7001 if 7000 is taken)'
@@ -133,8 +143,8 @@ if ($latest) {
     } else {
         Fail 'the plugin did not load in that session'
     }
-    Select-String -Path $latest.FullName -Pattern 'UxPlay integration (started|active)|Failed to start UxPlay|AirPlay discovery|\[LOAD\]' |
-        Select-Object -Last 6 | ForEach-Object { Info $_.Line }
+    Select-String -Path $latest.FullName -Pattern 'UxPlay integration (started|active)|Failed to start UxPlay|AirPlay discovery|\[DISCOVERY\]|\[LOAD\]' |
+        Select-Object -Last 8 | ForEach-Object { Info $_.Line }
 } else {
     Warn 'no OBS logs found'
 }

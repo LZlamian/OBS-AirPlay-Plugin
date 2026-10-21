@@ -8,10 +8,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <pthread.h>
+#include <string>
 #include <sys/stat.h>
 #include <utility>
 #if defined(__APPLE__)
@@ -42,6 +44,30 @@ struct MmcssRegistration {
     }
 };
 #endif
+
+// The last socket error and its text: Winsock keeps it apart from errno.
+struct SocketError {
+    int code;
+    std::string text;
+};
+
+SocketError last_socket_error()
+{
+#if defined(_WIN32)
+    const int code = WSAGetLastError();
+    char message[256] = {};
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                   static_cast<DWORD>(code), 0, message, sizeof(message), nullptr);
+    std::string text(message);
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' ')) {
+        text.pop_back();
+    }
+    return {code, text.empty() ? "unknown error" : text};
+#else
+    const int code = errno;
+    return {code, std::strerror(code)};
+#endif
+}
 
 // Boost the calling thread to USER_INTERACTIVE QoS exactly once per thread.
 // UxPlay invokes our video/audio callbacks on its receiver thread; raising
@@ -848,9 +874,9 @@ bool UxPlayIntegration::start(const std::string& device_id_str, int port,
             *actual = wanted;
             const int result = raop_start_httpd(m_raop, actual);
             if (result < 0) {
-                const int error_code = errno;
+                const SocketError error = last_socket_error();
                 blog(LOG_ERROR, "[RECEIVER] Failed to start RAOP HTTP server on port %d, error code: %d "
-                                "(errno %d: %s)", wanted, result, error_code, strerror(error_code));
+                                "(socket error %d: %s)", wanted, result, error.code, error.text.c_str());
             }
             return result >= 0;
         };

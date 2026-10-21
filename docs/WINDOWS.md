@@ -9,7 +9,9 @@ in [WINDOWS_PORT_SCOPE.md](WINDOWS_PORT_SCOPE.md).
 
 ## Requirements
 
-- Windows 10 1809 or later, or Windows 11, x64; OBS Studio 32 (64-bit)
+- Windows 10 1809 or later, or Windows 11, x64; OBS Studio 32 (64-bit).
+  OBS 30 and 31 may work (the source description the plugin registers is
+  unchanged since 30.0) but are untested.
 - The sending device and the PC on the same network, with multicast (mDNS,
   UDP 5353) allowed between them, and the PC's network set to **Private**
 - Bonjour is **not** needed: when it is not installed the plugin advertises
@@ -59,7 +61,11 @@ profile and ports and reads the OBS log.
 2. **Discovery:** the receiver appears in Control Center > Screen Mirroring
    on the iPhone/iPad within a few seconds. Try it without Bonjour and, if
    you can, with Bonjour installed. Rename the receiver in the source
-   properties: the new name appears.
+   properties: the new name appears. If the receiver does not appear,
+   capture the network with Wireshark (filter `udp.port == 5353`) while the
+   iPhone's Screen Mirroring list is open and attach the capture: the CI
+   test resolves the registration only from the PC itself, so what an
+   iPhone sees is unproven.
 3. **Mirroring:** start mirroring; video in OBS within about a second,
    portrait and landscape, rotation. The log line `[DECODE] mirror video ...:
    D3D11VA hardware decoding` (or `software decoding`) says which decoder
@@ -73,12 +79,16 @@ profile and ports and reads the OBS log.
 6. **Reconnects:** stop and restart mirroring; lock the phone; switch from
    mirroring to video and back; quit OBS during a session.
 7. **Firewall and network:** with the network set to **Public** devices
-   cannot connect (expected); Wi-Fi and Ethernet; a VPN running.
+   cannot connect (expected); Wi-Fi and Ethernet; a VPN running. With
+   another AirPlay receiver running (AirServer, 5KPlayer, a second OBS),
+   the log says port 7000 is busy and the receiver uses 7001.
 
 8. **Bluetooth:** with Bluetooth on, the OBS log shows `[BLE] discovery
    helper Bluetooth state: on`; turn Bluetooth off and on in Windows
    settings: it logs "off or not supported", then "on" again within about
-   30 s. With no adapter: "unavailable" and nothing else.
+   30 s. With no adapter: "unavailable" and nothing else. If it keeps
+   logging "off or not supported" every 30 s while Bluetooth is on, Windows
+   refuses the advertisement itself: report it (AirPlay works without it).
 9. **Updates** (needs a signed test release, or wait for the next one):
    the prompt appears about a minute after OBS starts, never while
    streaming or recording; **Install** asks for administrator rights,

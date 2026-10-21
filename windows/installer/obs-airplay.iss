@@ -94,13 +94,17 @@ begin
 end;
 
 // obs64.exe of the installed OBS Studio: its installer records the folder
-// as the default value of HKLM\SOFTWARE\OBS Studio.
+// as the default value of HKLM\SOFTWARE\OBS Studio, in the 32-bit registry
+// view unless it was built to use the 64-bit one, so both are read.
 function ObsExecutable(Param: String): String;
 var
   Folder: String;
 begin
   if ObsPath = '' then begin
-    if RegQueryStringValue(HKLM64, 'SOFTWARE\OBS Studio', '', Folder) then
+    if RegQueryStringValue(HKLM64, 'SOFTWARE\OBS Studio', '', Folder) and
+       FileExists(AddBackslash(Folder) + 'bin\64bit\obs64.exe') then
+      ObsPath := AddBackslash(Folder) + 'bin\64bit\obs64.exe'
+    else if RegQueryStringValue(HKLM32, 'SOFTWARE\OBS Studio', '', Folder) then
       ObsPath := AddBackslash(Folder) + 'bin\64bit\obs64.exe';
     if (ObsPath = '') or not FileExists(ObsPath) then
       ObsPath := ExpandConstant('{commonpf64}\obs-studio\bin\64bit\obs64.exe');
