@@ -9,8 +9,12 @@ extern "C" {
 #include <libavutil/log.h>
 }
 
+#if defined(_WIN32)
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#endif
 
 #include <algorithm>
 #include <atomic>

@@ -23,7 +23,9 @@ P4=$!
 python3 -I "${SCRIPTS}/redirect-server.py" "${DIR}" $((BASE + 4)) >/dev/null 2>&1 &
 P5=$!
 trap 'kill ${P1} ${P2} ${P3} ${P4} ${P5} 2>/dev/null || true' EXIT
-for _ in $(seq 50); do
+# Up to 30 s: Python's servers look up the host name before they listen,
+# slow on some CI machines.
+for _ in $(seq 300); do
   (exec 3<>"/dev/tcp/127.0.0.1/$((BASE + 1))" && exec 3<>"/dev/tcp/127.0.0.1/$((BASE + 43))" &&
    exec 3<>"/dev/tcp/127.0.0.1/$((BASE + 3))" && exec 3<>"/dev/tcp/127.0.0.1/$((BASE + 4))") 2>/dev/null && break
   sleep 0.1
