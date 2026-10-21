@@ -1125,6 +1125,35 @@ private:
 
     // Worker: waits until every queued frame has been presented (end of
     // stream, or before the worker changes what the presenter uses).
+    // At the end of an item: the last picture (or sound) lasts until the
+    // item's stated end on the playback clock, as a player shows it; before,
+    // a still clip's last frame ended the item the moment it appeared. Waits
+    // while paused. False when a seek arrived meanwhile (the caller reads on
+    // from the new position).
+    bool holdUntilEnd(double end)
+    {
+        std::unique_lock<std::mutex> lock(state_mutex);
+        for (;;) {
+            if (stop_requested.load(std::memory_order_acquire)) return true;
+            if (seek_pending) return false;
+            if (end <= info.position || !clock_initialized) return true;
+            if (info.rate <= 0.0f) {
+                state_cv.wait_for(lock, std::chrono::milliseconds(250));
+                continue;
+            }
+            const double delta =
+                std::max(0.0, end - clock_media_position) / std::max(0.001f, info.rate);
+            const auto target = clock_wall_time +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(delta));
+            if (std::chrono::steady_clock::now() >= target) {
+                info.position = end;
+                return true;
+            }
+            state_cv.wait_until(lock, target);
+        }
+    }
+
     void waitForPresenterIdle()
     {
         std::unique_lock<std::mutex> lock(queue_mutex);
@@ -2077,6 +2106,9 @@ private:
         // (e.g. after reading a trailing moov) without delivering media.
         bool demuxed_since_seek = false;
 
+        // Read and decode to the end; a seek while the last picture is held
+        // (holdUntilEnd) comes back here.
+        for (;;) {
         while (!stop_requested.load(std::memory_order_acquire)) {
             if (handlePendingSeek(format, video_decoder, audio_decoder, seek_preroll)) {
                 demuxed_since_seek = false;
@@ -2219,14 +2251,25 @@ private:
                              format_start_seconds, &video_output, &resampler,
                              &input_layout, &input_rate, &input_format, decoded);
             }
-            // The end is reached once the last queued picture is on screen.
+            // The end is reached once the last queued picture is on screen
+            // and has lasted until the item's end.
             waitForPresenterIdle();
+            if (!holdUntilEnd(duration_known ? duration : -1.0)) {
+                demuxed_since_seek = false;
+                if (format->pb) {
+                    format->pb->eof_reached = 0;
+                    format->pb->error = 0;
+                }
+                continue;
+            }
             std::lock_guard<std::mutex> lock(state_mutex);
             info.ended = true;
             info.rate = 0.0f;
             info.playback_buffer_empty = true;
             info.playback_buffer_full = false;
             blog(LOG_INFO, "[MEDIA] playback reached end of stream at %.3fs", info.position);
+        }
+        break;
         }
 
         {

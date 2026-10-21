@@ -27,6 +27,8 @@ and kept in the source tree under `licenses/`.
 | Component | Use | License | Text |
 |---|---|---|---|
 | UxPlay (fork, `uxplay/`) | AirPlay protocol; statically linked | GPL-3.0 | `GPL-3.0.txt` |
+| shairplay and RPiPlay code (in UxPlay: `raop*.c`, `http*.c`, `dnssd.c` and others carrying that header) | AirPlay receiver; statically linked | LGPL-2.1-or-later | `libplist-LGPL-2.1.txt` (the same license text) |
+| csrp (in UxPlay, `lib/srp.c`) | SRP pairing; statically linked | MIT | `csrp-MIT.txt` |
 | playfair (in UxPlay) | FairPlay handshake; statically linked | GPL-3.0 | `playfair-GPL-3.0.md` |
 | llhttp (in UxPlay) | HTTP/RTSP parser; statically linked | MIT | `llhttp-MIT.txt` |
 | OpenSSL 3.6.3 | Cryptography; statically linked (also into the FFmpeg libraries) | Apache-2.0 | `OpenSSL-Apache-2.0.txt` |

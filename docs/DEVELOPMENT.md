@@ -152,9 +152,14 @@ called without a NULL check, asserts on request paths, and the shape of
    OBS_AIRPLAY_RELEASE_TAG=vX.Y.Z scripts/package-macos.sh` (paths without
    spaces). It signs the zip with `~/.obs-airplay-release-signing/ed25519.pem`
    via `scripts/sign-release.sh`.
-4. Check `obs-airplay-updater-smoke --verify-release dist/obs-airplay-vX.Y.Z-macos-arm64.zip`.
+4. Check `obs-airplay-updater-smoke --verify-release dist/obs-airplay-vX.Y.Z-macos-arm64.zip`,
+   then `scripts/sign-checksums.sh <dist>` for `SHA256SUMS` and its signature
+   `SHA256SUMS.sig` (the public key is `docs/release-signing-key.pem`; checking
+   is described in INSTALL.md). With `OBS_AIRPLAY_TEST_FIXTURES` set to a
+   folder made by `tests/make-fixtures.sh`, `package-macos.sh` also builds and
+   runs the tests against the release dependencies (CI does).
 5. Publish the release (not a draft, not a pre-release) with the zip, its
-   `.sig`, the pkg and `SHA256SUMS`. The self-updater needs: the asset name
+   `.sig`, the pkg, `SHA256SUMS` and `SHA256SUMS.sig`. The self-updater needs: the asset name
    `obs-airplay-vX.Y.Z-macos-<arch>.zip`, the plugin as its only top-level
    entry (`ditto -c -k --keepParent`), bundle version equal to the tag, an
    intact code seal, the `.sig` next to it, and GitHub's published digest.

@@ -404,6 +404,11 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
 
 # Warnings for this project's own code (UxPlay keeps its upstream flags).
 set(OBS_AIRPLAY_WARNING_FLAGS -Wall -Wextra)
+# CI turns warnings into errors (CONTRIBUTING: no new warnings).
+option(OBS_AIRPLAY_WERROR "Treat compiler warnings in this project's code as errors" OFF)
+if(OBS_AIRPLAY_WERROR)
+    list(APPEND OBS_AIRPLAY_WARNING_FLAGS -Werror)
+endif()
 foreach(target obs-airplay obs-airplay-ble-discovery)
     if(TARGET ${target})
         target_compile_options(${target} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
@@ -496,8 +501,29 @@ if(BUILD_TESTING)
         ${PLIST_TEST_LIBRARY_DIRS})
     target_link_libraries(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARIES} ${PLIST_TEST_LIBRARIES})
 
+    # AirPlayServer with libobs stubbed: decode thread, backlog, clock anchor.
+    add_executable(obs-airplay-airplay-server-tests
+        tests/airplay-server-tests.cpp
+        src/airplay-server.cpp
+        src/audio-decoder.cpp
+        src/h264-decoder.cpp
+    )
+    target_include_directories(obs-airplay-airplay-server-tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/uxplay/lib
+        ${OBS_INCLUDE_DIR}
+        ${FFMPEG_INCLUDE_DIRS}
+        ${PLIST_TEST_INCLUDE_DIRS}
+    )
+    target_link_directories(obs-airplay-airplay-server-tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(obs-airplay-airplay-server-tests PRIVATE ${FFMPEG_LIBRARIES})
+    if(APPLE)
+        target_link_libraries(obs-airplay-airplay-server-tests PRIVATE "-framework CoreVideo")
+    endif()
+
     foreach(target obs-airplay-media-smoke obs-airplay-decoder-smoke obs-airplay-updater-smoke
-                   obs-airplay-protocol-smoke obs-airplay-unit-tests)
+                   obs-airplay-protocol-smoke obs-airplay-unit-tests
+                   obs-airplay-airplay-server-tests)
         if(TARGET ${target})
             target_compile_options(${target} PRIVATE ${OBS_AIRPLAY_WARNING_FLAGS})
         endif()
@@ -586,18 +612,44 @@ if(BUILD_TESTING)
     add_test(NAME protocol COMMAND obs-airplay-protocol-smoke)
     add_test(NAME protocol-large-blob COMMAND obs-airplay-protocol-smoke --large-blob)
 
+    # Local ports for the media tests' servers (tests/with-media-servers.sh):
+    # base+1 to base+5 and base+43. Another value per build tree lets two
+    # trees run their tests at the same time.
+    set(OBS_AIRPLAY_TEST_PORT_BASE 18900 CACHE STRING "Base of the local test server ports")
+    math(EXPR P1 "${OBS_AIRPLAY_TEST_PORT_BASE} + 1")
+    math(EXPR P3 "${OBS_AIRPLAY_TEST_PORT_BASE} + 3")
+    math(EXPR PTLS "${OBS_AIRPLAY_TEST_PORT_BASE} + 43")
+    set(OBS_AIRPLAY_TEST_PORT_ENV "OBS_AIRPLAY_TEST_PORT_BASE=${OBS_AIRPLAY_TEST_PORT_BASE}")
+
+    # Test media come from tests/make-fixtures.sh with an ffmpeg that has
+    # libx264/libx265, or ready-made (OBS_AIRPLAY_PREBUILT_FIXTURES) for a
+    # build against the release dependencies, which have no such ffmpeg.
+    set(OBS_AIRPLAY_PREBUILT_FIXTURES "" CACHE PATH "Test media made by tests/make-fixtures.sh")
     find_program(OBS_AIRPLAY_FFMPEG ffmpeg)
     set(OBS_AIRPLAY_FIXTURES "${CMAKE_BINARY_DIR}/test-fixtures")
-    if(OBS_AIRPLAY_FFMPEG)
-        add_test(NAME fixtures
-            COMMAND "${CMAKE_SOURCE_DIR}/tests/make-fixtures.sh" "${OBS_AIRPLAY_FFMPEG}"
-                    "${OBS_AIRPLAY_FIXTURES}")
-        set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP media TIMEOUT 600)
+    if(OBS_AIRPLAY_FFMPEG OR OBS_AIRPLAY_PREBUILT_FIXTURES)
+        if(OBS_AIRPLAY_PREBUILT_FIXTURES)
+            set(OBS_AIRPLAY_FIXTURES "${OBS_AIRPLAY_PREBUILT_FIXTURES}")
+            add_test(NAME fixtures
+                COMMAND ${CMAKE_COMMAND} -E echo "test media: ${OBS_AIRPLAY_FIXTURES}")
+        else()
+            add_test(NAME fixtures
+                COMMAND "${CMAKE_SOURCE_DIR}/tests/make-fixtures.sh" "${OBS_AIRPLAY_FFMPEG}"
+                        "${OBS_AIRPLAY_FIXTURES}")
+        endif()
+        set_tests_properties(fixtures PROPERTIES FIXTURES_SETUP media TIMEOUT 600
+                             ENVIRONMENT "${OBS_AIRPLAY_TEST_PORT_ENV}")
 
         set(F "file://${OBS_AIRPLAY_FIXTURES}")
         set(OBS_AIRPLAY_MEDIA_TESTS
             "media-play|${F}/clip8.mp4"
             "media-rotated|${F}/rot90.mp4"
+            "media-rotation|--rotation^${F}/rot90.mp4^${F}/clip8.mp4"
+            "media-switch-to-still|--switch-to-still^${F}/clip.mp4^${F}/still2.mp4"
+            "media-audio-only|--require-audio^${F}/audio.m4a"
+            "media-10bit|${F}/clip10.mp4"
+            "media-live-hls|--live^${F}/hls/live.m3u8"
+            "media-hls-variants|--rendition^${F}/hls/multi.m3u8^800000"
             "media-require-audio|--require-audio^${F}/clip8.mp4"
             "media-startup|--startup^${F}/clip.mp4"
             "media-seek-sync|--seek-sync^${F}/clip.mp4"
@@ -629,21 +681,29 @@ if(BUILD_TESTING)
         add_test(NAME media-nested-policy
             COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --nested-policy
-                    http://127.0.0.1:18901/same.m3u8 http://127.0.0.1:18901/cross.m3u8)
+                    http://127.0.0.1:${P1}/same.m3u8 http://127.0.0.1:${P1}/cross.m3u8)
         add_test(NAME media-tls-verify
             COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --tls-verify
-                    https://localhost:18443/clip.mp4)
+                    https://localhost:${PTLS}/clip.mp4)
         add_test(NAME media-resilient-http
             COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --resilient
-                    http://127.0.0.1:18903/clip8.mp4)
+                    http://127.0.0.1:${P3}/clip8.mp4)
+        add_test(NAME media-hls-variants-http
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+                    "$<TARGET_FILE:obs-airplay-media-smoke>" --rendition
+                    http://127.0.0.1:${P1}/multi.m3u8 800000)
+        add_test(NAME media-hls-aes
+            COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
+                    "$<TARGET_FILE:obs-airplay-media-smoke>" http://127.0.0.1:${P1}/aes.m3u8)
         add_test(NAME media-fetch-pinning
             COMMAND "${CMAKE_SOURCE_DIR}/tests/with-media-servers.sh" "${OBS_AIRPLAY_FIXTURES}"
                     "$<TARGET_FILE:obs-airplay-media-smoke>" --fetch-pinning)
         set_tests_properties(media-nested-policy media-tls-verify media-resilient-http
-                             media-fetch-pinning PROPERTIES
-            FIXTURES_REQUIRED media RESOURCE_LOCK media-servers TIMEOUT 120)
+                             media-fetch-pinning media-hls-variants-http media-hls-aes PROPERTIES
+            FIXTURES_REQUIRED media RESOURCE_LOCK media-servers TIMEOUT 120
+            ENVIRONMENT "${OBS_AIRPLAY_TEST_PORT_ENV}")
 
         add_test(NAME decoder
             COMMAND obs-airplay-decoder-smoke "${OBS_AIRPLAY_FIXTURES}/clip.mp4"
@@ -653,7 +713,9 @@ if(BUILD_TESTING)
         add_test(NAME decoder-colorspace
             COMMAND obs-airplay-decoder-smoke --colorspace "${OBS_AIRPLAY_FIXTURES}/clip601.mp4"
                     "${OBS_AIRPLAY_FIXTURES}/clip709.mp4")
-        set_tests_properties(decoder decoder-two-au decoder-colorspace PROPERTIES
+        add_test(NAME airplay-server
+            COMMAND obs-airplay-airplay-server-tests "${OBS_AIRPLAY_FIXTURES}/clip601.h264")
+        set_tests_properties(decoder decoder-two-au decoder-colorspace airplay-server PROPERTIES
             FIXTURES_REQUIRED media TIMEOUT 300)
         if(OBS_AIRPLAY_FUZZ)
             add_test(NAME fuzz-h264
@@ -672,9 +734,11 @@ if(BUILD_TESTING)
         add_test(NAME updater
             COMMAND obs-airplay-updater-smoke "${CMAKE_BINARY_DIR}/obs-airplay.plugin"
                     "${CMAKE_BINARY_DIR}/test-scratch")
+        set(OBS_AIRPLAY_UPDATER_ENV "${OBS_AIRPLAY_TEST_PORT_ENV}")
         if(OBS_AIRPLAY_OPENSSL3)
-            set_tests_properties(updater PROPERTIES ENVIRONMENT "OPENSSL=${OBS_AIRPLAY_OPENSSL3}")
+            list(APPEND OBS_AIRPLAY_UPDATER_ENV "OPENSSL=${OBS_AIRPLAY_OPENSSL3}")
         endif()
+        set_tests_properties(updater PROPERTIES ENVIRONMENT "${OBS_AIRPLAY_UPDATER_ENV}")
         set_tests_properties(updater PROPERTIES TIMEOUT 300)
     endif()
 endif()

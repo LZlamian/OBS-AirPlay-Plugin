@@ -20,6 +20,23 @@ Audit 2026-10-21, Phase 1:
   huge sender positions (MP-5), a VideoToolbox surface held while the screen
   is still (MP-8), refused redirects retried (MP-9), HLS attribute names
   (MP-10), thread creation on UxPlay's thread (MP-12).
+- The last picture of an AirPlay video item is shown for its own duration
+  before the item ends (a still clip's last frame used to end it at once).
+
+Audit 2026-10-21, Phase 2:
+- Release pipeline: actions pinned by commit and no stored token in
+  checkouts (SC-4); warnings are errors in CI and a weekly ThreadSanitizer
+  run (BC-2, BC-3); the release job runs the tests against the release
+  FFmpeg it ships (BC-1); dependencies are built in a private folder (SC-5);
+  `SHA256SUMS` is signed with the release key, which covers the `.pkg`
+  (SC-6); csrp and LGPL notices (SC-7).
+- The updater cancels a download larger than the release lists, and a
+  release check larger than 1 MiB (SC-3).
+- Tests: `AirPlayServer` with libobs stubbed (decode thread, backlog,
+  clock anchor, re-timer wiring); orientation, still clips, audio-only,
+  10-bit (software fallback), live and AES-128 HLS, two renditions; deadlines
+  scale with `OBS_AIRPLAY_TIMING_SCALE`; the protocol smoke names a failed
+  condition; configurable test ports (TS-2 to TS-5).
 
 ## 2.6.1 (2026-10-21)
 

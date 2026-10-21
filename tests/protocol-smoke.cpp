@@ -7,6 +7,8 @@
 
 #include <plist/plist.h>
 
+#include "test-timing.hpp"
+
 #include <chrono>
 #include <algorithm>
 #include <thread>
@@ -19,12 +21,16 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" {
 #include "dnssd.h"
 #include "raop.h"
 }
+
+// {"text of the condition", its value}
+#define PROTOCOL_CONDITION(x) {#x, static_cast<bool>(x)}
 
 namespace {
 
@@ -599,10 +605,7 @@ int main(int argc, char** argv)
         // stays within 100 ms on a developer Mac through the transfer and the
         // slow (1.5 s) spool write; OBS_AIRPLAY_TIMING_SCALE widens it on
         // slower machines.
-        double budget_ms = 100.0;
-        if (const char* env = std::getenv("OBS_AIRPLAY_TIMING_SCALE")) {
-            if (std::atof(env) >= 1.0) budget_ms *= std::atof(env);
-        }
+        const double budget_ms = 100.0 * timingScale();
         const bool in_budget = worst_poll_ms < budget_ms;
         std::printf("large_blob_transfer: %u bytes, %d polls, worst /playback-info %.1f ms "
                     "(budget %.0f ms) starting %.0f ms into the upload (reply at %.0f ms), "
@@ -888,51 +891,66 @@ int main(int argc, char** argv)
         access(file_spooled_location.c_str(), F_OK) != 0;
     const bool blob_spool_replaced = !blob_spooled_location.empty() &&
         access(blob_spooled_location.c_str(), F_OK) != 0;
-    const bool passed = native_response.find("200 OK") != std::string::npos &&
-        native_response.find("CSeq: 1") != std::string::npos &&
-        reverse_response.find("101 Switching Protocols") != std::string::npos &&
-        play_response.find("200 OK") != std::string::npos &&
-        unexpected_master_response.find("400 Bad Request") != std::string::npos &&
-        unexpected_media_response.find("400 Bad Request") != std::string::npos &&
-        playback_response.find("200 OK") != std::string::npos &&
-        playback_response.find("readyToPlay") != std::string::npos &&
-        rate_response.find("200 OK") != std::string::npos &&
-        scrub_response.find("200 OK") != std::string::npos &&
-        stop_response.find("200 OK") != std::string::npos &&
-        stateless_response.find("200 OK") != std::string::npos &&
-        classic_response.find("200 OK") != std::string::npos &&
-        unsafe_response.find("400 Bad Request") != std::string::npos &&
-        missing_response.find("400 Bad Request") != std::string::npos &&
-        missing_response.find("Connection: close") == std::string::npos &&
-        after_reject_response.find("200 OK") != std::string::npos &&
-        hosted_ok && insert_ok && paused_insert_ok &&
-        pending_response.find("200 OK") != std::string::npos &&
-        pending_fcup_request.find(pending_blob_url) != std::string::npos &&
-        pending_action_response.find("200 OK") != std::string::npos &&
-        blob_response.find("200 OK") != std::string::npos &&
-        blob_fcup_request.find(blob_url) != std::string::npos &&
-        blob_action_response.find("200 OK") != std::string::npos &&
-        blob_spooled && blob_spool_replaced &&
-        file_response.find("200 OK") != std::string::npos &&
-        file_fcup_request.find(file_url) != std::string::npos &&
-        file_action_response.find("200 OK") != std::string::npos &&
-        file_spooled && file_spool_cleaned &&
-        !selected_response.empty() &&
-        action_without_session.find("400 Bad Request") != std::string::npos &&
-        action_without_play_1.find("400 Bad Request") != std::string::npos &&
-        action_without_play_2.find("400 Bad Request") != std::string::npos &&
-        recovery_response.find("200 OK") != std::string::npos &&
-        action_missing_type_1.find("400 Bad Request") != std::string::npos &&
-        action_missing_type_2.find("400 Bad Request") != std::string::npos &&
-        action_wrong_session.find("400 Bad Request") != std::string::npos &&
-        invalid_action_response.find("400 Bad Request") != std::string::npos &&
-        state.first_location == "http://media.example.test/sample.mp4" &&
-        state.location == "https://example.test/recovery.mp4" &&
-        std::fabs(state.start_position) < 0.001f &&
-        std::fabs(state.playback_rate - 0.5f) < 0.001f &&
-        std::fabs(state.scrub_position - 80.5f) < 0.001f &&
-        state.stop_count == 6 && state.playback_info_count == 2 + polls &&
-        state.play_count == 11;
+    // Each condition by name, so a failure says which one.
+    const std::pair<const char*, bool> conditions[] = {
+        PROTOCOL_CONDITION(native_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(native_response.find("CSeq: 1") != std::string::npos),
+        PROTOCOL_CONDITION(reverse_response.find("101 Switching Protocols") != std::string::npos),
+        PROTOCOL_CONDITION(play_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(unexpected_master_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(unexpected_media_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(playback_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(playback_response.find("readyToPlay") != std::string::npos),
+        PROTOCOL_CONDITION(rate_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(scrub_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(stop_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(stateless_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(classic_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(unsafe_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(missing_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(missing_response.find("Connection: close") == std::string::npos),
+        PROTOCOL_CONDITION(after_reject_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(hosted_ok),
+        PROTOCOL_CONDITION(insert_ok),
+        PROTOCOL_CONDITION(paused_insert_ok),
+        PROTOCOL_CONDITION(pending_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(pending_fcup_request.find(pending_blob_url) != std::string::npos),
+        PROTOCOL_CONDITION(pending_action_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(blob_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(blob_fcup_request.find(blob_url) != std::string::npos),
+        PROTOCOL_CONDITION(blob_action_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(blob_spooled),
+        PROTOCOL_CONDITION(blob_spool_replaced),
+        PROTOCOL_CONDITION(file_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(file_fcup_request.find(file_url) != std::string::npos),
+        PROTOCOL_CONDITION(file_action_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(file_spooled),
+        PROTOCOL_CONDITION(file_spool_cleaned),
+        PROTOCOL_CONDITION(!selected_response.empty()),
+        PROTOCOL_CONDITION(action_without_session.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_without_play_1.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_without_play_2.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(recovery_response.find("200 OK") != std::string::npos),
+        PROTOCOL_CONDITION(action_missing_type_1.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_missing_type_2.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(action_wrong_session.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(invalid_action_response.find("400 Bad Request") != std::string::npos),
+        PROTOCOL_CONDITION(state.first_location == "http://media.example.test/sample.mp4"),
+        PROTOCOL_CONDITION(state.location == "https://example.test/recovery.mp4"),
+        PROTOCOL_CONDITION(std::fabs(state.start_position) < 0.001f),
+        PROTOCOL_CONDITION(std::fabs(state.playback_rate - 0.5f) < 0.001f),
+        PROTOCOL_CONDITION(std::fabs(state.scrub_position - 80.5f) < 0.001f),
+        PROTOCOL_CONDITION(state.stop_count == 6),
+        PROTOCOL_CONDITION(state.playback_info_count == 2 + polls),
+        PROTOCOL_CONDITION(state.play_count == 11),
+    };
+    bool passed = true;
+    for (const auto& condition : conditions) {
+        if (!condition.second) {
+            std::printf("FAILED: %s\n", condition.first);
+            passed = false;
+        }
+    }
     std::printf("sender_hosted=%s hosted_url=%s hosted_start=%.3f reject_keeps_connection=%s\n",
                 hosted_ok ? "ok" : "failed", hosted_location.c_str(), hosted_start,
                 after_reject_response.find("200 OK") != std::string::npos ? "yes" : "no");

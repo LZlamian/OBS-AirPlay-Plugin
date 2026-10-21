@@ -25,6 +25,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <sys/resource.h>
 #include <vector>
@@ -57,6 +59,42 @@ struct Stream {
     std::vector<std::vector<uint8_t>> packets;
 };
 
+// An H.264 Annex B file (FILE.h264 next to FILE.mp4) split into access
+// units with the H.264 parser: the release FFmpeg has no bitstream filters
+// but has the parser the mirror path also relies on.
+bool loadRawAnnexB(const std::string& path, Stream* out)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                     std::istreambuf_iterator<char>());
+    const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    AVCodecParserContext* parser = av_parser_init(AV_CODEC_ID_H264);
+    AVCodecContext* context = codec ? avcodec_alloc_context3(codec) : nullptr;
+    if (!parser || !context) {
+        if (parser) av_parser_close(parser);
+        avcodec_free_context(&context);
+        return false;
+    }
+    out->codec = AV_CODEC_ID_H264;
+    size_t at = 0;
+    for (;;) {
+        uint8_t* unit = nullptr;
+        int unit_size = 0;
+        const int remaining = static_cast<int>(bytes.size() - at);
+        const int used = av_parser_parse2(parser, context, &unit, &unit_size,
+                                          remaining ? bytes.data() + at : nullptr, remaining,
+                                          AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        if (used < 0) break;
+        at += static_cast<size_t>(used);
+        if (unit_size > 0) out->packets.emplace_back(unit, unit + unit_size);
+        if (remaining == 0) break;  // flushed
+    }
+    av_parser_close(parser);
+    avcodec_free_context(&context);
+    return !out->packets.empty();
+}
+
 bool loadAnnexB(const char* path, Stream* out)
 {
     AVFormatContext* format = nullptr;
@@ -78,7 +116,11 @@ bool loadAnnexB(const char* path, Stream* out)
     AVBSFContext* bsf = nullptr;
     if (!filter || av_bsf_alloc(filter, &bsf) < 0) {
         avformat_close_input(&format);
-        return false;
+        std::string raw = path;
+        const size_t extension = raw.rfind(".mp4");
+        if (extension == std::string::npos || out->codec != AV_CODEC_ID_H264) return false;
+        raw.replace(extension, 4, ".h264");
+        return loadRawAnnexB(raw, out);
     }
     avcodec_parameters_copy(bsf->par_in, stream->codecpar);
     bsf->time_base_in = stream->time_base;
