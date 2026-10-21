@@ -2,6 +2,24 @@
 
 Release notes for each version are in [docs/releases/](docs/releases/).
 
+## 2.6.1 (unreleased)
+
+Security hotfix (audit 2026-10-21, Phase 0):
+- HLS master playlists from a sender (upstream UxPlay code): the audio
+  language parser no longer overflows on a long `LANGUAGE`, divides by zero
+  on a single entry or reads `languages[-1]` without a default (NET-1, NET-2,
+  NET-3); the media URI table no longer reads past the playlist, and an
+  empty one no longer leaves a zero-length store. Fork commits `99cbde2`,
+  `d324806`, `1beb90d`.
+- Mirror codec packets: SPS/PPS/VPS lengths are unsigned and checked against
+  the payload (NET-4, fork `4a077a8`).
+- "From any web address": a host name that does not resolve is refused
+  (NET-5, first part).
+- The release job no longer restores the dependency cache (SC-1).
+- CI runs every test, with the fuzz targets, under ASan and UBSan; new
+  `obs-airplay-fuzz-master-playlist`; the protocol smoke sends the NET-1/2/3
+  playlists (TS-1).
+
 ## 2.6.0 (2026-10-18)
 
 Receiver setting **AirPlay video** (Off / Only from the sending device, the

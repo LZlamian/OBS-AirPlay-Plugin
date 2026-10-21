@@ -1008,6 +1008,84 @@ int main(int argc, char** argv)
         plays_after_late_reply == plays_before_late_reply;
     std::printf("stop_cancels_reverse_fetch=%s\n", stop_cancels_fetch ? "ok" : "FAILED");
 
+    // Master playlists that crashed the receiver (UxPlay's HLS language
+    // choice and media URI table, audit 2026-10-21): a LANGUAGE longer than
+    // its 6-byte field (NET-1), exactly one entry (count/0, NET-2), no
+    // DEFAULT=YES and no preferred-language match (languages[-1], NET-3),
+    // and no URI under the item's prefix (a zero-length media store). Each
+    // is the reply to the sender's own HLS /play; the receiver must keep
+    // answering afterwards.
+    const auto media_line = [](const std::string& prefix, const std::string& lang,
+                               const char* is_default, const char* name) {
+        return "#EXT-X-MEDIA:URI=\"" + prefix + "/" + lang.substr(0, 8) +
+            "/index.m3u8\",TYPE=AUDIO,GROUP-ID=\"233\",DEFAULT=" + is_default +
+            ",AUTOSELECT=YES,NAME=\"" + name + "\",LANGUAGE=\"" + lang +
+            "\",YT-EXT-AUDIO-CONTENT-ID=\"" + lang + ".4\"\n";
+    };
+    const auto variant_lines = [](const std::string& prefix) {
+        return "#EXT-X-STREAM-INF:BANDWIDTH=1176518,CODECS=\"avc1.4d401f,mp4a.40.2\","
+               "AUDIO=\"233\"\n" + prefix + "/230/index.m3u8\n";
+    };
+    const auto hls_prefix = [](const char* label) {
+        return std::string("http://media.example.test/") + label;
+    };
+    const std::string net1 = hls_prefix("net1-long-language");
+    const std::string long_language(300, 'A');
+    const std::string net1_playlist = "#EXTM3U\n" +
+        media_line(net1, long_language, "YES", "English") +
+        media_line(net1, long_language, "NO", "French") + variant_lines(net1);
+    const std::string net2 = hls_prefix("net2-one-entry");
+    const std::string net2_playlist = "#EXTM3U\n" + media_line(net2, "en", "YES", "English") +
+        variant_lines(net2);
+    const std::string net3 = hls_prefix("net3-no-default");
+    const std::string net3_playlist = "#EXTM3U\n" + media_line(net3, "en", "NO", "English") +
+        media_line(net3, "fr", "NO", "French") + variant_lines(net3);
+    const std::string foreign = hls_prefix("other-host");
+    const std::string foreign_playlist = "#EXTM3U\n" +
+        media_line(foreign, "en", "YES", "English") + variant_lines(foreign);
+    const auto hls_master_reply = [&](const char* label, const char* uuid,
+                                      const std::string& playlist) {
+        const std::string url = hls_prefix(label) + "/master.m3u8";
+        plist_t hls_root = plist_new_dict();
+        plist_dict_set_item(hls_root, "uuid", plist_new_string(uuid));
+        plist_dict_set_item(hls_root, "Content-Location", plist_new_string(url.c_str()));
+        const std::string hls_play_response =
+            binaryPlistExchange(port, "/play", session, hls_root);
+        plist_free(hls_root);
+        // (the previous item's media-playlist requests may come first)
+        const std::string hls_fcup_request = receiveUntil(reverse_fd, url.c_str());
+        plist_t hls_params = plist_new_dict();
+        plist_dict_set_item(hls_params, "FCUP_Response_StatusCode", plist_new_uint(200));
+        plist_dict_set_item(hls_params, "FCUP_Response_RequestID", plist_new_uint(1));
+        plist_dict_set_item(hls_params, "FCUP_Response_URL", plist_new_string(url.c_str()));
+        plist_dict_set_item(hls_params, "FCUP_Response_Data",
+                            plist_new_data(playlist.data(), playlist.size()));
+        plist_t hls_action = plist_new_dict();
+        plist_dict_set_item(hls_action, "type", plist_new_string("unhandledURLResponse"));
+        plist_dict_set_item(hls_action, "params", hls_params);
+        const std::string hls_action_response =
+            binaryPlistExchange(port, "/action", session, hls_action);
+        plist_free(hls_action);
+        const std::string alive_response =
+            httpExchange(port, control_request("GET", "/playback-info"));
+        httpExchange(port, control_request("POST", "/stop"));
+        const bool ok = hls_play_response.find("200 OK") != std::string::npos &&
+            hls_fcup_request.find(url) != std::string::npos &&
+            !hls_action_response.empty() &&
+            alive_response.find("200 OK") != std::string::npos;
+        std::printf("hls_master_%s=%s\n", label, ok ? "ok" : "FAILED");
+        return ok;
+    };
+    const bool hls_master_ok =
+        hls_master_reply("net1-long-language", "eeeeeeee-0000-0000-0000-000000000001",
+                         net1_playlist) &&
+        hls_master_reply("net2-one-entry", "eeeeeeee-0000-0000-0000-000000000002",
+                         net2_playlist) &&
+        hls_master_reply("net3-no-default", "eeeeeeee-0000-0000-0000-000000000003",
+                         net3_playlist) &&
+        hls_master_reply("foreign-uris", "eeeeeeee-0000-0000-0000-000000000004",
+                         foreign_playlist);
+
     // Closing the last AirPlay video connection without POST /stop must stop
     // URL playback so the output does not keep a stale frame.
     int stops_before_close = 0;
@@ -1424,7 +1502,7 @@ int main(int argc, char** argv)
     raop_stop_httpd(raop);
     raop_destroy(raop);
     dnssd_destroy(dnssd);
-    return passed && stop_cancels_fetch && close_stops && fp_setup2_ok && nul_string_ok &&
+    return passed && stop_cancels_fetch && hls_master_ok && close_stops && fp_setup2_ok && nul_string_ok &&
         stall_ok && policy_ok &&
         video_settings_ok &&
         oversized_ok && budget_ok && nonreader_ok && binding_ok && features_ok && large_transfer_ok ? 0 : 1;

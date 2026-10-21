@@ -60,13 +60,17 @@ media on a worker thread and must keep answering meanwhile.
 `media-resilient-http` plays through `tests/truncating-server.py`, which cuts
 every response short, as some sender media servers do.
 
-Fuzzing: configure with `--preset asan -DOBS_AIRPLAY_FUZZ=ON` for
+Fuzzing: the `asan` preset builds (`-DOBS_AIRPLAY_FUZZ=ON`)
 `obs-airplay-fuzz-hls`, `-fuzz-h264` (mirror access units into the software
-decoder), `-fuzz-http-request` (the fork's request parser) and
+decoder), `-fuzz-http-request` (the fork's request parser),
+`-fuzz-master-playlist` (HLS master playlists a sender returns to `/action`:
+the fork's audio-language choice, URI table and prefix rewrite) and
 `-fuzz-requests` (request sequences through the receiver's handlers: `/play`,
 `/action`, playback controls and RTSP, with binary plist bodies; seeds from
 `tests/fuzz/make-request-seeds.py`, receiver log with
-`OBS_AIRPLAY_FUZZ_VERBOSE=1`), each with a short `fuzz-*` CTest run. With a
+`OBS_AIRPLAY_FUZZ_VERBOSE=1`), each with a short `fuzz-*` CTest run; CI runs
+every test in that build. The test preset sets `UBSAN_OPTIONS=halt_on_error=1`,
+so undefined behaviour fails a test instead of only printing. With a
 clang that has libFuzzer's runtime (not Apple's) they are libFuzzer binaries;
 otherwise `tests/fuzz/fuzz-driver.cpp` runs seeded random mutations:
 `obs-airplay-fuzz-requests -runs=1000000 -seed=7 tests/fuzz/seeds/requests-*.bin`.

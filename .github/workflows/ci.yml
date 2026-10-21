@@ -79,13 +79,13 @@ jobs:
         run: |
           brew install cmake pkg-config ffmpeg libplist openssl@3
           brew install --cask obs
-      - name: AddressSanitizer + UBSan
+      - name: AddressSanitizer + UBSan (every test, plus the fuzz runs)
         env:
           OBS_AIRPLAY_TIMING_SCALE: "5"   # sanitizers add to that
         run: |
           cmake --preset asan
           cmake --build --preset asan -j4
-          ctest --preset asan -j2 -R 'protocol|media-'
+          ctest --preset asan -j2
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -102,12 +102,9 @@ jobs:
         run: |
           brew install cmake pkg-config libplist openssl@3
           brew install --cask obs
-      - name: Release dependencies (cached by the script's content)
-        id: deps
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/obs-airplay-release-deps
-          key: release-deps-arm64-${{ hashFiles('scripts/build-macos-release-deps.sh') }}
+      # Built from the SHA-256-pinned sources on every release, never
+      # restored from a cache: any push to a branch can save a cache entry
+      # that this approved job would then sign (audit 2026-10-21, SC-1).
       - name: Build release dependencies
         run: scripts/build-macos-release-deps.sh
       - name: Package

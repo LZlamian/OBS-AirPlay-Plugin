@@ -34,8 +34,8 @@ void setLocalFilesAllowedForTesting(bool allowed);
 //
 // checkItem: the URL the receiver accepted for the item. A literal address
 // was already checked with the sender's address in mind; a host name is
-// resolved, and refused if any of its addresses is loopback, unspecified,
-// multicast, reserved or link-local. "localhost" is only produced by the
+// resolved, and refused if it does not resolve or any of its addresses is
+// loopback, unspecified, multicast, reserved or link-local. "localhost" is only produced by the
 // receiver's own HLS proxy. With setSenderOnly, a host name is refused.
 std::string checkItem(const std::string& url);
 // checkNested: any other URL fetched for the item. Same host and port as the

@@ -157,9 +157,10 @@ std::string checkHost(const std::string& host)
     addrinfo* results = nullptr;
     const int error = getaddrinfo(host.c_str(), nullptr, &hints, &results);
     if (error != 0 || !results) {
-        // Nothing to fetch from; FFmpeg reports the failure itself.
+        // Refused, not left to FFmpeg: its own lookup may get a different
+        // answer (a resolver that times out here, a name that rebinds).
         if (results) freeaddrinfo(results);
-        return "";
+        return "host name could not be resolved";
     }
     std::string refused;
     for (const addrinfo* entry = results; entry && refused.empty(); entry = entry->ai_next) {

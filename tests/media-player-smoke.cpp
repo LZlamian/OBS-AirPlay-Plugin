@@ -560,7 +560,9 @@ int urlPolicy()
     const Case nested[] = {
         {"https://cdn.example.test/seg1.ts", true},
         {"https://cdn.example.test:443/key", true},
-        {"http://cdn.example.test:8080/seg.ts", true},
+        // A name that does not resolve is refused (fail closed); .invalid
+        // names never resolve (whether .test does depends on the resolver).
+        {"http://segments.invalid/seg.ts", false},
         {"http://127.0.0.1/seg.ts", false},
         {"http://127.0.0.1:631/", false},
         {"http://localhost:8080/x", false},
@@ -629,7 +631,15 @@ int urlPolicy()
     if (!checkItem("http://localhost:7000/master.m3u8").empty()) ++failures;
     if (checkItem("https://cdn.example.test/x.mp4").find("sending device") == std::string::npos) ++failures;
     setSenderOnly(false);
-    if (!checkNested("http://cdn.example.test:8080/seg2.ts", item).empty()) ++failures;
+    if (!checkNested("http://10.0.0.1:8080/seg2.ts", item).empty()) ++failures;
+    if (checkNested("http://segments.invalid/seg.ts", item).find("could not be resolved") ==
+        std::string::npos) {
+        ++failures;
+    }
+    if (checkItem("https://cdn.invalid/x.mp4").find("could not be resolved") ==
+        std::string::npos) {
+        ++failures;
+    }
 
     const auto ports = parsePortList("80, 443,8080");
     if (ports.size() != 3 || ports[2] != 8080 || !parsePortList("80,http").empty()) ++failures;

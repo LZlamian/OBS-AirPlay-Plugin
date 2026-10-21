@@ -5,7 +5,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         "Oldest macOS version supported by the packaged plugin")
 endif()
 
-project(obs-airplay VERSION 2.6.0)
+project(obs-airplay VERSION 2.6.1)
 
 # A plain `cmake ..` used to build without optimisation.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -553,6 +553,13 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/uxplay/lib ${PLIST_TEST_INCLUDE_DIRS})
         target_link_libraries(obs-airplay-fuzz-requests PRIVATE airplay)
 
+        # HLS master playlists from the sender (/action replies to an HLS
+        # /play): audio-language choice, URI table, local-prefix rewrite.
+        obs_airplay_fuzz_target(obs-airplay-fuzz-master-playlist tests/fuzz/fuzz-master-playlist.cpp)
+        target_include_directories(obs-airplay-fuzz-master-playlist PRIVATE
+            ${CMAKE_SOURCE_DIR}/uxplay/lib ${PLIST_TEST_INCLUDE_DIRS})
+        target_link_libraries(obs-airplay-fuzz-master-playlist PRIVATE airplay)
+
         set(FUZZ_SEEDS "${CMAKE_SOURCE_DIR}/tests/fuzz/seeds")
         if(OBS_AIRPLAY_HAVE_LIBFUZZER)
             set(FUZZ_RUNS -runs=20000)
@@ -565,7 +572,10 @@ if(BUILD_TESTING)
         add_test(NAME fuzz-requests COMMAND obs-airplay-fuzz-requests ${FUZZ_RUNS}
                  "${FUZZ_SEEDS}/requests-video.bin" "${FUZZ_SEEDS}/requests-hls.bin"
                  "${FUZZ_SEEDS}/requests-rtsp.bin")
-        set_tests_properties(fuzz-hls fuzz-http-request fuzz-requests PROPERTIES TIMEOUT 300)
+        add_test(NAME fuzz-master-playlist COMMAND obs-airplay-fuzz-master-playlist ${FUZZ_RUNS}
+                 "${FUZZ_SEEDS}/master-languages.m3u8" "${FUZZ_SEEDS}/master.m3u8")
+        set_tests_properties(fuzz-hls fuzz-http-request fuzz-requests fuzz-master-playlist
+                             PROPERTIES TIMEOUT 300)
     endif()
 
     # ---- CTest: every smoke, with media generated at test time ----------
