@@ -49,8 +49,15 @@ Versions before 2.6 also installed a copy in
 
 Start with the source's **Status** line (right-click the source > Properties):
 it says whether the receiver runs, on which port, whether a device is connected,
-and what is wrong when it does not run. Then run `./diagnose.sh` from the source
-folder while OBS is open; it needs no administrator rights and changes nothing.
+and what is wrong when it does not run. Then run the diagnostics script while
+OBS is open; it needs no administrator rights and changes nothing. It comes
+inside the plugin (from v2.7.0):
+
+```bash
+bash ~/Library/Application\ Support/obs-studio/plugins/obs-airplay.plugin/Contents/Resources/diagnose.sh
+```
+
+(from a source checkout: `./diagnose.sh`).
 
 ### Devices do not list the receiver
 

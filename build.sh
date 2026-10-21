@@ -72,16 +72,14 @@ echo -e "${GREEN}All dependencies satisfied!${NC}\n"
 # sources are cached in ~/Library/Caches, not here)
 echo -e "${YELLOW}Configuring CMake...${NC}"
 rm -rf build
-cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_TESTING=OFF \
+cmake --preset plugin \
     -DOBS_BUNDLE_PATH="${OBS_BUNDLE_PATH}" \
     -DCMAKE_OSX_ARCHITECTURES="$(uname -m)"
-cd build
 
 # Build
 echo -e "${YELLOW}Building plugin...${NC}"
-cmake --build . --config Release -j"$(sysctl -n hw.ncpu)"
+cmake --build --preset plugin -j"$(sysctl -n hw.ncpu)"
+cd build
 
 echo -e "${GREEN}Build complete!${NC}\n"
 

@@ -187,9 +187,16 @@ video may fetch from on hosts other than the sending device.
 
 ## Troubleshooting
 
-Run `./diagnose.sh` from the source folder while OBS is open (no administrator
-rights needed). It checks the installation, ports, firewall, Bonjour
-advertisement and the OBS log, and says what to change.
+Run the diagnostics script while OBS is open (no administrator rights
+needed). It checks the installation, ports, firewall, Bonjour advertisement
+and the OBS log, and says what to change. It comes inside the plugin (from
+v2.7.0); in Terminal:
+
+```bash
+bash ~/Library/Application\ Support/obs-studio/plugins/obs-airplay.plugin/Contents/Resources/diagnose.sh
+```
+
+From a source checkout it is `./diagnose.sh`.
 
 - **The receiver is not in the Screen Mirroring list**: check the source's
   Status line; make sure both devices are on the same network (not a guest

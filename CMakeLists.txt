@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16...3.26)
+cmake_minimum_required(VERSION 3.21...3.31)  # CMakePresets.json needs 3.21
 
 if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
@@ -85,9 +85,7 @@ if(APPLE)
             "OBS headers not found: obs-headers/libobs is missing from the checkout.")
     endif()
     message(STATUS "OBS headers: ${OBS_INCLUDE_DIR}")
-    if(EXISTS "${CMAKE_SOURCE_DIR}/obs-headers/simde/simde")
-        include_directories("${CMAKE_SOURCE_DIR}/obs-headers/simde")
-    else()
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/obs-headers/simde/simde")
         message(FATAL_ERROR "SIMDe headers not found at obs-headers/simde")
     endif()
 
@@ -135,8 +133,11 @@ if(APPLE)
         message(FATAL_ERROR "Could not find libobs library. Please check the above paths.")
     endif()
     
-    # Add OBS include directory
-    include_directories(${OBS_INCLUDE_DIR})
+    # libobs headers (and SIMDe, which they include) for the targets that
+    # use them, not the whole directory: the UxPlay fork does not.
+    add_library(obs_headers INTERFACE)
+    target_include_directories(obs_headers INTERFACE
+        ${OBS_INCLUDE_DIR} "${CMAKE_SOURCE_DIR}/obs-headers/simde")
     
     message(STATUS "=== OBS Configuration ===")
     message(STATUS "OBS Bundle: ${OBS_BUNDLE_PATH}")
@@ -223,6 +224,7 @@ endif()
 
 # Link libraries
 target_link_libraries(obs-airplay PRIVATE
+    obs_headers
     ${LIBOBS_LIB}
     ${FFMPEG_LIBRARIES}
     airplay  # UxPlay library
@@ -237,19 +239,6 @@ target_link_directories(obs-airplay PRIVATE
 if(APPLE)
     enable_language(OBJCXX)
 
-    # Get the macOS SDK path
-    execute_process(
-        COMMAND xcrun --show-sdk-path
-        OUTPUT_VARIABLE MACOS_SDK_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    
-    if(MACOS_SDK_PATH)
-        message(STATUS "macOS SDK path: ${MACOS_SDK_PATH}")
-        include_directories("${MACOS_SDK_PATH}/usr/include")
-    endif()
-    
     # On modern macOS, dns_sd is part of the System framework
     # We need to link against System.framework which contains it
     find_library(SYSTEM_LIBRARY System REQUIRED)
@@ -372,7 +361,10 @@ if(APPLE)
                 "${PLUGIN_BUNDLE_DIR}/Contents/Resources/THIRD_PARTY_NOTICES.md"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/licenses"
                 "${PLUGIN_BUNDLE_DIR}/Contents/Resources/licenses"
-        
+        # For installs from the pkg or zip, which have no source folder.
+        COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/diagnose.sh"
+                "${PLUGIN_BUNDLE_DIR}/Contents/Resources/diagnose.sh"
+
         # Copy Info.plist
         COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_BINARY_DIR}/Info.plist" "${PLUGIN_BUNDLE_DIR}/Contents/Info.plist"
         
@@ -441,7 +433,7 @@ if(BUILD_TESTING)
     target_link_directories(obs-airplay-media-smoke PRIVATE
         ${FFMPEG_LIBRARY_DIRS}
     )
-    target_link_libraries(obs-airplay-media-smoke PRIVATE
+    target_link_libraries(obs-airplay-media-smoke PRIVATE obs_headers
         ${FFMPEG_LIBRARIES}
     )
     if(APPLE)
@@ -461,7 +453,7 @@ if(BUILD_TESTING)
     target_link_directories(obs-airplay-decoder-smoke PRIVATE
         ${FFMPEG_LIBRARY_DIRS}
     )
-    target_link_libraries(obs-airplay-decoder-smoke PRIVATE
+    target_link_libraries(obs-airplay-decoder-smoke PRIVATE obs_headers
         ${FFMPEG_LIBRARIES}
     )
     if(APPLE)
@@ -504,7 +496,8 @@ if(BUILD_TESTING)
     )
     target_link_directories(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARY_DIRS}
         ${PLIST_TEST_LIBRARY_DIRS})
-    target_link_libraries(obs-airplay-unit-tests PRIVATE ${FFMPEG_LIBRARIES} ${PLIST_TEST_LIBRARIES})
+    target_link_libraries(obs-airplay-unit-tests PRIVATE obs_headers ${FFMPEG_LIBRARIES}
+        ${PLIST_TEST_LIBRARIES})
 
     # AirPlayServer with libobs stubbed: decode thread, backlog, clock anchor.
     add_executable(obs-airplay-airplay-server-tests
@@ -521,7 +514,7 @@ if(BUILD_TESTING)
         ${PLIST_TEST_INCLUDE_DIRS}
     )
     target_link_directories(obs-airplay-airplay-server-tests PRIVATE ${FFMPEG_LIBRARY_DIRS})
-    target_link_libraries(obs-airplay-airplay-server-tests PRIVATE ${FFMPEG_LIBRARIES})
+    target_link_libraries(obs-airplay-airplay-server-tests PRIVATE obs_headers ${FFMPEG_LIBRARIES})
     if(APPLE)
         target_link_libraries(obs-airplay-airplay-server-tests PRIVATE "-framework CoreVideo")
     endif()
@@ -571,7 +564,7 @@ if(BUILD_TESTING)
         target_include_directories(obs-airplay-fuzz-h264 PRIVATE
             ${CMAKE_SOURCE_DIR}/src ${OBS_INCLUDE_DIR} ${FFMPEG_INCLUDE_DIRS})
         target_link_directories(obs-airplay-fuzz-h264 PRIVATE ${FFMPEG_LIBRARY_DIRS})
-        target_link_libraries(obs-airplay-fuzz-h264 PRIVATE ${FFMPEG_LIBRARIES})
+        target_link_libraries(obs-airplay-fuzz-h264 PRIVATE obs_headers ${FFMPEG_LIBRARIES})
         if(APPLE)
             target_link_libraries(obs-airplay-fuzz-h264 PRIVATE "-framework CoreVideo")
         endif()

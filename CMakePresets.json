@@ -12,6 +12,15 @@
       }
     },
     {
+      "name": "plugin",
+      "displayName": "Release, plugin only (build.sh)",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF"
+      }
+    },
+    {
       "name": "debug",
       "displayName": "Debug (with tests)",
       "inherits": "release",
@@ -49,6 +58,7 @@
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
+    { "name": "plugin", "configurePreset": "plugin" },
     { "name": "debug", "configurePreset": "debug" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "tsan", "configurePreset": "tsan" }
