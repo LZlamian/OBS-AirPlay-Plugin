@@ -38,6 +38,18 @@ Audit 2026-10-21, Phase 2:
   scale with `OBS_AIRPLAY_TIMING_SCALE`; the protocol smoke names a failed
   condition; configurable test ports (TS-2 to TS-5).
 
+Audit 2026-10-21, Phase 3:
+- UxPlay fork: the spool worker is its own file and cannot be restarted
+  after shutdown (CQ-3, NET-6); no `exit()` on allocation failure (CQ-4);
+  URL parsing and address classes shared with the plugin, so the policy
+  exists once (CQ-2).
+- Plugin: UxPlay callbacks in a table, `start()`, `playItem` and module load
+  split up (CQ-1); naming, FFmpeg 6.1 floor, log tags, quieter logs at the
+  default level (CQ-5 to CQ-9, PF-1, PF-2).
+- Build and docs: header targets instead of global include paths, a
+  `plugin` preset (BC-4); `diagnose.sh` ships inside the plugin bundle
+  (DC-2); every switch and environment variable documented (DC-3).
+
 ## 2.6.1 (2026-10-21)
 
 Security hotfix (audit 2026-10-21, Phase 0):
